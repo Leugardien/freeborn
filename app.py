@@ -113,11 +113,6 @@ def init_database():
                     """
                 )
 
-                # --------------------------------------------
-                # Sync status columns
-                # Existing table is upgraded automatically.
-                # --------------------------------------------
-
                 cur.execute(
                     """
                     ALTER TABLE eve_characters
@@ -234,6 +229,53 @@ def get_all_characters():
             )
 
             return cur.fetchall()
+
+
+def get_database_stats():
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM eve_characters;
+                """
+            )
+            character_count = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM eve_characters
+                WHERE character_type = 'main';
+                """
+            )
+            main_count = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM eve_characters
+                WHERE character_type = 'alt';
+                """
+            )
+            alt_count = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM eve_characters
+                WHERE in_corporation = FALSE;
+                """
+            )
+            outside_count = cur.fetchone()[0]
+
+    return {
+        "characters": character_count,
+        "mains": main_count,
+        "alts": alt_count,
+        "outside_corporation": outside_count,
+    }
 
 
 def save_main_character(
@@ -527,10 +569,6 @@ def verify_discord_signature(req):
 
 
 def interaction_is_admin(data):
-    """
-    Discord Administrator permission bit = 1 << 3 = 8
-    """
-
     try:
         permissions = int(
             data["member"]["permissions"]
@@ -768,13 +806,6 @@ def sync_discord_nickname(
 def revoke_main_access(
     discord_user_id,
 ):
-    """
-    Main left Freeborn:
-    remove all verification/access roles.
-
-    Database records are NOT deleted.
-    """
-
     role_ids = [
         DISCORD_MEMBER_ROLE_ID,
         DISCORD_EVE_VERIFIED_ROLE_ID,
@@ -804,13 +835,6 @@ def revoke_alt_role_if_needed(
     discord_user_id,
     sync_results,
 ):
-    """
-    Remove Alt Character role only when:
-    - Main is still Freeborn.
-    - Every known alt received a valid ESI result.
-    - None of those alts remains in Freeborn.
-    """
-
     user_results = [
         item
         for item in sync_results
@@ -848,14 +872,12 @@ def revoke_alt_role_if_needed(
     if not alt_results:
         return None
 
-    # If one alt has an ESI error, do nothing.
     if any(
         item["status"] != "ok"
         for item in alt_results
     ):
         return None
 
-    # At least one alt is still Freeborn.
     if any(
         item["in_corporation"]
         for item in alt_results
@@ -930,11 +952,6 @@ def run_sync(
                 timeout=15,
             )
 
-            # --------------------------------------------
-            # CRITICAL SECURITY:
-            # Any non-200 response = NO REVOCATION.
-            # --------------------------------------------
-
             if response.status_code != 200:
                 result["status"] = "esi_error"
 
@@ -978,11 +995,6 @@ def run_sync(
                 "current_corporation_id"
             ] = current_corporation_id
 
-            # --------------------------------------------
-            # Only real sync updates database state.
-            # /sync-check stays entirely read-only.
-            # --------------------------------------------
-
             if apply_changes:
                 update_character_sync_status(
                     character_id,
@@ -1002,10 +1014,6 @@ def run_sync(
         sync_results.append(
             result
         )
-
-    # ========================================================
-    # APPLY DISCORD REVOCATIONS
-    # ========================================================
 
     actions = []
 
@@ -1040,15 +1048,9 @@ def run_sync(
                 )
             ]
 
-            # --------------------------------------------
-            # MAIN LOGIC
-            # --------------------------------------------
-
             if main_results:
                 main = main_results[0]
 
-                # ESI ERROR:
-                # absolutely no account revocation.
                 if (
                     main["status"]
                     != "ok"
@@ -1066,8 +1068,6 @@ def run_sync(
 
                     continue
 
-                # MAIN CONFIRMED OUTSIDE CORP:
-                # revoke all access roles.
                 if not main["in_corporation"]:
                     role_results = (
                         revoke_main_access(
@@ -1092,11 +1092,6 @@ def run_sync(
                     })
 
                     continue
-
-            # --------------------------------------------
-            # ALT LOGIC
-            # Main remains valid.
-            # --------------------------------------------
 
             alt_result = (
                 revoke_alt_role_if_needed(
@@ -1298,58 +1293,7 @@ def health():
 @app.route("/db-health")
 def db_health():
     try:
-        with psycopg.connect(
-            DATABASE_URL
-        ) as conn:
-
-            with conn.cursor() as cur:
-
-                cur.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM eve_characters;
-                    """
-                )
-
-                character_count = (
-                    cur.fetchone()[0]
-                )
-
-                cur.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM eve_characters
-                    WHERE character_type = 'main';
-                    """
-                )
-
-                main_count = (
-                    cur.fetchone()[0]
-                )
-
-                cur.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM eve_characters
-                    WHERE character_type = 'alt';
-                    """
-                )
-
-                alt_count = (
-                    cur.fetchone()[0]
-                )
-
-                cur.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM eve_characters
-                    WHERE in_corporation = FALSE;
-                    """
-                )
-
-                outside_count = (
-                    cur.fetchone()[0]
-                )
+        stats = get_database_stats()
 
         return {
             "status":
@@ -1362,16 +1306,16 @@ def db_health():
                 "eve_characters",
 
             "characters":
-                character_count,
+                stats["characters"],
 
             "mains":
-                main_count,
+                stats["mains"],
 
             "alts":
-                alt_count,
+                stats["alts"],
 
             "outside_corporation":
-                outside_count,
+                stats["outside_corporation"],
         }
 
     except Exception as error:
@@ -1461,6 +1405,69 @@ def interactions():
         })
 
     # ========================================================
+    # /db-health
+    # ========================================================
+
+    if command_name == "db-health":
+
+        try:
+            stats = (
+                get_database_stats()
+            )
+
+        except Exception as error:
+            print(
+                "Discord db-health failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "🗄️ **Freeborn Database**\n\n"
+                        "❌ Base de données indisponible.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        message = (
+            "🗄️ **Freeborn Database Health**\n\n"
+
+            "✅ Statut : **Connectée**\n"
+            "📋 Table : **eve_characters**\n\n"
+
+            f"👥 Personnages : "
+            f"**{stats['characters']}**\n"
+
+            f"🔗 Main Characters : "
+            f"**{stats['mains']}**\n"
+
+            f"🔹 Alt Characters : "
+            f"**{stats['alts']}**\n"
+
+            f"🚪 Hors corporation : "
+            f"**{stats['outside_corporation']}**"
+        )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    message,
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
     # /sync-check
     # ========================================================
 
@@ -1512,8 +1519,6 @@ def interactions():
 
     # ========================================================
     # /sync-apply
-    # REAL REVOCATION
-    # ADMIN ONLY
     # ========================================================
 
     if command_name == "sync-apply":
@@ -1856,8 +1861,7 @@ def callback():
 
     if (
         guild_id
-        !=
-        DISCORD_GUILD_ID
+        != DISCORD_GUILD_ID
     ):
         return """
         <h1>Freeborn Verify</h1>
@@ -2243,6 +2247,18 @@ def register_commands():
             "description":
                 "Ajouter un Alt EVE "
                 "à ton compte Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "db-health",
+
+            "description":
+                "Afficher l'état de "
+                "la base Freeborn",
 
             "type":
                 1,
