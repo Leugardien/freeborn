@@ -114,24 +114,34 @@ def init_database():
         )
 
 
-def has_main_character(discord_user_id):
+def get_main_character(discord_user_id):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM eve_characters
-                    WHERE discord_user_id = %s
-                    AND character_type = 'main'
-                );
+                SELECT
+                    character_id,
+                    character_name
+                FROM eve_characters
+                WHERE discord_user_id = %s
+                AND character_type = 'main'
+                LIMIT 1;
                 """,
                 (
                     str(discord_user_id),
                 ),
             )
 
-            return cur.fetchone()[0]
+            return cur.fetchone()
+
+
+def has_main_character(discord_user_id):
+    return (
+        get_main_character(
+            discord_user_id
+        )
+        is not None
+    )
 
 
 def get_character_record(character_id):
@@ -160,6 +170,68 @@ def save_main_character(
     character_name,
     corporation_id,
 ):
+    discord_user_id = str(
+        discord_user_id
+    )
+
+    character_id = int(
+        character_id
+    )
+
+    # --------------------------------------------------------
+    # SECURITY 1:
+    # Character cannot belong to another Discord account
+    # --------------------------------------------------------
+
+    existing_character = get_character_record(
+        character_id
+    )
+
+    if existing_character:
+        existing_discord_user_id = (
+            existing_character[0]
+        )
+
+        if (
+            existing_discord_user_id
+            != discord_user_id
+        ):
+            raise ValueError(
+                "Character already linked "
+                "to another Discord account"
+            )
+
+    # --------------------------------------------------------
+    # SECURITY 2:
+    # One Discord account = one Main Character
+    # --------------------------------------------------------
+
+    existing_main = get_main_character(
+        discord_user_id
+    )
+
+    if existing_main:
+        existing_main_id = int(
+            existing_main[0]
+        )
+
+        existing_main_name = (
+            existing_main[1]
+        )
+
+        if (
+            existing_main_id
+            != character_id
+        ):
+            raise ValueError(
+                "Discord account already has "
+                f"main character: {existing_main_name}"
+            )
+
+    # --------------------------------------------------------
+    # SAVE / REFRESH SAME MAIN
+    # --------------------------------------------------------
+
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -187,8 +259,8 @@ def save_main_character(
                     updated_at = NOW();
                 """,
                 (
-                    int(character_id),
-                    str(discord_user_id),
+                    character_id,
+                    discord_user_id,
                     character_name,
                     int(corporation_id),
                 ),
@@ -356,10 +428,20 @@ def get_eve_identity(access_token):
         },
     )
 
-    issuer = payload.get("iss", "")
-    normalized_issuer = issuer.rstrip("/")
+    issuer = payload.get(
+        "iss",
+        "",
+    )
 
-    if normalized_issuer not in VALID_EVE_ISSUERS:
+    normalized_issuer = (
+        issuer.rstrip("/")
+    )
+
+    if (
+        normalized_issuer
+        not in
+        VALID_EVE_ISSUERS
+    ):
         raise ValueError(
             f"Invalid EVE issuer: {issuer}"
         )
@@ -373,7 +455,9 @@ def get_eve_identity(access_token):
         audiences,
         str,
     ):
-        audiences = [audiences]
+        audiences = [
+            audiences
+        ]
 
     if "EVE Online" not in audiences:
         raise ValueError(
@@ -398,7 +482,9 @@ def get_eve_identity(access_token):
             "Invalid EVE character subject"
         )
 
-    character_id = subject.split(":")[-1]
+    character_id = (
+        subject.split(":")[-1]
+    )
 
     character_name = payload.get(
         "name",
@@ -479,7 +565,8 @@ def sync_discord_nickname(
                 "application/json",
         },
         json={
-            "nick": character_name,
+            "nick":
+                character_name,
         },
         timeout=15,
     )
@@ -563,12 +650,23 @@ def db_health():
                 )
 
         return {
-            "status": "ok",
-            "database": "connected",
-            "table": "eve_characters",
-            "characters": character_count,
-            "mains": main_count,
-            "alts": alt_count,
+            "status":
+                "ok",
+
+            "database":
+                "connected",
+
+            "table":
+                "eve_characters",
+
+            "characters":
+                character_count,
+
+            "mains":
+                main_count,
+
+            "alts":
+                alt_count,
         }
 
     except Exception as error:
@@ -578,8 +676,11 @@ def db_health():
         )
 
         return {
-            "status": "error",
-            "database": "unavailable",
+            "status":
+                "error",
+
+            "database":
+                "unavailable",
         }, 500
 
 
@@ -613,7 +714,8 @@ def interactions():
             "data": {
                 "content":
                     "Commande inconnue.",
-                "flags": 64,
+                "flags":
+                    64,
             },
         })
 
@@ -637,7 +739,8 @@ def interactions():
                     "❌ Cette commande "
                     "est réservée au serveur "
                     "Freeborn Legacy.",
-                "flags": 64,
+                "flags":
+                    64,
             },
         })
 
@@ -648,8 +751,10 @@ def interactions():
         verification_type = "alt"
 
         try:
-            main_exists = has_main_character(
-                discord_user_id
+            main_exists = (
+                has_main_character(
+                    discord_user_id
+                )
             )
 
         except Exception as error:
@@ -665,7 +770,8 @@ def interactions():
                         "⚠️ Impossible de vérifier "
                         "ton personnage principal "
                         "pour le moment.",
-                    "flags": 64,
+                    "flags":
+                        64,
                 },
             })
 
@@ -678,7 +784,8 @@ def interactions():
                         "enregistrer ton personnage "
                         "principal avec **/verify** "
                         "avant d'ajouter un alt.",
-                    "flags": 64,
+                    "flags":
+                        64,
                 },
             })
 
@@ -688,7 +795,8 @@ def interactions():
             "data": {
                 "content":
                     "Commande inconnue.",
-                "flags": 64,
+                "flags":
+                    64,
             },
         })
 
@@ -727,10 +835,12 @@ def interactions():
     if verification_type == "main":
         message = (
             "🔐 **Freeborn Verify**\n\n"
+
             "Pour vérifier ton appartenance "
             "à **Freeborn Legacy**, "
             "connecte ton personnage "
             "principal EVE Online :\n\n"
+
             f"[Vérifier mon personnage EVE]"
             f"({login_url})"
         )
@@ -738,9 +848,11 @@ def interactions():
     else:
         message = (
             "🔗 **Freeborn Alt Verify**\n\n"
+
             "Sélectionne le personnage EVE "
             "que tu souhaites enregistrer "
             "comme **Alt Character** :\n\n"
+
             f"[Ajouter mon Alt EVE]"
             f"({login_url})"
         )
@@ -748,8 +860,11 @@ def interactions():
     return jsonify({
         "type": 4,
         "data": {
-            "content": message,
-            "flags": 64,
+            "content":
+                message,
+
+            "flags":
+                64,
         },
     })
 
@@ -822,16 +937,20 @@ def callback():
 
     token_response = requests.post(
         EVE_TOKEN_URL,
+
         auth=(
             EVE_CLIENT_ID,
             EVE_CLIENT_SECRET,
         ),
+
         data={
             "grant_type":
                 "authorization_code",
+
             "code":
                 code,
         },
+
         timeout=15,
     )
 
@@ -918,15 +1037,115 @@ def callback():
 
     if verification_type == "main":
 
-        member_role_response = add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_MEMBER_ROLE_ID,
+        # ----------------------------------------------------
+        # SAVE MAIN FIRST
+        # This is where the one-main security is enforced.
+        # ----------------------------------------------------
+
+        try:
+            save_main_character(
+                discord_user_id,
+                character_id,
+                character_name,
+                corporation_id,
+            )
+
+        except ValueError as error:
+            error_text = str(error)
+
+            print(
+                "Main verification refused:",
+                repr(error),
+            )
+
+            if (
+                "already has main character"
+                in error_text
+            ):
+                existing_main = (
+                    get_main_character(
+                        discord_user_id
+                    )
+                )
+
+                existing_main_name = (
+                    existing_main[1]
+                    if existing_main
+                    else
+                    "Unknown"
+                )
+
+                return f"""
+                <h1>Freeborn Verify</h1>
+
+                <p>
+                <strong>Character:</strong>
+                {character_name}
+                </p>
+
+                <h2>❌ MAIN ALREADY REGISTERED</h2>
+
+                <p>
+                Ton personnage principal actuel est
+                <strong>{existing_main_name}</strong>.
+                </p>
+
+                <p>
+                Tu ne peux pas enregistrer
+                <strong>{character_name}</strong>
+                comme second Main Character.
+                </p>
+
+                <p>
+                Une commande dédiée au changement
+                de Main sera ajoutée ultérieurement.
+                </p>
+                """, 400
+
+            return """
+            <h1>Freeborn Verify</h1>
+
+            <h2>❌ CHARACTER ALREADY LINKED</h2>
+
+            <p>
+            Ce personnage EVE est déjà associé
+            à un autre compte Discord.
+            </p>
+            """, 400
+
+        except Exception as error:
+            print(
+                "Database main save failed:",
+                repr(error),
+            )
+
+            return """
+            <h1>Freeborn Verify</h1>
+
+            <h2>⚠️ Database error</h2>
+
+            <p>
+            L'enregistrement du Main
+            a échoué.
+            </p>
+            """, 500
+
+        # ----------------------------------------------------
+        # ROLES
+        # ----------------------------------------------------
+
+        member_role_response = (
+            add_discord_role(
+                guild_id,
+                discord_user_id,
+                DISCORD_MEMBER_ROLE_ID,
+            )
         )
 
-        if member_role_response.status_code not in (
-            200,
-            204,
+        if (
+            member_role_response.status_code
+            not in
+            (200, 204)
         ):
             return """
             <h1>Freeborn Verify</h1>
@@ -937,15 +1156,18 @@ def callback():
             </p>
             """, 500
 
-        eve_verified_response = add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_EVE_VERIFIED_ROLE_ID,
+        eve_verified_response = (
+            add_discord_role(
+                guild_id,
+                discord_user_id,
+                DISCORD_EVE_VERIFIED_ROLE_ID,
+            )
         )
 
-        if eve_verified_response.status_code not in (
-            200,
-            204,
+        if (
+            eve_verified_response.status_code
+            not in
+            (200, 204)
         ):
             return """
             <h1>Freeborn Verify</h1>
@@ -956,15 +1178,18 @@ def callback():
             </p>
             """, 500
 
-        main_character_response = add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_MAIN_CHARACTER_ROLE_ID,
+        main_character_response = (
+            add_discord_role(
+                guild_id,
+                discord_user_id,
+                DISCORD_MAIN_CHARACTER_ROLE_ID,
+            )
         )
 
-        if main_character_response.status_code not in (
-            200,
-            204,
+        if (
+            main_character_response.status_code
+            not in
+            (200, 204)
         ):
             return """
             <h1>Freeborn Verify</h1>
@@ -975,15 +1200,18 @@ def callback():
             </p>
             """, 500
 
-        recruit_role_response = remove_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_RECRUIT_ROLE_ID,
+        recruit_role_response = (
+            remove_discord_role(
+                guild_id,
+                discord_user_id,
+                DISCORD_RECRUIT_ROLE_ID,
+            )
         )
 
-        if recruit_role_response.status_code not in (
-            200,
-            204,
+        if (
+            recruit_role_response.status_code
+            not in
+            (200, 204)
         ):
             print(
                 "Discord recruit role removal failed:",
@@ -991,34 +1219,16 @@ def callback():
                 recruit_role_response.text,
             )
 
-        try:
-            save_main_character(
+        # ----------------------------------------------------
+        # NICKNAME
+        # ----------------------------------------------------
+
+        nickname_response = (
+            sync_discord_nickname(
+                guild_id,
                 discord_user_id,
-                character_id,
                 character_name,
-                corporation_id,
             )
-
-        except Exception as error:
-            print(
-                "Database main save failed:",
-                repr(error),
-            )
-
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ Vérification réussie</h2>
-            <p>
-            Les rôles ont été appliqués,
-            mais l'enregistrement du Main
-            a échoué.
-            </p>
-            """, 500
-
-        nickname_response = sync_discord_nickname(
-            guild_id,
-            discord_user_id,
-            character_name,
         )
 
         nickname_changed = (
@@ -1077,8 +1287,10 @@ def callback():
     # ========================================================
 
     try:
-        main_exists = has_main_character(
-            discord_user_id
+        main_exists = (
+            has_main_character(
+                discord_user_id
+            )
         )
 
     except Exception as error:
@@ -1095,7 +1307,9 @@ def callback():
     if not main_exists:
         return """
         <h1>Freeborn Verify</h1>
+
         <h2>❌ MAIN REQUIRED</h2>
+
         <p>
         Tu dois d'abord enregistrer
         ton personnage principal avec /verify.
@@ -1133,7 +1347,9 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
+
         <h2>❌ REFUSED</h2>
+
         <p>
         Ce personnage est déjà lié
         à un autre compte Discord.
@@ -1148,22 +1364,27 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
+
         <h2>⚠️ Database error</h2>
+
         <p>
         L'enregistrement de l'Alt
         a échoué.
         </p>
         """, 500
 
-    alt_role_response = add_discord_role(
-        guild_id,
-        discord_user_id,
-        DISCORD_ALT_CHARACTER_ROLE_ID,
+    alt_role_response = (
+        add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_ALT_CHARACTER_ROLE_ID,
+        )
     )
 
-    if alt_role_response.status_code not in (
-        200,
-        204,
+    if (
+        alt_role_response.status_code
+        not in
+        (200, 204)
     ):
         return """
         <h1>Freeborn Verify</h1>
@@ -1218,45 +1439,65 @@ def register_commands():
 
     commands = [
         {
-            "name": "verify",
+            "name":
+                "verify",
+
             "description":
                 "Vérifier ton Main EVE "
                 "pour Freeborn Legacy",
-            "type": 1,
+
+            "type":
+                1,
         },
         {
-            "name": "alt",
+            "name":
+                "alt",
+
             "description":
                 "Ajouter un Alt EVE "
                 "à ton compte Freeborn",
-            "type": 1,
+
+            "type":
+                1,
         },
     ]
 
-    response = requests.put(
-        url,
-        headers={
-            "Authorization":
-                f"Bot {DISCORD_BOT_TOKEN}",
-            "Content-Type":
-                "application/json",
-        },
-        json=commands,
-        timeout=15,
-    )
+    try:
+        response = requests.put(
+            url,
 
-    if response.status_code == 200:
-        print(
-            "Discord commands "
-            "/verify and /alt registered."
+            headers={
+                "Authorization":
+                    f"Bot {DISCORD_BOT_TOKEN}",
+
+                "Content-Type":
+                    "application/json",
+            },
+
+            json=commands,
+
+            timeout=15,
         )
 
-    else:
+        if response.status_code == 200:
+            print(
+                "Discord commands "
+                "/verify and /alt registered."
+            )
+
+        else:
+            print(
+                "Unable to register "
+                "Discord commands:",
+                response.status_code,
+                response.text,
+            )
+
+    except Exception as error:
         print(
-            "Unable to register "
-            "Discord commands:",
-            response.status_code,
-            response.text,
+            "Discord command "
+            "registration error:",
+            repr(error),
         )
 
 
