@@ -11,7 +11,6 @@ from jose import jwt
 
 app = Flask(__name__)
 
-
 EVE_CLIENT_ID = os.environ["EVE_CLIENT_ID"]
 EVE_CLIENT_SECRET = os.environ["EVE_CLIENT_SECRET"]
 EVE_CALLBACK_URL = os.environ["EVE_CALLBACK_URL"]
@@ -26,18 +25,12 @@ DISCORD_APPLICATION_ID = os.environ["DISCORD_APPLICATION_ID"]
 DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
 DISCORD_MEMBER_ROLE_ID = os.environ["DISCORD_MEMBER_ROLE_ID"]
 DISCORD_RECRUIT_ROLE_ID = os.environ["DISCORD_RECRUIT_ROLE_ID"]
+DISCORD_EVE_VERIFIED_ROLE_ID = os.environ["DISCORD_EVE_VERIFIED_ROLE_ID"]
 
 FLASK_SECRET_KEY = os.environ["FLASK_SECRET_KEY"]
 
-
-EVE_AUTHORIZE_URL = (
-    "https://login.eveonline.com/v2/oauth/authorize/"
-)
-
-EVE_TOKEN_URL = (
-    "https://login.eveonline.com/v2/oauth/token"
-)
-
+EVE_AUTHORIZE_URL = "https://login.eveonline.com/v2/oauth/authorize/"
+EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
 EVE_METADATA_URL = (
     "https://login.eveonline.com/"
     ".well-known/oauth-authorization-server"
@@ -46,12 +39,10 @@ EVE_METADATA_URL = (
 ESI_BASE_URL = "https://esi.evetech.net/latest"
 DISCORD_API = "https://discord.com/api/v10"
 
-
 VALID_EVE_ISSUERS = {
     "login.eveonline.com",
     "https://login.eveonline.com",
 }
-
 
 state_serializer = URLSafeTimedSerializer(
     FLASK_SECRET_KEY
@@ -186,6 +177,42 @@ def get_eve_identity(access_token):
     )
 
     return character_id, character_name
+
+
+def add_discord_role(guild_id, user_id, role_id):
+    role_url = (
+        f"{DISCORD_API}/guilds/"
+        f"{guild_id}/members/"
+        f"{user_id}/roles/"
+        f"{role_id}"
+    )
+
+    return requests.put(
+        role_url,
+        headers={
+            "Authorization":
+                f"Bot {DISCORD_BOT_TOKEN}",
+        },
+        timeout=15,
+    )
+
+
+def remove_discord_role(guild_id, user_id, role_id):
+    role_url = (
+        f"{DISCORD_API}/guilds/"
+        f"{guild_id}/members/"
+        f"{user_id}/roles/"
+        f"{role_id}"
+    )
+
+    return requests.delete(
+        role_url,
+        headers={
+            "Authorization":
+                f"Bot {DISCORD_BOT_TOKEN}",
+        },
+        timeout=15,
+    )
 
 
 @app.route("/")
@@ -457,21 +484,10 @@ def callback():
         </p>
         """
 
-    # Add Member role
-    member_role_url = (
-        f"{DISCORD_API}/guilds/"
-        f"{guild_id}/members/"
-        f"{discord_user_id}/roles/"
-        f"{DISCORD_MEMBER_ROLE_ID}"
-    )
-
-    member_role_response = requests.put(
-        member_role_url,
-        headers={
-            "Authorization":
-                f"Bot {DISCORD_BOT_TOKEN}",
-        },
-        timeout=15,
+    member_role_response = add_discord_role(
+        guild_id,
+        discord_user_id,
+        DISCORD_MEMBER_ROLE_ID,
     )
 
     if (
@@ -494,21 +510,36 @@ def callback():
         </p>
         """, 500
 
-    # Remove Recruit role
-    recruit_role_url = (
-        f"{DISCORD_API}/guilds/"
-        f"{guild_id}/members/"
-        f"{discord_user_id}/roles/"
-        f"{DISCORD_RECRUIT_ROLE_ID}"
+    eve_verified_response = add_discord_role(
+        guild_id,
+        discord_user_id,
+        DISCORD_EVE_VERIFIED_ROLE_ID,
     )
 
-    recruit_role_response = requests.delete(
-        recruit_role_url,
-        headers={
-            "Authorization":
-                f"Bot {DISCORD_BOT_TOKEN}",
-        },
-        timeout=15,
+    if (
+        eve_verified_response.status_code
+        not in
+        (200, 204)
+    ):
+        print(
+            "Discord EVE Verified role assignment failed:",
+            eve_verified_response.status_code,
+            eve_verified_response.text,
+        )
+
+        return """
+        <h1>Freeborn Verify</h1>
+        <h2>⚠️ Vérification EVE réussie</h2>
+        <p>
+        Le rôle Membre a été attribué,
+        mais le rôle EVE Verified a échoué.
+        </p>
+        """, 500
+
+    recruit_role_response = remove_discord_role(
+        guild_id,
+        discord_user_id,
+        DISCORD_RECRUIT_ROLE_ID,
     )
 
     if (
@@ -538,14 +569,17 @@ def callback():
     <h2>✅ VERIFIED</h2>
 
     <p>
-    Le rôle Discord
-    <strong>Membre</strong>
+    Le rôle <strong>Membre</strong>
     a été attribué.
     </p>
 
     <p>
-    Le rôle
-    <strong>Recrue</strong>
+    Le rôle <strong>EVE Verified</strong>
+    a été attribué.
+    </p>
+
+    <p>
+    Le rôle <strong>Recrue</strong>
     a été retiré.
     </p>
 
