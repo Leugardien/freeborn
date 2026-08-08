@@ -718,12 +718,6 @@ def run_sync_check(
                 "erreur ESI"
             )
 
-    # --------------------------------------------------------
-    # CONTROLLED TEST ONLY
-    # No database write
-    # No Discord role modification
-    # --------------------------------------------------------
-
     if include_fake_outside:
         outside_count += 1
 
@@ -737,6 +731,39 @@ def run_sync_check(
         freeborn_count,
         outside_count,
         error_count,
+    )
+
+
+# ============================================================
+# REVOCATION SIMULATION
+# ============================================================
+
+def build_revocation_simulation():
+    """
+    IMPORTANT:
+    This function DOES NOT call Discord.
+    This function DOES NOT modify Neon.
+    It only returns the actions that would be performed.
+    """
+
+    fake_member = {
+        "character_name":
+            "TEST - Former Member",
+
+        "character_type":
+            "main",
+    }
+
+    planned_actions = [
+        "Retirer le rôle **Membre**",
+        "Retirer le rôle **EVE Verified**",
+        "Retirer le rôle **Main Character**",
+        "Retirer le rôle **Alt Character**",
+    ]
+
+    return (
+        fake_member,
+        planned_actions,
     )
 
 
@@ -1041,6 +1068,60 @@ def interactions():
             + "🧪 **SIMULATION UNIQUEMENT**\n"
               "Aucune donnée Neon n'a été modifiée.\n"
               "Aucun rôle Discord n'a été modifié."
+        )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    summary,
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # /sync-test-revoke
+    # ========================================================
+
+    if command_name == "sync-test-revoke":
+        (
+            fake_member,
+            planned_actions,
+        ) = build_revocation_simulation()
+
+        actions_text = "\n".join(
+            f"➡️ {action}"
+            for action in planned_actions
+        )
+
+        summary = (
+            "🧪 **Freeborn Revocation TEST**\n\n"
+
+            f"Personnage détecté : "
+            f"**{fake_member['character_name']}**\n"
+
+            f"Type : "
+            f"**{fake_member['character_type']}**\n"
+
+            "Statut : "
+            "❌ **hors Freeborn Legacy**\n\n"
+
+            "### Actions prévues\n"
+
+            f"{actions_text}\n\n"
+
+            "🛡️ **MODE SIMULATION**\n"
+
+            "✅ Aucun rôle Discord n'a été retiré.\n"
+
+            "✅ Aucune donnée Neon n'a été modifiée.\n"
+
+            "✅ Aucun compte Discord réel "
+            "n'a été ciblé."
         )
 
         return jsonify({
@@ -1678,6 +1759,18 @@ def register_commands():
             "description":
                 "Tester la détection "
                 "d'un départ de corporation",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "sync-test-revoke",
+
+            "description":
+                "Simuler la révocation "
+                "des accès d'un ancien membre",
 
             "type":
                 1,
