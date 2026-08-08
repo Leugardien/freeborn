@@ -155,6 +155,7 @@ def init_database():
 def get_main_character(discord_user_id):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+
             cur.execute(
                 """
                 SELECT
@@ -185,6 +186,7 @@ def has_main_character(discord_user_id):
 def get_character_record(character_id):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+
             cur.execute(
                 """
                 SELECT
@@ -205,6 +207,7 @@ def get_character_record(character_id):
 def get_all_characters():
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+
             cur.execute(
                 """
                 SELECT
@@ -231,6 +234,44 @@ def get_all_characters():
             return cur.fetchall()
 
 
+def get_member_characters(discord_user_id):
+    """
+    Returns every EVE character linked
+    to one Discord account.
+    """
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    character_id,
+                    character_name,
+                    character_type,
+                    corporation_id,
+                    in_corporation,
+                    verified_at,
+                    last_checked_at,
+                    left_corporation_at
+                FROM eve_characters
+                WHERE discord_user_id = %s
+                ORDER BY
+                    CASE
+                        WHEN character_type = 'main'
+                        THEN 0
+                        ELSE 1
+                    END,
+                    character_name;
+                """,
+                (
+                    str(discord_user_id),
+                ),
+            )
+
+            return cur.fetchall()
+
+
 def get_database_stats():
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -241,7 +282,10 @@ def get_database_stats():
                 FROM eve_characters;
                 """
             )
-            character_count = cur.fetchone()[0]
+
+            character_count = (
+                cur.fetchone()[0]
+            )
 
             cur.execute(
                 """
@@ -250,7 +294,10 @@ def get_database_stats():
                 WHERE character_type = 'main';
                 """
             )
-            main_count = cur.fetchone()[0]
+
+            main_count = (
+                cur.fetchone()[0]
+            )
 
             cur.execute(
                 """
@@ -259,7 +306,10 @@ def get_database_stats():
                 WHERE character_type = 'alt';
                 """
             )
-            alt_count = cur.fetchone()[0]
+
+            alt_count = (
+                cur.fetchone()[0]
+            )
 
             cur.execute(
                 """
@@ -268,13 +318,23 @@ def get_database_stats():
                 WHERE in_corporation = FALSE;
                 """
             )
-            outside_count = cur.fetchone()[0]
+
+            outside_count = (
+                cur.fetchone()[0]
+            )
 
     return {
-        "characters": character_count,
-        "mains": main_count,
-        "alts": alt_count,
-        "outside_corporation": outside_count,
+        "characters":
+            character_count,
+
+        "mains":
+            main_count,
+
+        "alts":
+            alt_count,
+
+        "outside_corporation":
+            outside_count,
     }
 
 
@@ -299,6 +359,7 @@ def save_main_character(
     )
 
     if existing_character:
+
         existing_discord_user_id = (
             existing_character[0]
         )
@@ -319,6 +380,7 @@ def save_main_character(
     )
 
     if existing_main:
+
         existing_main_id = int(
             existing_main[0]
         )
@@ -338,6 +400,7 @@ def save_main_character(
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+
             cur.execute(
                 """
                 INSERT INTO eve_characters (
@@ -403,6 +466,7 @@ def save_alt_character(
     )
 
     if existing:
+
         existing_discord_user_id = (
             existing[0]
         )
@@ -430,6 +494,7 @@ def save_alt_character(
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+
             cur.execute(
                 """
                 INSERT INTO eve_characters (
@@ -487,6 +552,7 @@ def update_character_sync_status(
         with conn.cursor() as cur:
 
             if in_corporation:
+
                 cur.execute(
                     """
                     UPDATE eve_characters
@@ -505,6 +571,7 @@ def update_character_sync_status(
                 )
 
             else:
+
                 cur.execute(
                     """
                     UPDATE eve_characters
@@ -527,6 +594,169 @@ def update_character_sync_status(
                 )
 
         conn.commit()
+
+
+# ============================================================
+# DISPLAY HELPERS
+# ============================================================
+
+def format_datetime(value):
+    if value is None:
+        return "Jamais"
+
+    try:
+        return value.strftime(
+            "%d/%m/%Y %H:%M UTC"
+        )
+
+    except Exception:
+        return str(value)
+
+
+def build_member_info(
+    discord_user_id,
+    discord_display_name,
+):
+    characters = (
+        get_member_characters(
+            discord_user_id
+        )
+    )
+
+    if not characters:
+        return (
+            "👤 **Freeborn Member Info**\n\n"
+            f"Discord : **{discord_display_name}**\n\n"
+            "❌ Aucun personnage EVE "
+            "n'est enregistré pour ce compte.\n\n"
+            "Utilise **/verify** pour enregistrer "
+            "ton Main Character."
+        )
+
+    main_rows = [
+        row
+        for row in characters
+        if row[2] == "main"
+    ]
+
+    alt_rows = [
+        row
+        for row in characters
+        if row[2] == "alt"
+    ]
+
+    lines = [
+        "👤 **Freeborn Member Info**",
+        "",
+        f"Discord : **{discord_display_name}**",
+        f"Discord ID : `{discord_user_id}`",
+        "",
+    ]
+
+    # --------------------------------------------------------
+    # MAIN
+    # --------------------------------------------------------
+
+    if main_rows:
+
+        main = main_rows[0]
+
+        (
+            main_id,
+            main_name,
+            main_type,
+            main_corporation_id,
+            main_in_corporation,
+            main_verified_at,
+            main_last_checked_at,
+            main_left_at,
+        ) = main
+
+        main_status = (
+            "✅ Freeborn Legacy"
+            if main_in_corporation
+            else
+            "❌ Hors Freeborn Legacy"
+        )
+
+        lines.extend([
+            "### 🔗 Main Character",
+            f"**{main_name}**",
+            f"Character ID : `{main_id}`",
+            f"Statut : {main_status}",
+            (
+                "Dernière synchro : "
+                f"**{format_datetime(main_last_checked_at)}**"
+            ),
+            "",
+        ])
+
+    else:
+
+        lines.extend([
+            "### 🔗 Main Character",
+            "❌ Aucun Main enregistré",
+            "",
+        ])
+
+    # --------------------------------------------------------
+    # ALTS
+    # --------------------------------------------------------
+
+    lines.append(
+        f"### 🔹 Alt Characters ({len(alt_rows)})"
+    )
+
+    if not alt_rows:
+
+        lines.append(
+            "Aucun Alt Character enregistré."
+        )
+
+    else:
+
+        for alt in alt_rows:
+
+            (
+                alt_id,
+                alt_name,
+                alt_type,
+                alt_corporation_id,
+                alt_in_corporation,
+                alt_verified_at,
+                alt_last_checked_at,
+                alt_left_at,
+            ) = alt
+
+            alt_status = (
+                "✅ Freeborn Legacy"
+                if alt_in_corporation
+                else
+                "❌ Hors Freeborn Legacy"
+            )
+
+            lines.extend([
+                "",
+                f"**{alt_name}**",
+                f"Character ID : `{alt_id}`",
+                f"Statut : {alt_status}",
+                (
+                    "Dernière synchro : "
+                    f"**{format_datetime(alt_last_checked_at)}**"
+                ),
+            ])
+
+    lines.extend([
+        "",
+        "### 📊 Résumé",
+        f"Personnages liés : **{len(characters)}**",
+        f"Main : **{len(main_rows)}**",
+        f"Alts : **{len(alt_rows)}**",
+    ])
+
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -648,7 +878,8 @@ def get_eve_identity(access_token):
         algorithms=["RS256"],
         audience="EVE Online",
         options={
-            "verify_iss": False,
+            "verify_iss":
+                False,
         },
     )
 
@@ -816,6 +1047,7 @@ def revoke_main_access(
     results = []
 
     for role_id in role_ids:
+
         response = (
             remove_discord_role(
                 DISCORD_GUILD_ID,
@@ -840,26 +1072,37 @@ def revoke_alt_role_if_needed(
         for item in sync_results
         if (
             item["discord_user_id"]
-            == str(discord_user_id)
+            ==
+            str(discord_user_id)
         )
     ]
 
     main_results = [
         item
         for item in user_results
-        if item["character_type"] == "main"
+        if (
+            item["character_type"]
+            ==
+            "main"
+        )
     ]
 
     alt_results = [
         item
         for item in user_results
-        if item["character_type"] == "alt"
+        if (
+            item["character_type"]
+            ==
+            "alt"
+        )
     ]
 
     if not main_results:
         return None
 
-    main = main_results[0]
+    main = (
+        main_results[0]
+    )
 
     if (
         main["status"]
@@ -909,6 +1152,7 @@ def run_sync(
     sync_results = []
 
     for character in characters:
+
         (
             character_id,
             discord_user_id,
@@ -944,6 +1188,7 @@ def run_sync(
         }
 
         try:
+
             response = requests.get(
                 (
                     f"{ESI_BASE_URL}/characters/"
@@ -953,7 +1198,10 @@ def run_sync(
             )
 
             if response.status_code != 200:
-                result["status"] = "esi_error"
+
+                result["status"] = (
+                    "esi_error"
+                )
 
                 sync_results.append(
                     result
@@ -961,13 +1209,18 @@ def run_sync(
 
                 continue
 
-            data = response.json()
+            data = (
+                response.json()
+            )
 
             if (
                 "corporation_id"
                 not in data
             ):
-                result["status"] = "esi_error"
+
+                result["status"] = (
+                    "esi_error"
+                )
 
                 sync_results.append(
                     result
@@ -985,7 +1238,9 @@ def run_sync(
                 FREEBORN_CORPORATION_ID
             )
 
-            result["status"] = "ok"
+            result["status"] = (
+                "ok"
+            )
 
             result["in_corporation"] = (
                 in_corporation
@@ -996,6 +1251,7 @@ def run_sync(
             ] = current_corporation_id
 
             if apply_changes:
+
                 update_character_sync_status(
                     character_id,
                     current_corporation_id,
@@ -1003,13 +1259,16 @@ def run_sync(
                 )
 
         except Exception as error:
+
             print(
                 "Sync ESI error:",
                 character_name,
                 repr(error),
             )
 
-            result["status"] = "esi_error"
+            result["status"] = (
+                "esi_error"
+            )
 
         sync_results.append(
             result
@@ -1049,12 +1308,16 @@ def run_sync(
             ]
 
             if main_results:
-                main = main_results[0]
+
+                main = (
+                    main_results[0]
+                )
 
                 if (
                     main["status"]
                     != "ok"
                 ):
+
                     actions.append({
                         "discord_user_id":
                             discord_user_id,
@@ -1069,6 +1332,7 @@ def run_sync(
                     continue
 
                 if not main["in_corporation"]:
+
                     role_results = (
                         revoke_main_access(
                             discord_user_id
@@ -1101,6 +1365,7 @@ def run_sync(
             )
 
             if alt_result is not None:
+
                 actions.append({
                     "discord_user_id":
                         discord_user_id,
@@ -1147,6 +1412,7 @@ def build_sync_message(
             item["status"]
             != "ok"
         ):
+
             error_count += 1
 
             lines.append(
@@ -1156,6 +1422,7 @@ def build_sync_message(
             )
 
         elif item["in_corporation"]:
+
             freeborn_count += 1
 
             lines.append(
@@ -1165,6 +1432,7 @@ def build_sync_message(
             )
 
         else:
+
             outside_count += 1
 
             lines.append(
@@ -1174,6 +1442,7 @@ def build_sync_message(
             )
 
     if applied:
+
         title = (
             "⚙️ **Freeborn Sync APPLY**"
         )
@@ -1185,6 +1454,7 @@ def build_sync_message(
         )
 
     else:
+
         title = (
             "🔎 **Freeborn Sync Check**"
         )
@@ -1197,7 +1467,9 @@ def build_sync_message(
     message = (
         f"{title}\n\n"
 
-        + "\n".join(lines)
+        + "\n".join(
+            lines
+        )
 
         + "\n\n"
 
@@ -1217,6 +1489,7 @@ def build_sync_message(
         applied
         and actions
     ):
+
         action_lines = []
 
         for action in actions:
@@ -1226,6 +1499,7 @@ def build_sync_message(
                 ==
                 "main_revoked"
             ):
+
                 action_lines.append(
                     "🔒 "
                     f"**{action['character_name']}** "
@@ -1237,6 +1511,7 @@ def build_sync_message(
                 ==
                 "alt_role_removed"
             ):
+
                 action_lines.append(
                     "🔗 Rôle **Alt Character** "
                     "retiré"
@@ -1247,12 +1522,14 @@ def build_sync_message(
                 ==
                 "none"
             ):
+
                 action_lines.append(
                     "🛡️ Aucune révocation : "
                     "ESI non fiable"
                 )
 
         if action_lines:
+
             message += (
                 "\n\n### Actions\n"
                 + "\n".join(
@@ -1292,8 +1569,12 @@ def health():
 
 @app.route("/db-health")
 def db_health():
+
     try:
-        stats = get_database_stats()
+
+        stats = (
+            get_database_stats()
+        )
 
         return {
             "status":
@@ -1319,6 +1600,7 @@ def db_health():
         }
 
     except Exception as error:
+
         print(
             "Database health check failed:",
             repr(error),
@@ -1354,12 +1636,14 @@ def interactions():
     data = request.get_json()
 
     if data["type"] == 1:
+
         return jsonify({
             "type":
                 1
         })
 
     if data["type"] != 2:
+
         return jsonify({
             "type":
                 4,
@@ -1381,6 +1665,26 @@ def interactions():
         data["member"]["user"]["id"]
     )
 
+    discord_display_name = (
+        data["member"].get(
+            "nick"
+        )
+        or
+        data["member"][
+            "user"
+        ].get(
+            "global_name"
+        )
+        or
+        data["member"][
+            "user"
+        ].get(
+            "username"
+        )
+        or
+        "Utilisateur Discord"
+    )
+
     guild_id = (
         data["guild_id"]
     )
@@ -1390,6 +1694,7 @@ def interactions():
         !=
         DISCORD_GUILD_ID
     ):
+
         return jsonify({
             "type":
                 4,
@@ -1405,17 +1710,67 @@ def interactions():
         })
 
     # ========================================================
+    # /member-info
+    # ========================================================
+
+    if command_name == "member-info":
+
+        try:
+
+            message = build_member_info(
+                discord_user_id,
+                discord_display_name,
+            )
+
+        except Exception as error:
+
+            print(
+                "Member info failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "👤 **Freeborn Member Info**\n\n"
+                        "⚠️ Impossible de lire "
+                        "ton profil EVE actuellement.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    message,
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
     # /db-health
     # ========================================================
 
     if command_name == "db-health":
 
         try:
+
             stats = (
                 get_database_stats()
             )
 
         except Exception as error:
+
             print(
                 "Discord db-health failed:",
                 repr(error),
@@ -1474,6 +1829,7 @@ def interactions():
     if command_name == "sync-check":
 
         try:
+
             (
                 sync_results,
                 actions,
@@ -1482,6 +1838,7 @@ def interactions():
             )
 
         except Exception as error:
+
             print(
                 "Sync check failed:",
                 repr(error),
@@ -1526,6 +1883,7 @@ def interactions():
         if not interaction_is_admin(
             data
         ):
+
             return jsonify({
                 "type":
                     4,
@@ -1542,6 +1900,7 @@ def interactions():
             })
 
         try:
+
             (
                 sync_results,
                 actions,
@@ -1550,6 +1909,7 @@ def interactions():
             )
 
         except Exception as error:
+
             print(
                 "Sync apply failed:",
                 repr(error),
@@ -1663,16 +2023,23 @@ def interactions():
     # ========================================================
 
     if command_name == "verify":
-        verification_type = "main"
+
+        verification_type = (
+            "main"
+        )
 
     # ========================================================
     # /alt
     # ========================================================
 
     elif command_name == "alt":
-        verification_type = "alt"
+
+        verification_type = (
+            "alt"
+        )
 
         try:
+
             main_exists = (
                 has_main_character(
                     discord_user_id
@@ -1680,6 +2047,7 @@ def interactions():
             )
 
         except Exception as error:
+
             print(
                 "Main lookup failed:",
                 repr(error),
@@ -1700,6 +2068,7 @@ def interactions():
             })
 
         if not main_exists:
+
             return jsonify({
                 "type":
                     4,
@@ -1715,6 +2084,7 @@ def interactions():
             })
 
     else:
+
         return jsonify({
             "type":
                 4,
@@ -1764,6 +2134,7 @@ def interactions():
         verification_type
         == "main"
     ):
+
         message = (
             "🔐 **Freeborn Verify**\n\n"
 
@@ -1775,6 +2146,7 @@ def interactions():
         )
 
     else:
+
         message = (
             "🔗 **Freeborn Alt Verify**\n\n"
 
@@ -1815,12 +2187,14 @@ def callback():
     )
 
     if not code or not state:
+
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Authentication failed</h2>
         """, 400
 
     try:
+
         state_data = (
             state_serializer.loads(
                 state,
@@ -1829,12 +2203,14 @@ def callback():
         )
 
     except SignatureExpired:
+
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Verification link expired</h2>
         """, 400
 
     except BadSignature:
+
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Invalid verification request</h2>
@@ -1861,8 +2237,10 @@ def callback():
 
     if (
         guild_id
-        != DISCORD_GUILD_ID
+        !=
+        DISCORD_GUILD_ID
     ):
+
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Invalid Discord server</h2>
@@ -1891,6 +2269,7 @@ def callback():
         token_response.status_code
         != 200
     ):
+
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Unable to obtain EVE access token</h2>
@@ -1903,6 +2282,7 @@ def callback():
     )
 
     try:
+
         (
             character_id,
             character_name,
@@ -1911,6 +2291,7 @@ def callback():
         )
 
     except Exception as error:
+
         print(
             "EVE identity verification failed:",
             repr(error),
@@ -1933,6 +2314,7 @@ def callback():
         character_response.status_code
         != 200
     ):
+
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Unable to retrieve character</h2>
@@ -1953,6 +2335,7 @@ def callback():
         !=
         FREEBORN_CORPORATION_ID
     ):
+
         return f"""
         <h1>Freeborn Verify</h1>
 
@@ -1979,6 +2362,7 @@ def callback():
     ):
 
         try:
+
             save_main_character(
                 discord_user_id,
                 character_id,
@@ -1992,6 +2376,7 @@ def callback():
                 "already has main character"
                 in str(error)
             ):
+
                 existing_main = (
                     get_main_character(
                         discord_user_id
@@ -2024,6 +2409,7 @@ def callback():
             """, 400
 
         except Exception as error:
+
             print(
                 "Database main save failed:",
                 repr(error),
@@ -2035,6 +2421,7 @@ def callback():
             """, 500
 
         role_responses = [
+
             add_discord_role(
                 guild_id,
                 discord_user_id,
@@ -2060,6 +2447,7 @@ def callback():
             for response
             in role_responses
         ):
+
             return """
             <h1>Freeborn Verify</h1>
             <h2>⚠️ Role assignment error</h2>
@@ -2129,12 +2517,14 @@ def callback():
     if not has_main_character(
         discord_user_id
     ):
+
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ MAIN REQUIRED</h2>
         """, 400
 
     try:
+
         save_alt_character(
             discord_user_id,
             character_id,
@@ -2148,6 +2538,7 @@ def callback():
             "Main character cannot"
             in str(error)
         ):
+
             return f"""
             <h1>Freeborn Verify</h1>
 
@@ -2165,6 +2556,7 @@ def callback():
         """, 400
 
     except Exception as error:
+
         print(
             "Database alt save failed:",
             repr(error),
@@ -2188,6 +2580,7 @@ def callback():
         not in
         (200, 204)
     ):
+
         return """
         <h1>Freeborn Verify</h1>
         <h2>⚠️ Alt role error</h2>
@@ -2247,6 +2640,18 @@ def register_commands():
             "description":
                 "Ajouter un Alt EVE "
                 "à ton compte Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "member-info",
+
+            "description":
+                "Afficher ton profil "
+                "EVE Freeborn",
 
             "type":
                 1,
@@ -2314,6 +2719,7 @@ def register_commands():
     ]
 
     try:
+
         response = requests.put(
             url,
 
@@ -2334,11 +2740,13 @@ def register_commands():
             response.status_code
             == 200
         ):
+
             print(
                 "Discord commands registered."
             )
 
         else:
+
             print(
                 "Discord command registration failed:",
                 response.status_code,
@@ -2346,6 +2754,7 @@ def register_commands():
             )
 
     except Exception as error:
+
         print(
             "Discord command registration error:",
             repr(error),
