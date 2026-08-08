@@ -50,8 +50,13 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # URLS
 # ============================================================
 
-EVE_AUTHORIZE_URL = "https://login.eveonline.com/v2/oauth/authorize/"
-EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
+EVE_AUTHORIZE_URL = (
+    "https://login.eveonline.com/v2/oauth/authorize/"
+)
+
+EVE_TOKEN_URL = (
+    "https://login.eveonline.com/v2/oauth/token"
+)
 
 EVE_METADATA_URL = (
     "https://login.eveonline.com/"
@@ -164,6 +169,32 @@ def get_character_record(character_id):
             return cur.fetchone()
 
 
+def get_all_characters():
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    character_id,
+                    discord_user_id,
+                    character_name,
+                    character_type,
+                    corporation_id
+                FROM eve_characters
+                ORDER BY
+                    discord_user_id,
+                    CASE
+                        WHEN character_type = 'main'
+                        THEN 0
+                        ELSE 1
+                    END,
+                    character_name;
+                """
+            )
+
+            return cur.fetchall()
+
+
 def save_main_character(
     discord_user_id,
     character_id,
@@ -177,11 +208,6 @@ def save_main_character(
     character_id = int(
         character_id
     )
-
-    # --------------------------------------------------------
-    # SECURITY 1:
-    # Character cannot belong to another Discord account
-    # --------------------------------------------------------
 
     existing_character = get_character_record(
         character_id
@@ -200,11 +226,6 @@ def save_main_character(
                 "Character already linked "
                 "to another Discord account"
             )
-
-    # --------------------------------------------------------
-    # SECURITY 2:
-    # One Discord account = one Main Character
-    # --------------------------------------------------------
 
     existing_main = get_main_character(
         discord_user_id
@@ -227,10 +248,6 @@ def save_main_character(
                 "Discord account already has "
                 f"main character: {existing_main_name}"
             )
-
-    # --------------------------------------------------------
-    # SAVE / REFRESH SAME MAIN
-    # --------------------------------------------------------
 
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -280,8 +297,13 @@ def save_alt_character(
     )
 
     if existing:
-        existing_discord_user_id = existing[0]
-        existing_character_type = existing[2]
+        existing_discord_user_id = (
+            existing[0]
+        )
+
+        existing_character_type = (
+            existing[2]
+        )
 
         if (
             existing_discord_user_id
@@ -292,7 +314,10 @@ def save_alt_character(
                 "to another Discord account"
             )
 
-        if existing_character_type == "main":
+        if (
+            existing_character_type
+            == "main"
+        ):
             raise ValueError(
                 "Main character cannot be added as alt"
             )
@@ -352,7 +377,9 @@ def verify_discord_signature(req):
 
     try:
         verify_key = VerifyKey(
-            bytes.fromhex(DISCORD_PUBLIC_KEY)
+            bytes.fromhex(
+                DISCORD_PUBLIC_KEY
+            )
         )
 
         verify_key.verify(
@@ -380,6 +407,7 @@ def get_eve_identity(access_token):
     )
 
     metadata_response.raise_for_status()
+
     metadata = metadata_response.json()
 
     jwks_response = requests.get(
@@ -388,6 +416,7 @@ def get_eve_identity(access_token):
     )
 
     jwks_response.raise_for_status()
+
     jwks = jwks_response.json()
 
     header = jwt.get_unverified_header(
@@ -561,6 +590,7 @@ def sync_discord_nickname(
         headers={
             "Authorization":
                 f"Bot {DISCORD_BOT_TOKEN}",
+
             "Content-Type":
                 "application/json",
         },
@@ -588,8 +618,9 @@ def home():
 
     <p>
     Commandes Discord :
-    <strong>/verify</strong> et
-    <strong>/alt</strong>.
+    <strong>/verify</strong>,
+    <strong>/alt</strong> et
+    <strong>/sync-check</strong>.
     </p>
     """
 
@@ -601,8 +632,11 @@ def home():
 @app.route("/health")
 def health():
     return {
-        "status": "ok",
-        "service": "freeborn-verify",
+        "status":
+            "ok",
+
+        "service":
+            "freeborn-verify",
     }
 
 
@@ -714,6 +748,7 @@ def interactions():
             "data": {
                 "content":
                     "Commande inconnue.",
+
                 "flags":
                     64,
             },
@@ -736,16 +771,176 @@ def interactions():
             "type": 4,
             "data": {
                 "content":
-                    "❌ Cette commande "
-                    "est réservée au serveur "
+                    "❌ Cette commande est "
+                    "réservée au serveur "
                     "Freeborn Legacy.",
+
                 "flags":
                     64,
             },
         })
 
+    # ========================================================
+    # /sync-check
+    # READ-ONLY OBSERVATION MODE
+    # ========================================================
+
+    if command_name == "sync-check":
+        try:
+            characters = (
+                get_all_characters()
+            )
+
+        except Exception as error:
+            print(
+                "Sync database lookup failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        "⚠️ Impossible de lire "
+                        "la base Freeborn pour "
+                        "le moment.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if not characters:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        "ℹ️ Aucun personnage "
+                        "n'est encore enregistré.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        result_lines = []
+
+        freeborn_count = 0
+        outside_count = 0
+        error_count = 0
+
+        for character in characters:
+            (
+                character_id,
+                stored_discord_user_id,
+                character_name,
+                character_type,
+                stored_corporation_id,
+            ) = character
+
+            try:
+                esi_response = requests.get(
+                    (
+                        f"{ESI_BASE_URL}/characters/"
+                        f"{character_id}/"
+                    ),
+                    timeout=15,
+                )
+
+                if (
+                    esi_response.status_code
+                    != 200
+                ):
+                    error_count += 1
+
+                    result_lines.append(
+                        f"⚠️ **{character_name}** "
+                        f"({character_type}) — "
+                        "ESI indisponible"
+                    )
+
+                    continue
+
+                character_data = (
+                    esi_response.json()
+                )
+
+                current_corporation_id = (
+                    character_data[
+                        "corporation_id"
+                    ]
+                )
+
+                if (
+                    current_corporation_id
+                    ==
+                    FREEBORN_CORPORATION_ID
+                ):
+                    freeborn_count += 1
+
+                    result_lines.append(
+                        f"✅ **{character_name}** "
+                        f"({character_type}) — "
+                        "Freeborn Legacy"
+                    )
+
+                else:
+                    outside_count += 1
+
+                    result_lines.append(
+                        f"❌ **{character_name}** "
+                        f"({character_type}) — "
+                        "hors Freeborn Legacy"
+                    )
+
+            except Exception as error:
+                error_count += 1
+
+                print(
+                    "Sync ESI lookup failed:",
+                    character_name,
+                    repr(error),
+                )
+
+                result_lines.append(
+                    f"⚠️ **{character_name}** "
+                    f"({character_type}) — "
+                    "erreur ESI"
+                )
+
+        summary = (
+            "🔎 **Freeborn Sync Check**\n\n"
+            + "\n".join(result_lines)
+            + "\n\n"
+            + f"✅ Freeborn : **{freeborn_count}**\n"
+            + f"❌ Hors corporation : "
+              f"**{outside_count}**\n"
+            + f"⚠️ Erreurs : **{error_count}**\n\n"
+            + "_Mode observation : "
+              "aucun rôle n'a été modifié._"
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    summary,
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # /verify
+    # ========================================================
+
     if command_name == "verify":
         verification_type = "main"
+
+    # ========================================================
+    # /alt
+    # ========================================================
 
     elif command_name == "alt":
         verification_type = "alt"
@@ -770,6 +965,7 @@ def interactions():
                         "⚠️ Impossible de vérifier "
                         "ton personnage principal "
                         "pour le moment.",
+
                     "flags":
                         64,
                 },
@@ -784,6 +980,7 @@ def interactions():
                         "enregistrer ton personnage "
                         "principal avec **/verify** "
                         "avant d'ajouter un alt.",
+
                     "flags":
                         64,
                 },
@@ -795,6 +992,7 @@ def interactions():
             "data": {
                 "content":
                     "Commande inconnue.",
+
                 "flags":
                     64,
             },
@@ -935,6 +1133,15 @@ def callback():
         <h2>❌ Invalid Discord server</h2>
         """, 400
 
+    if verification_type not in (
+        "main",
+        "alt",
+    ):
+        return """
+        <h1>Freeborn Verify</h1>
+        <h2>❌ Invalid verification type</h2>
+        """, 400
+
     token_response = requests.post(
         EVE_TOKEN_URL,
 
@@ -1037,11 +1244,6 @@ def callback():
 
     if verification_type == "main":
 
-        # ----------------------------------------------------
-        # SAVE MAIN FIRST
-        # This is where the one-main security is enforced.
-        # ----------------------------------------------------
-
         try:
             save_main_character(
                 discord_user_id,
@@ -1051,7 +1253,9 @@ def callback():
             )
 
         except ValueError as error:
-            error_text = str(error)
+            error_text = str(
+                error
+            )
 
             print(
                 "Main verification refused:",
@@ -1129,10 +1333,6 @@ def callback():
             a échoué.
             </p>
             """, 500
-
-        # ----------------------------------------------------
-        # ROLES
-        # ----------------------------------------------------
 
         member_role_response = (
             add_discord_role(
@@ -1218,10 +1418,6 @@ def callback():
                 recruit_role_response.status_code,
                 recruit_role_response.text,
             )
-
-        # ----------------------------------------------------
-        # NICKNAME
-        # ----------------------------------------------------
 
         nickname_response = (
             sync_discord_nickname(
@@ -1460,6 +1656,17 @@ def register_commands():
             "type":
                 1,
         },
+        {
+            "name":
+                "sync-check",
+
+            "description":
+                "Contrôler les personnages "
+                "Freeborn enregistrés",
+
+            "type":
+                1,
+        },
     ]
 
     try:
@@ -1482,7 +1689,8 @@ def register_commands():
         if response.status_code == 200:
             print(
                 "Discord commands "
-                "/verify and /alt registered."
+                "/verify, /alt and "
+                "/sync-check registered."
             )
 
         else:
@@ -1506,6 +1714,7 @@ def register_commands():
 # ============================================================
 
 init_database()
+
 register_commands()
 
 
