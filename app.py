@@ -63,7 +63,6 @@ state_serializer = URLSafeTimedSerializer(FLASK_SECRET_KEY)
 # ============================================================
 
 def verify_discord_signature(req):
-
     signature = req.headers.get("X-Signature-Ed25519")
     timestamp = req.headers.get("X-Signature-Timestamp")
 
@@ -73,10 +72,7 @@ def verify_discord_signature(req):
     body = req.get_data()
 
     try:
-
-        verify_key = VerifyKey(
-            bytes.fromhex(DISCORD_PUBLIC_KEY)
-        )
+        verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
 
         verify_key.verify(
             timestamp.encode() + body,
@@ -94,14 +90,12 @@ def verify_discord_signature(req):
 # ============================================================
 
 def get_eve_identity(access_token):
-
     metadata_response = requests.get(
         EVE_METADATA_URL,
         timeout=15,
     )
 
     metadata_response.raise_for_status()
-
     metadata = metadata_response.json()
 
     jwks_response = requests.get(
@@ -110,7 +104,6 @@ def get_eve_identity(access_token):
     )
 
     jwks_response.raise_for_status()
-
     jwks = jwks_response.json()
 
     header = jwt.get_unverified_header(access_token)
@@ -125,7 +118,7 @@ def get_eve_identity(access_token):
         access_token,
         key,
         algorithms=["RS256"],
-        issuer="https://login.eveonline.com/",
+        issuer="login.eveonline.com",
         options={
             "verify_aud": False,
         },
@@ -154,7 +147,6 @@ def get_eve_identity(access_token):
 
 @app.route("/")
 def home():
-
     return """
     <h1>Freeborn Verify</h1>
 
@@ -176,7 +168,6 @@ def home():
 
 @app.route("/health")
 def health():
-
     return {
         "status": "ok",
         "service": "freeborn-verify",
@@ -189,23 +180,19 @@ def health():
 
 @app.route("/interactions", methods=["POST"])
 def interactions():
-
     if not verify_discord_signature(request):
         return "Invalid request signature", 401
 
     data = request.get_json()
-
 
     # --------------------------------------------------------
     # DISCORD PING
     # --------------------------------------------------------
 
     if data["type"] == 1:
-
         return jsonify({
             "type": 1
         })
-
 
     # --------------------------------------------------------
     # /verify
@@ -215,16 +202,10 @@ def interactions():
         data["type"] == 2
         and data["data"]["name"] == "verify"
     ):
-
         discord_user_id = data["member"]["user"]["id"]
         guild_id = data["guild_id"]
 
-
-        # Security check:
-        # command must originate from Freeborn Legacy
-
         if guild_id != DISCORD_GUILD_ID:
-
             return jsonify({
                 "type": 4,
                 "data": {
@@ -235,17 +216,10 @@ def interactions():
                 },
             })
 
-
-        # Secure state linking:
-        # Discord user <-> EVE authentication
-
         state = state_serializer.dumps({
             "discord_user_id": discord_user_id,
             "guild_id": guild_id,
         })
-
-
-        # EVE SSO URL
 
         params = {
             "response_type": "code",
@@ -258,9 +232,6 @@ def interactions():
             f"{EVE_AUTHORIZE_URL}?"
             f"{urlencode(params)}"
         )
-
-
-        # Private Discord response
 
         return jsonify({
             "type": 4,
@@ -277,9 +248,6 @@ def interactions():
             },
         })
 
-
-    # Unknown command
-
     return jsonify({
         "type": 4,
         "data": {
@@ -295,32 +263,26 @@ def interactions():
 
 @app.route("/callback")
 def callback():
-
     code = request.args.get("code")
     state = request.args.get("state")
 
-
     if not code or not state:
-
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Authentication failed</h2>
         """, 400
-
 
     # --------------------------------------------------------
     # VALIDATE STATE
     # --------------------------------------------------------
 
     try:
-
         state_data = state_serializer.loads(
             state,
             max_age=600,
         )
 
     except SignatureExpired:
-
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Verification link expired</h2>
@@ -328,16 +290,13 @@ def callback():
         """, 400
 
     except BadSignature:
-
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Invalid verification request</h2>
         """, 400
 
-
     discord_user_id = state_data["discord_user_id"]
     guild_id = state_data["guild_id"]
-
 
     # --------------------------------------------------------
     # EXCHANGE CODE FOR EVE TOKEN
@@ -356,30 +315,24 @@ def callback():
         timeout=15,
     )
 
-
     if token_response.status_code != 200:
-
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Unable to obtain EVE access token</h2>
         """, 400
 
-
     access_token = token_response.json()["access_token"]
-
 
     # --------------------------------------------------------
     # VERIFY EVE IDENTITY
     # --------------------------------------------------------
 
     try:
-
         character_id, character_name = (
             get_eve_identity(access_token)
         )
 
     except Exception as error:
-
         print(
             "EVE identity verification failed:",
             repr(error),
@@ -390,7 +343,6 @@ def callback():
         <h2>❌ Unable to validate EVE identity</h2>
         """, 400
 
-
     # --------------------------------------------------------
     # GET CHARACTER INFORMATION FROM ESI
     # --------------------------------------------------------
@@ -400,26 +352,20 @@ def callback():
         timeout=15,
     )
 
-
     if character_response.status_code != 200:
-
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Unable to retrieve character information</h2>
         """, 400
 
-
     character_data = character_response.json()
-
     corporation_id = character_data["corporation_id"]
-
 
     # --------------------------------------------------------
     # FREEBORN LEGACY CORPORATION CHECK
     # --------------------------------------------------------
 
     if corporation_id != FREEBORN_CORPORATION_ID:
-
         return f"""
         <h1>Freeborn Verify</h1>
 
@@ -436,7 +382,6 @@ def callback():
         </p>
         """
 
-
     # --------------------------------------------------------
     # ADD DISCORD MEMBER ROLE
     # --------------------------------------------------------
@@ -448,7 +393,6 @@ def callback():
         f"{DISCORD_MEMBER_ROLE_ID}"
     )
 
-
     role_response = requests.put(
         role_url,
         headers={
@@ -458,9 +402,7 @@ def callback():
         timeout=15,
     )
 
-
     if role_response.status_code not in (200, 204):
-
         print(
             "Discord role assignment failed:",
             role_response.status_code,
@@ -477,7 +419,6 @@ def callback():
         a échoué.
         </p>
         """, 500
-
 
     # --------------------------------------------------------
     # SUCCESS
@@ -514,13 +455,11 @@ def callback():
 # ============================================================
 
 def register_verify_command():
-
     url = (
         f"{DISCORD_API}/applications/"
         f"{DISCORD_APPLICATION_ID}/guilds/"
         f"{DISCORD_GUILD_ID}/commands"
     )
-
 
     commands = [
         {
@@ -531,9 +470,7 @@ def register_verify_command():
         }
     ]
 
-
     try:
-
         response = requests.put(
             url,
             headers={
@@ -546,15 +483,12 @@ def register_verify_command():
             timeout=15,
         )
 
-
         if response.status_code == 200:
-
             print(
                 "Discord command /verify registered."
             )
 
         else:
-
             print(
                 "Unable to register Discord command:",
                 response.status_code,
@@ -562,14 +496,11 @@ def register_verify_command():
             )
 
     except Exception as error:
-
         print(
             "Discord command registration error:",
             repr(error),
         )
 
-
-# Register command when Render starts
 
 register_verify_command()
 
@@ -579,7 +510,6 @@ register_verify_command()
 # ============================================================
 
 if __name__ == "__main__":
-
     port = int(
         os.environ.get(
             "PORT",
