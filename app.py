@@ -412,7 +412,7 @@ def get_eve_identity(access_token):
 
 
 # ============================================================
-# DISCORD ROLE HELPERS
+# DISCORD HELPERS
 # ============================================================
 
 def add_discord_role(
@@ -454,6 +454,32 @@ def remove_discord_role(
         headers={
             "Authorization":
                 f"Bot {DISCORD_BOT_TOKEN}",
+        },
+        timeout=15,
+    )
+
+
+def sync_discord_nickname(
+    guild_id,
+    user_id,
+    character_name,
+):
+    member_url = (
+        f"{DISCORD_API}/guilds/"
+        f"{guild_id}/members/"
+        f"{user_id}"
+    )
+
+    return requests.patch(
+        member_url,
+        headers={
+            "Authorization":
+                f"Bot {DISCORD_BOT_TOKEN}",
+            "Content-Type":
+                "application/json",
+        },
+        json={
+            "nick": character_name,
         },
         timeout=15,
     )
@@ -794,41 +820,22 @@ def callback():
         <h2>❌ Invalid Discord server</h2>
         """, 400
 
-    if verification_type not in (
-        "main",
-        "alt",
-    ):
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Invalid verification type</h2>
-        """, 400
-
     token_response = requests.post(
         EVE_TOKEN_URL,
-
         auth=(
             EVE_CLIENT_ID,
             EVE_CLIENT_SECRET,
         ),
-
         data={
             "grant_type":
                 "authorization_code",
-
             "code":
                 code,
         },
-
         timeout=15,
     )
 
     if token_response.status_code != 200:
-        print(
-            "EVE token request failed:",
-            token_response.status_code,
-            token_response.text,
-        )
-
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Unable to obtain EVE access token</h2>
@@ -865,17 +872,10 @@ def callback():
             f"{ESI_BASE_URL}/characters/"
             f"{character_id}/"
         ),
-
         timeout=15,
     )
 
     if character_response.status_code != 200:
-        print(
-            "ESI character lookup failed:",
-            character_response.status_code,
-            character_response.text,
-        )
-
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Unable to retrieve character information</h2>
@@ -918,18 +918,15 @@ def callback():
 
     if verification_type == "main":
 
-        member_role_response = (
-            add_discord_role(
-                guild_id,
-                discord_user_id,
-                DISCORD_MEMBER_ROLE_ID,
-            )
+        member_role_response = add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_MEMBER_ROLE_ID,
         )
 
-        if (
-            member_role_response.status_code
-            not in
-            (200, 204)
+        if member_role_response.status_code not in (
+            200,
+            204,
         ):
             return """
             <h1>Freeborn Verify</h1>
@@ -940,18 +937,15 @@ def callback():
             </p>
             """, 500
 
-        eve_verified_response = (
-            add_discord_role(
-                guild_id,
-                discord_user_id,
-                DISCORD_EVE_VERIFIED_ROLE_ID,
-            )
+        eve_verified_response = add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_EVE_VERIFIED_ROLE_ID,
         )
 
-        if (
-            eve_verified_response.status_code
-            not in
-            (200, 204)
+        if eve_verified_response.status_code not in (
+            200,
+            204,
         ):
             return """
             <h1>Freeborn Verify</h1>
@@ -962,18 +956,15 @@ def callback():
             </p>
             """, 500
 
-        main_character_response = (
-            add_discord_role(
-                guild_id,
-                discord_user_id,
-                DISCORD_MAIN_CHARACTER_ROLE_ID,
-            )
+        main_character_response = add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_MAIN_CHARACTER_ROLE_ID,
         )
 
-        if (
-            main_character_response.status_code
-            not in
-            (200, 204)
+        if main_character_response.status_code not in (
+            200,
+            204,
         ):
             return """
             <h1>Freeborn Verify</h1>
@@ -984,22 +975,18 @@ def callback():
             </p>
             """, 500
 
-        recruit_role_response = (
-            remove_discord_role(
-                guild_id,
-                discord_user_id,
-                DISCORD_RECRUIT_ROLE_ID,
-            )
+        recruit_role_response = remove_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_RECRUIT_ROLE_ID,
         )
 
-        if (
-            recruit_role_response.status_code
-            not in
-            (200, 204)
+        if recruit_role_response.status_code not in (
+            200,
+            204,
         ):
             print(
-                "Discord recruit role "
-                "removal failed:",
+                "Discord recruit role removal failed:",
                 recruit_role_response.status_code,
                 recruit_role_response.text,
             )
@@ -1028,6 +1015,34 @@ def callback():
             </p>
             """, 500
 
+        nickname_response = sync_discord_nickname(
+            guild_id,
+            discord_user_id,
+            character_name,
+        )
+
+        nickname_changed = (
+            nickname_response.status_code
+            in
+            (200, 204)
+        )
+
+        if not nickname_changed:
+            print(
+                "Discord nickname sync failed:",
+                nickname_response.status_code,
+                nickname_response.text,
+            )
+
+        nickname_status = (
+            "<p>Le pseudo Discord a été synchronisé "
+            f"sur <strong>{character_name}</strong>.</p>"
+            if nickname_changed
+            else
+            "<p>Le pseudo Discord n'a pas pu être modifié "
+            "(hiérarchie ou permission Discord).</p>"
+        )
+
         return f"""
         <h1>Freeborn Verify</h1>
 
@@ -1048,6 +1063,8 @@ def callback():
         est enregistré comme
         <strong>Main Character</strong>.
         </p>
+
+        {nickname_status}
 
         <p>
         Tu peux maintenant retourner
@@ -1094,11 +1111,6 @@ def callback():
         )
 
     except ValueError as error:
-        print(
-            "Alt rejected:",
-            repr(error),
-        )
-
         if (
             "Main character cannot"
             in str(error)
@@ -1143,26 +1155,16 @@ def callback():
         </p>
         """, 500
 
-    alt_role_response = (
-        add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_ALT_CHARACTER_ROLE_ID,
-        )
+    alt_role_response = add_discord_role(
+        guild_id,
+        discord_user_id,
+        DISCORD_ALT_CHARACTER_ROLE_ID,
     )
 
-    if (
-        alt_role_response.status_code
-        not in
-        (200, 204)
+    if alt_role_response.status_code not in (
+        200,
+        204,
     ):
-        print(
-            "Discord Alt Character "
-            "role assignment failed:",
-            alt_role_response.status_code,
-            alt_role_response.text,
-        )
-
         return """
         <h1>Freeborn Verify</h1>
 
@@ -1231,38 +1233,30 @@ def register_commands():
         },
     ]
 
-    try:
-        response = requests.put(
-            url,
-            headers={
-                "Authorization":
-                    f"Bot {DISCORD_BOT_TOKEN}",
-                "Content-Type":
-                    "application/json",
-            },
-            json=commands,
-            timeout=15,
+    response = requests.put(
+        url,
+        headers={
+            "Authorization":
+                f"Bot {DISCORD_BOT_TOKEN}",
+            "Content-Type":
+                "application/json",
+        },
+        json=commands,
+        timeout=15,
+    )
+
+    if response.status_code == 200:
+        print(
+            "Discord commands "
+            "/verify and /alt registered."
         )
 
-        if response.status_code == 200:
-            print(
-                "Discord commands "
-                "/verify and /alt registered."
-            )
-
-        else:
-            print(
-                "Unable to register "
-                "Discord commands:",
-                response.status_code,
-                response.text,
-            )
-
-    except Exception as error:
+    else:
         print(
-            "Discord command "
-            "registration error:",
-            repr(error),
+            "Unable to register "
+            "Discord commands:",
+            response.status_code,
+            response.text,
         )
 
 
@@ -1271,7 +1265,6 @@ def register_commands():
 # ============================================================
 
 init_database()
-
 register_commands()
 
 
