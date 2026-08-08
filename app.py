@@ -362,6 +362,33 @@ def get_member_alts(
             return cur.fetchall()
 
 
+def count_member_alts(
+    discord_user_id
+):
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM eve_characters
+                WHERE discord_user_id = %s
+                AND character_type = 'alt';
+                """,
+                (
+                    str(discord_user_id),
+                ),
+            )
+
+            return int(
+                cur.fetchone()[0]
+            )
+
+
 def get_database_stats():
 
     with psycopg.connect(
@@ -681,6 +708,122 @@ def save_alt_character(
             )
 
         conn.commit()
+
+
+def remove_alt_character(
+    discord_user_id,
+    character_id
+):
+
+    discord_user_id = str(
+        discord_user_id
+    )
+
+    character_id = int(
+        character_id
+    )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+
+        try:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT
+                        character_id,
+                        character_name,
+                        character_type
+                    FROM eve_characters
+                    WHERE character_id = %s
+                    AND discord_user_id = %s
+                    FOR UPDATE;
+                    """,
+                    (
+                        character_id,
+                        discord_user_id,
+                    ),
+                )
+
+                character = (
+                    cur.fetchone()
+                )
+
+                if not character:
+
+                    raise ValueError(
+                        "Character not linked "
+                        "to this Discord account"
+                    )
+
+                character_type = (
+                    character[2]
+                )
+
+                if (
+                    character_type
+                    != "alt"
+                ):
+
+                    raise ValueError(
+                        "Main Character cannot "
+                        "be removed with /alt-remove"
+                    )
+
+                character_name = (
+                    character[1]
+                )
+
+                cur.execute(
+                    """
+                    DELETE FROM eve_characters
+                    WHERE character_id = %s
+                    AND discord_user_id = %s
+                    AND character_type = 'alt';
+                    """,
+                    (
+                        character_id,
+                        discord_user_id,
+                    ),
+                )
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM eve_characters
+                    WHERE discord_user_id = %s
+                    AND character_type = 'alt';
+                    """,
+                    (
+                        discord_user_id,
+                    ),
+                )
+
+                remaining_alts = int(
+                    cur.fetchone()[0]
+                )
+
+            conn.commit()
+
+            return {
+                "character_id":
+                    character_id,
+
+                "character_name":
+                    character_name,
+
+                "remaining_alts":
+                    remaining_alts,
+            }
+
+        except Exception:
+
+            conn.rollback()
+
+            raise
 
 
 def update_character_sync_status(
@@ -2002,7 +2145,7 @@ def build_sync_message(
 
 
 # ============================================================
-# SYNC STATUS MESSAGE
+# SYNC STATUS
 # ============================================================
 
 def build_sync_status_message():
@@ -2165,8 +2308,10 @@ def handle_autocomplete(
 
     if (
         command_name
-        !=
-        "main-change"
+        not in {
+            "main-change",
+            "alt-remove",
+        }
     ):
 
         return jsonify({
@@ -2242,8 +2387,7 @@ def handle_autocomplete(
     except Exception as error:
 
         print(
-            "Main change autocomplete "
-            "database error:",
+            "Autocomplete database error:",
             repr(error),
         )
 
@@ -2270,17 +2414,33 @@ def handle_autocomplete(
 
             continue
 
-        status_text = (
-            "Freeborn"
-            if in_corporation
-            else
-            "à revérifier"
-        )
+        if (
+            command_name
+            ==
+            "main-change"
+        ):
+
+            status_text = (
+                "Freeborn"
+                if in_corporation
+                else
+                "à revérifier"
+            )
+
+            display_name = (
+                f"{character_name} — "
+                f"{status_text}"
+            )
+
+        else:
+
+            display_name = (
+                character_name
+            )
 
         choices.append({
             "name":
-                f"{character_name} — "
-                f"{status_text}",
+                display_name,
 
             "value":
                 str(character_id),
@@ -2545,8 +2705,276 @@ def interactions():
         )
 
     # ========================================================
+    # /alt-remove
+    # MEMBER COMMAND
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "alt-remove"
+    ):
+
+        options = (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        )
+
+        selected_character_id = None
+
+        for option in options:
+
+            if (
+                option.get("name")
+                ==
+                "personnage"
+            ):
+
+                selected_character_id = (
+                    option.get(
+                        "value"
+                    )
+                )
+
+                break
+
+        if not selected_character_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun Alt Character "
+                        "n'a été sélectionné.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        # ----------------------------------------------------
+        # Verify the selected character is really one
+        # of this member's registered Alts
+        # ----------------------------------------------------
+
+        try:
+
+            alts = (
+                get_member_alts(
+                    discord_user_id
+                )
+            )
+
+        except Exception as error:
+
+            print(
+                "Alt remove lookup failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Impossible de lire "
+                        "tes Alt Characters.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        selected_alt = None
+
+        for alt in alts:
+
+            if (
+                str(alt[0])
+                ==
+                str(selected_character_id)
+            ):
+
+                selected_alt = alt
+
+                break
+
+        if not selected_alt:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Ce personnage n'est pas "
+                        "un Alt Character enregistré "
+                        "sur ton compte.\n\n"
+                        "Ton Main ne peut jamais être "
+                        "supprimé avec **/alt-remove**.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        # ----------------------------------------------------
+        # Remove Alt from Neon
+        # ----------------------------------------------------
+
+        try:
+
+            result = (
+                remove_alt_character(
+                    discord_user_id,
+                    selected_character_id,
+                )
+            )
+
+        except ValueError as error:
+
+            print(
+                "Alt remove refused:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ **Suppression refusée**\n\n"
+                        f"{str(error)}",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        except Exception as error:
+
+            print(
+                "Alt remove database error:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ **Erreur base de données**\n\n"
+                        "L'Alt n'a pas été supprimé.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        remaining_alts = (
+            result[
+                "remaining_alts"
+            ]
+        )
+
+        # ----------------------------------------------------
+        # Remove Discord Alt Character role only if no Alts
+        # remain
+        # ----------------------------------------------------
+
+        if (
+            remaining_alts
+            ==
+            0
+        ):
+
+            role_response = (
+                remove_discord_role(
+                    guild_id,
+                    discord_user_id,
+                    DISCORD_ALT_CHARACTER_ROLE_ID,
+                )
+            )
+
+            role_removed = (
+                role_response.status_code
+                in
+                (200, 204)
+            )
+
+            if role_removed:
+
+                role_text = (
+                    "🔹 Aucun Alt restant : "
+                    "rôle **Alt Character** retiré."
+                )
+
+            else:
+
+                role_text = (
+                    "⚠️ Aucun Alt restant, mais "
+                    "le rôle **Alt Character** "
+                    "n'a pas pu être retiré."
+                )
+
+        else:
+
+            role_text = (
+                f"🔹 Alts restants : "
+                f"**{remaining_alts}** — "
+                "rôle **Alt Character** conservé."
+            )
+
+        current_main = (
+            get_main_character(
+                discord_user_id
+            )
+        )
+
+        current_main_name = (
+            current_main[1]
+            if current_main
+            else
+            "Inconnu"
+        )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "🗑️ **Freeborn Alt Remove**\n\n"
+
+                    f"Alt supprimé : "
+                    f"**{result['character_name']}**\n\n"
+
+                    "✅ Le personnage a été retiré "
+                    "de ton profil Freeborn.\n"
+
+                    f"✅ Ton Main "
+                    f"**{current_main_name}** "
+                    "reste inchangé.\n"
+
+                    f"{role_text}",
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
     # /sync-status
-    # STAFF ONLY - READ ONLY
+    # STAFF ONLY
     # ========================================================
 
     if (
@@ -4024,6 +4452,37 @@ def register_commands():
 
         {
             "name":
+                "alt-remove",
+
+            "description":
+                "Supprimer un Alt "
+                "de ton profil Freeborn",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type":
+                        3,
+
+                    "name":
+                        "personnage",
+
+                    "description":
+                        "Alt Character à supprimer",
+
+                    "required":
+                        True,
+
+                    "autocomplete":
+                        True,
+                }
+            ],
+        },
+
+        {
+            "name":
                 "main-change",
 
             "description":
@@ -4163,10 +4622,10 @@ def register_commands():
 
             print(
                 "Discord commands registered: "
-                "/verify, /alt, /main-change, "
-                "/member-info, /db-health, "
-                "/sync-status, /sync-check, "
-                "/sync-apply."
+                "/verify, /alt, /alt-remove, "
+                "/main-change, /member-info, "
+                "/db-health, /sync-status, "
+                "/sync-check, /sync-apply."
             )
 
         else:
