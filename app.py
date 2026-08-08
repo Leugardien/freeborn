@@ -7,11 +7,14 @@ import requests
 from flask import Flask, jsonify, request
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
+
 from itsdangerous import (
     URLSafeTimedSerializer,
+    TimestampSigner,
     BadSignature,
     SignatureExpired,
 )
+
 from jose import jwt
 
 
@@ -100,6 +103,7 @@ EVE_METADATA_URL = (
 )
 
 ESI_BASE_URL = "https://esi.evetech.net/latest"
+
 DISCORD_API = "https://discord.com/api/v10"
 
 
@@ -111,6 +115,11 @@ VALID_EVE_ISSUERS = {
 
 state_serializer = URLSafeTimedSerializer(
     FLASK_SECRET_KEY
+)
+
+member_remove_signer = TimestampSigner(
+    FLASK_SECRET_KEY,
+    salt="freeborn-member-remove",
 )
 
 
@@ -132,16 +141,22 @@ def init_database():
                     """
                     CREATE TABLE IF NOT EXISTS eve_characters (
                         character_id BIGINT PRIMARY KEY,
+
                         discord_user_id TEXT NOT NULL,
+
                         character_name TEXT NOT NULL,
+
                         character_type TEXT NOT NULL
                             CHECK (
                                 character_type
                                 IN ('main', 'alt')
                             ),
+
                         corporation_id BIGINT NOT NULL,
+
                         verified_at TIMESTAMPTZ
                             NOT NULL DEFAULT NOW(),
+
                         updated_at TIMESTAMPTZ
                             NOT NULL DEFAULT NOW()
                     );
@@ -207,9 +222,12 @@ def get_main_character(
                 SELECT
                     character_id,
                     character_name
+
                 FROM eve_characters
+
                 WHERE discord_user_id = %s
                 AND character_type = 'main'
+
                 LIMIT 1;
                 """,
                 (
@@ -248,7 +266,9 @@ def get_character_record(
                     discord_user_id,
                     character_name,
                     character_type
+
                 FROM eve_characters
+
                 WHERE character_id = %s;
                 """,
                 (
@@ -278,14 +298,18 @@ def get_all_characters():
                     in_corporation,
                     last_checked_at,
                     left_corporation_at
+
                 FROM eve_characters
+
                 ORDER BY
                     discord_user_id,
+
                     CASE
                         WHEN character_type = 'main'
                         THEN 0
                         ELSE 1
                     END,
+
                     character_name;
                 """
             )
@@ -314,14 +338,19 @@ def get_member_characters(
                     verified_at,
                     last_checked_at,
                     left_corporation_at
+
                 FROM eve_characters
+
                 WHERE discord_user_id = %s
+
                 ORDER BY
+
                     CASE
                         WHEN character_type = 'main'
                         THEN 0
                         ELSE 1
                     END,
+
                     character_name;
                 """,
                 (
@@ -349,9 +378,12 @@ def get_member_alts(
                     character_name,
                     corporation_id,
                     in_corporation
+
                 FROM eve_characters
+
                 WHERE discord_user_id = %s
                 AND character_type = 'alt'
+
                 ORDER BY character_name;
                 """,
                 (
@@ -375,7 +407,9 @@ def count_member_alts(
             cur.execute(
                 """
                 SELECT COUNT(*)
+
                 FROM eve_characters
+
                 WHERE discord_user_id = %s
                 AND character_type = 'alt';
                 """,
@@ -410,7 +444,9 @@ def get_database_stats():
 
             cur.execute(
                 """
-                SELECT COUNT(DISTINCT discord_user_id)
+                SELECT COUNT(
+                    DISTINCT discord_user_id
+                )
                 FROM eve_characters;
                 """
             )
@@ -422,7 +458,9 @@ def get_database_stats():
             cur.execute(
                 """
                 SELECT COUNT(*)
+
                 FROM eve_characters
+
                 WHERE character_type = 'main';
                 """
             )
@@ -434,7 +472,9 @@ def get_database_stats():
             cur.execute(
                 """
                 SELECT COUNT(*)
+
                 FROM eve_characters
+
                 WHERE character_type = 'alt';
                 """
             )
@@ -446,7 +486,9 @@ def get_database_stats():
             cur.execute(
                 """
                 SELECT COUNT(*)
+
                 FROM eve_characters
+
                 WHERE in_corporation = FALSE;
                 """
             )
@@ -573,6 +615,7 @@ def save_main_character(
                     last_checked_at,
                     left_corporation_at
                 )
+
                 VALUES (
                     %s,
                     %s,
@@ -583,22 +626,31 @@ def save_main_character(
                     NOW(),
                     NULL
                 )
+
                 ON CONFLICT (character_id)
+
                 DO UPDATE SET
                     discord_user_id =
                         EXCLUDED.discord_user_id,
+
                     character_name =
                         EXCLUDED.character_name,
+
                     character_type =
                         'main',
+
                     corporation_id =
                         EXCLUDED.corporation_id,
+
                     in_corporation =
                         TRUE,
+
                     last_checked_at =
                         NOW(),
+
                     left_corporation_at =
                         NULL,
+
                     updated_at =
                         NOW();
                 """,
@@ -648,7 +700,8 @@ def save_alt_character(
 
         if (
             existing_character_type
-            == "main"
+            ==
+            "main"
         ):
 
             raise ValueError(
@@ -674,6 +727,7 @@ def save_alt_character(
                     last_checked_at,
                     left_corporation_at
                 )
+
                 VALUES (
                     %s,
                     %s,
@@ -684,18 +738,26 @@ def save_alt_character(
                     NOW(),
                     NULL
                 )
+
                 ON CONFLICT (character_id)
+
                 DO UPDATE SET
+
                     character_name =
                         EXCLUDED.character_name,
+
                     corporation_id =
                         EXCLUDED.corporation_id,
+
                     in_corporation =
                         TRUE,
+
                     last_checked_at =
                         NOW(),
+
                     left_corporation_at =
                         NULL,
+
                     updated_at =
                         NOW();
                 """,
@@ -712,7 +774,7 @@ def save_alt_character(
 
 def remove_alt_character(
     discord_user_id,
-    character_id
+    character_id,
 ):
 
     discord_user_id = str(
@@ -737,9 +799,12 @@ def remove_alt_character(
                         character_id,
                         character_name,
                         character_type
+
                     FROM eve_characters
+
                     WHERE character_id = %s
                     AND discord_user_id = %s
+
                     FOR UPDATE;
                     """,
                     (
@@ -765,7 +830,8 @@ def remove_alt_character(
 
                 if (
                     character_type
-                    != "alt"
+                    !=
+                    "alt"
                 ):
 
                     raise ValueError(
@@ -780,6 +846,7 @@ def remove_alt_character(
                 cur.execute(
                     """
                     DELETE FROM eve_characters
+
                     WHERE character_id = %s
                     AND discord_user_id = %s
                     AND character_type = 'alt';
@@ -793,7 +860,9 @@ def remove_alt_character(
                 cur.execute(
                     """
                     SELECT COUNT(*)
+
                     FROM eve_characters
+
                     WHERE discord_user_id = %s
                     AND character_type = 'alt';
                     """,
@@ -826,6 +895,80 @@ def remove_alt_character(
             raise
 
 
+def remove_member_profile(
+    discord_user_id
+):
+
+    discord_user_id = str(
+        discord_user_id
+    )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+
+        try:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT
+                        character_id,
+                        character_name,
+                        character_type
+
+                    FROM eve_characters
+
+                    WHERE discord_user_id = %s
+
+                    ORDER BY
+                        CASE
+                            WHEN character_type = 'main'
+                            THEN 0
+                            ELSE 1
+                        END,
+                        character_name
+
+                    FOR UPDATE;
+                    """,
+                    (
+                        discord_user_id,
+                    ),
+                )
+
+                characters = (
+                    cur.fetchall()
+                )
+
+                if not characters:
+
+                    raise ValueError(
+                        "No EVE characters registered "
+                        "for this Discord account"
+                    )
+
+                cur.execute(
+                    """
+                    DELETE FROM eve_characters
+                    WHERE discord_user_id = %s;
+                    """,
+                    (
+                        discord_user_id,
+                    ),
+                )
+
+            conn.commit()
+
+            return characters
+
+        except Exception:
+
+            conn.rollback()
+
+            raise
+
+
 def update_character_sync_status(
     character_id,
     corporation_id,
@@ -843,12 +986,14 @@ def update_character_sync_status(
                 cur.execute(
                     """
                     UPDATE eve_characters
+
                     SET
                         corporation_id = %s,
                         in_corporation = TRUE,
                         last_checked_at = NOW(),
                         left_corporation_at = NULL,
                         updated_at = NOW()
+
                     WHERE character_id = %s;
                     """,
                     (
@@ -862,16 +1007,20 @@ def update_character_sync_status(
                 cur.execute(
                     """
                     UPDATE eve_characters
+
                     SET
                         corporation_id = %s,
                         in_corporation = FALSE,
                         last_checked_at = NOW(),
+
                         left_corporation_at =
                             COALESCE(
                                 left_corporation_at,
                                 NOW()
                             ),
+
                         updated_at = NOW()
+
                     WHERE character_id = %s;
                     """,
                     (
@@ -915,9 +1064,12 @@ def change_main_character(
                         character_id,
                         character_name,
                         corporation_id
+
                     FROM eve_characters
+
                     WHERE discord_user_id = %s
                     AND character_type = 'main'
+
                     FOR UPDATE;
                     """,
                     (
@@ -949,10 +1101,13 @@ def change_main_character(
                         character_id,
                         character_name,
                         corporation_id
+
                     FROM eve_characters
+
                     WHERE character_id = %s
                     AND discord_user_id = %s
                     AND character_type = 'alt'
+
                     FOR UPDATE;
                     """,
                     (
@@ -979,9 +1134,11 @@ def change_main_character(
                 cur.execute(
                     """
                     UPDATE eve_characters
+
                     SET
                         character_type = 'alt',
                         updated_at = NOW()
+
                     WHERE character_id = %s
                     AND discord_user_id = %s;
                     """,
@@ -994,6 +1151,7 @@ def change_main_character(
                 cur.execute(
                     """
                     UPDATE eve_characters
+
                     SET
                         character_type = 'main',
                         corporation_id = %s,
@@ -1001,6 +1159,7 @@ def change_main_character(
                         last_checked_at = NOW(),
                         left_corporation_at = NULL,
                         updated_at = NOW()
+
                     WHERE character_id = %s
                     AND discord_user_id = %s;
                     """,
@@ -1243,6 +1402,7 @@ def verify_discord_signature(
         verify_key.verify(
             timestamp.encode()
             + body,
+
             bytes.fromhex(
                 signature
             ),
@@ -1305,6 +1465,57 @@ def staff_access_denied():
                 64,
         },
     })
+
+
+# ============================================================
+# MEMBER REMOVE SECURITY TOKEN
+# ============================================================
+
+def create_member_remove_token(
+    target_user_id,
+    requester_user_id,
+):
+
+    payload = (
+        f"{target_user_id}:"
+        f"{requester_user_id}"
+    )
+
+    signed = (
+        member_remove_signer.sign(
+            payload.encode()
+        )
+    )
+
+    return signed.decode()
+
+
+def read_member_remove_token(
+    token,
+):
+
+    unsigned = (
+        member_remove_signer.unsign(
+            token,
+            max_age=300,
+        )
+    )
+
+    payload = (
+        unsigned.decode()
+    )
+
+    target_user_id, requester_user_id = (
+        payload.split(
+            ":",
+            1,
+        )
+    )
+
+    return (
+        target_user_id,
+        requester_user_id,
+    )
 
 
 # ============================================================
@@ -1386,6 +1597,7 @@ def get_eve_identity(
         key=signing_key,
         algorithms=["RS256"],
         audience="EVE Online",
+
         options={
             "verify_iss":
                 False,
@@ -1503,7 +1715,8 @@ def get_current_eve_character(
 
     if (
         response.status_code
-        != 200
+        !=
+        200
     ):
 
         print(
@@ -1547,10 +1760,12 @@ def add_discord_role(
 
     return requests.put(
         role_url,
+
         headers={
             "Authorization":
                 f"Bot {DISCORD_BOT_TOKEN}",
         },
+
         timeout=15,
     )
 
@@ -1570,10 +1785,12 @@ def remove_discord_role(
 
     return requests.delete(
         role_url,
+
         headers={
             "Authorization":
                 f"Bot {DISCORD_BOT_TOKEN}",
         },
+
         timeout=15,
     )
 
@@ -1592,6 +1809,7 @@ def sync_discord_nickname(
 
     return requests.patch(
         member_url,
+
         headers={
             "Authorization":
                 f"Bot {DISCORD_BOT_TOKEN}",
@@ -1599,12 +1817,53 @@ def sync_discord_nickname(
             "Content-Type":
                 "application/json",
         },
+
         json={
             "nick":
                 character_name,
         },
+
         timeout=15,
     )
+
+
+def remove_all_freeborn_roles(
+    discord_user_id
+):
+
+    role_ids = [
+        DISCORD_MEMBER_ROLE_ID,
+        DISCORD_EVE_VERIFIED_ROLE_ID,
+        DISCORD_MAIN_CHARACTER_ROLE_ID,
+        DISCORD_ALT_CHARACTER_ROLE_ID,
+    ]
+
+    results = []
+
+    for role_id in role_ids:
+
+        response = (
+            remove_discord_role(
+                DISCORD_GUILD_ID,
+                discord_user_id,
+                role_id,
+            )
+        )
+
+        results.append({
+            "role_id":
+                role_id,
+
+            "status_code":
+                response.status_code,
+
+            "success":
+                response.status_code
+                in
+                (200, 204),
+        })
+
+    return results
 
 
 # ============================================================
@@ -1687,8 +1946,12 @@ def revoke_alt_role_if_needed(
     if (
         main["status"]
         != "ok"
+
         or
-        not main["in_corporation"]
+
+        not main[
+            "in_corporation"
+        ]
     ):
 
         return None
@@ -1698,15 +1961,20 @@ def revoke_alt_role_if_needed(
         return None
 
     if any(
-        item["status"] != "ok"
-        for item in alt_results
+        item["status"]
+        != "ok"
+
+        for item
+        in alt_results
     ):
 
         return None
 
     if any(
         item["in_corporation"]
-        for item in alt_results
+
+        for item
+        in alt_results
     ):
 
         return None
@@ -1719,7 +1987,9 @@ def revoke_alt_role_if_needed(
         )
     )
 
-    return response.status_code
+    return (
+        response.status_code
+    )
 
 
 # ============================================================
@@ -1784,7 +2054,8 @@ def run_sync(
 
             if (
                 response.status_code
-                != 200
+                !=
+                200
             ):
 
                 result["status"] = (
@@ -2422,8 +2693,11 @@ def handle_autocomplete(
 
             status_text = (
                 "Freeborn"
+
                 if in_corporation
+
                 else
+
                 "à revérifier"
             )
 
@@ -2460,6 +2734,405 @@ def handle_autocomplete(
         "data": {
             "choices":
                 choices,
+        },
+    })
+
+
+# ============================================================
+# MESSAGE COMPONENT HANDLER
+# ============================================================
+
+def handle_message_component(
+    data
+):
+
+    custom_id = (
+        data[
+            "data"
+        ].get(
+            "custom_id",
+            "",
+        )
+    )
+
+    # --------------------------------------------------------
+    # Ignore unknown components
+    # --------------------------------------------------------
+
+    if not (
+        custom_id.startswith(
+            "mr_yes:"
+        )
+        or
+        custom_id.startswith(
+            "mr_no:"
+        )
+    ):
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "⚠️ Composant inconnu.",
+
+                "components":
+                    [],
+            },
+        })
+
+    try:
+
+        actor_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+    except Exception:
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "⚠️ Impossible d'identifier "
+                    "l'utilisateur Discord.",
+
+                "components":
+                    [],
+            },
+        })
+
+    token = (
+        custom_id.split(
+            ":",
+            1,
+        )[1]
+    )
+
+    try:
+
+        (
+            target_user_id,
+            requester_user_id,
+        ) = read_member_remove_token(
+            token
+        )
+
+    except SignatureExpired:
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "⌛ **Confirmation expirée**\n\n"
+                    "La suppression n'a pas été effectuée.\n\n"
+                    "Relance **/member-remove** "
+                    "si nécessaire.",
+
+                "components":
+                    [],
+            },
+        })
+
+    except (
+        BadSignature,
+        ValueError,
+    ):
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "⛔ **Confirmation invalide**\n\n"
+                    "Aucune modification n'a été effectuée.",
+
+                "components":
+                    [],
+            },
+        })
+
+    # --------------------------------------------------------
+    # Only the staff member who launched the command may act
+    # --------------------------------------------------------
+
+    if (
+        actor_user_id
+        !=
+        requester_user_id
+    ):
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "⛔ Cette confirmation ne "
+                    "t'appartient pas.",
+
+                "flags":
+                    64,
+            },
+        })
+
+    # --------------------------------------------------------
+    # Staff permissions are checked again
+    # --------------------------------------------------------
+
+    if not interaction_is_staff(
+        data
+    ):
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "⛔ **Accès refusé**\n\n"
+                    "Tu ne possèdes plus un rôle "
+                    "Fondateur, CEO ou Directeur.\n\n"
+                    "Aucune suppression effectuée.",
+
+                "components":
+                    [],
+            },
+        })
+
+    # --------------------------------------------------------
+    # CANCEL
+    # --------------------------------------------------------
+
+    if custom_id.startswith(
+        "mr_no:"
+    ):
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "🛡️ **Suppression annulée**\n\n"
+                    "Aucune donnée Neon n'a été modifiée.\n"
+                    "Aucun rôle Discord n'a été modifié.",
+
+                "components":
+                    [],
+            },
+        })
+
+    # --------------------------------------------------------
+    # Extra protection against self-removal
+    # --------------------------------------------------------
+
+    if (
+        target_user_id
+        ==
+        actor_user_id
+    ):
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "⛔ **Suppression refusée**\n\n"
+                    "Un membre du staff ne peut pas "
+                    "supprimer son propre profil avec "
+                    "**/member-remove**.",
+
+                "components":
+                    [],
+            },
+        })
+
+    # --------------------------------------------------------
+    # Recheck database BEFORE destruction
+    # --------------------------------------------------------
+
+    try:
+
+        characters_before_delete = (
+            get_member_characters(
+                target_user_id
+            )
+        )
+
+    except Exception as error:
+
+        print(
+            "Member remove recheck failed:",
+            repr(error),
+        )
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "⚠️ **Erreur base de données**\n\n"
+                    "Le profil n'a pas été supprimé.",
+
+                "components":
+                    [],
+            },
+        })
+
+    if not characters_before_delete:
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "ℹ️ **Aucun profil à supprimer**\n\n"
+                    "Ce compte Discord ne possède plus "
+                    "de personnage EVE enregistré.",
+
+                "components":
+                    [],
+            },
+        })
+
+    # --------------------------------------------------------
+    # DELETE DATABASE PROFILE
+    # --------------------------------------------------------
+
+    try:
+
+        deleted_characters = (
+            remove_member_profile(
+                target_user_id
+            )
+        )
+
+    except Exception as error:
+
+        print(
+            "Member remove database error:",
+            repr(error),
+        )
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    "⚠️ **Suppression interrompue**\n\n"
+                    "Une erreur base de données "
+                    "a empêché la suppression.\n\n"
+                    "Aucun rôle Discord n'a été retiré.",
+
+                "components":
+                    [],
+            },
+        })
+
+    # --------------------------------------------------------
+    # REMOVE DISCORD ROLES
+    # --------------------------------------------------------
+
+    role_results = (
+        remove_all_freeborn_roles(
+            target_user_id
+        )
+    )
+
+    roles_ok = all(
+        item[
+            "success"
+        ]
+        for item
+        in role_results
+    )
+
+    main_names = [
+        row[1]
+        for row in deleted_characters
+        if row[2] == "main"
+    ]
+
+    alt_names = [
+        row[1]
+        for row in deleted_characters
+        if row[2] == "alt"
+    ]
+
+    lines = [
+        "🗑️ **Freeborn Member Remove**",
+        "",
+        f"Compte Discord : `{target_user_id}`",
+        "",
+    ]
+
+    if main_names:
+
+        lines.append(
+            "🔗 Main supprimé : "
+            f"**{main_names[0]}**"
+        )
+
+    if alt_names:
+
+        lines.append(
+            "🔹 Alts supprimés : "
+            f"**{', '.join(alt_names)}**"
+        )
+
+    lines.extend([
+        "",
+        f"🗄️ Personnages supprimés de Neon : "
+        f"**{len(deleted_characters)}**",
+    ])
+
+    if roles_ok:
+
+        lines.extend([
+            "✅ Rôles Freeborn retirés.",
+            "",
+            "✅ **Suppression terminée.**",
+        ])
+
+    else:
+
+        lines.extend([
+            "⚠️ Le profil Neon a été supprimé,",
+            "mais au moins un rôle Discord "
+            "n'a pas pu être retiré.",
+            "",
+            "➡️ Vérifie manuellement les rôles "
+            "du membre.",
+        ])
+
+    return jsonify({
+        "type":
+            7,
+
+        "data": {
+            "content":
+                "\n".join(
+                    lines
+                ),
+
+            "components":
+                [],
         },
     })
 
@@ -2582,7 +3255,7 @@ def interactions():
     )
 
     # ========================================================
-    # DISCORD PING
+    # PING
     # ========================================================
 
     if (
@@ -2595,6 +3268,22 @@ def interactions():
             "type":
                 1
         })
+
+    # ========================================================
+    # MESSAGE COMPONENT
+    # ========================================================
+
+    if (
+        data["type"]
+        ==
+        3
+    ):
+
+        return (
+            handle_message_component(
+                data
+            )
+        )
 
     # ========================================================
     # AUTOCOMPLETE
@@ -2685,6 +3374,7 @@ def interactions():
     # ========================================================
 
     STAFF_ONLY_COMMANDS = {
+        "member-remove",
         "db-health",
         "sync-status",
         "sync-check",
@@ -2694,7 +3384,9 @@ def interactions():
     if (
         command_name
         in STAFF_ONLY_COMMANDS
+
         and
+
         not interaction_is_staff(
             data
         )
@@ -2703,6 +3395,345 @@ def interactions():
         return (
             staff_access_denied()
         )
+
+    # ========================================================
+    # /member-remove
+    # STAFF ONLY
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "member-remove"
+    ):
+
+        options = (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        )
+
+        target_user_id = None
+
+        for option in options:
+
+            if (
+                option.get("name")
+                ==
+                "membre"
+            ):
+
+                target_user_id = str(
+                    option[
+                        "value"
+                    ]
+                )
+
+                break
+
+        if not target_user_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun membre sélectionné.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        # ----------------------------------------------------
+        # Never allow staff to remove own profile by accident
+        # ----------------------------------------------------
+
+        if (
+            target_user_id
+            ==
+            discord_user_id
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Suppression refusée**\n\n"
+                        "Tu ne peux pas supprimer "
+                        "ton propre profil avec "
+                        "**/member-remove**.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        # ----------------------------------------------------
+        # Discord target information
+        # ----------------------------------------------------
+
+        resolved = (
+            data[
+                "data"
+            ].get(
+                "resolved",
+                {},
+            )
+        )
+
+        target_users = (
+            resolved.get(
+                "users",
+                {},
+            )
+        )
+
+        target_members = (
+            resolved.get(
+                "members",
+                {},
+            )
+        )
+
+        target_user = (
+            target_users.get(
+                target_user_id,
+                {},
+            )
+        )
+
+        target_member = (
+            target_members.get(
+                target_user_id,
+                {},
+            )
+        )
+
+        target_display_name = (
+            target_member.get(
+                "nick"
+            )
+
+            or
+
+            target_user.get(
+                "global_name"
+            )
+
+            or
+
+            target_user.get(
+                "username"
+            )
+
+            or
+
+            target_user_id
+        )
+
+        # ----------------------------------------------------
+        # Database preview
+        # ----------------------------------------------------
+
+        try:
+
+            characters = (
+                get_member_characters(
+                    target_user_id
+                )
+            )
+
+        except Exception as error:
+
+            print(
+                "Member remove preview failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Impossible de lire "
+                        "le profil de ce membre.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if not characters:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "ℹ️ **Aucun profil EVE enregistré**\n\n"
+                        f"**{target_display_name}** "
+                        "ne possède aucun personnage "
+                        "dans Freeborn Verify.\n\n"
+                        "Aucune modification effectuée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        main_rows = [
+            row
+            for row in characters
+            if row[2] == "main"
+        ]
+
+        alt_rows = [
+            row
+            for row in characters
+            if row[2] == "alt"
+        ]
+
+        preview_lines = [
+            "⚠️ **CONFIRMATION — MEMBER REMOVE**",
+            "",
+            f"Membre : **{target_display_name}**",
+            f"Discord ID : `{target_user_id}`",
+            "",
+        ]
+
+        if main_rows:
+
+            preview_lines.append(
+                "🔗 Main : "
+                f"**{main_rows[0][1]}**"
+            )
+
+        if alt_rows:
+
+            preview_lines.append(
+                "🔹 Alts : "
+                f"**{', '.join(row[1] for row in alt_rows)}**"
+            )
+
+        preview_lines.extend([
+            "",
+            f"🗄️ Personnages concernés : "
+            f"**{len(characters)}**",
+            "",
+            "Cette action supprimera :",
+            "• toutes les associations EVE dans Neon ;",
+            "• le rôle Membre ;",
+            "• le rôle EVE Verified ;",
+            "• le rôle Main Character ;",
+            "• le rôle Alt Character.",
+            "",
+            "⚠️ **Cette action est destructive.**",
+            "La confirmation expire dans 5 minutes.",
+        ])
+
+        token = (
+            create_member_remove_token(
+                target_user_id,
+                discord_user_id,
+            )
+        )
+
+        confirm_custom_id = (
+            f"mr_yes:{token}"
+        )
+
+        cancel_custom_id = (
+            f"mr_no:{token}"
+        )
+
+        if (
+            len(confirm_custom_id)
+            >
+            100
+            or
+            len(cancel_custom_id)
+            >
+            100
+        ):
+
+            print(
+                "Member remove custom_id too long"
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Impossible de générer "
+                        "la confirmation sécurisée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "\n".join(
+                        preview_lines
+                    ),
+
+                "flags":
+                    64,
+
+                "components": [
+                    {
+                        "type":
+                            1,
+
+                        "components": [
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    4,
+
+                                "label":
+                                    "Confirmer la suppression",
+
+                                "custom_id":
+                                    confirm_custom_id,
+                            },
+
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    2,
+
+                                "label":
+                                    "Annuler",
+
+                                "custom_id":
+                                    cancel_custom_id,
+                            },
+                        ],
+                    }
+                ],
+            },
+        })
 
     # ========================================================
     # /alt-remove
@@ -2757,11 +3788,6 @@ def interactions():
                         64,
                 },
             })
-
-        # ----------------------------------------------------
-        # Verify the selected character is really one
-        # of this member's registered Alts
-        # ----------------------------------------------------
 
         try:
 
@@ -2825,10 +3851,6 @@ def interactions():
                 },
             })
 
-        # ----------------------------------------------------
-        # Remove Alt from Neon
-        # ----------------------------------------------------
-
         try:
 
             result = (
@@ -2886,11 +3908,6 @@ def interactions():
             ]
         )
 
-        # ----------------------------------------------------
-        # Remove Discord Alt Character role only if no Alts
-        # remain
-        # ----------------------------------------------------
-
         if (
             remaining_alts
             ==
@@ -2942,8 +3959,11 @@ def interactions():
 
         current_main_name = (
             current_main[1]
+
             if current_main
+
             else
+
             "Inconnu"
         )
 
@@ -3342,8 +4362,11 @@ def interactions():
         nickname_text = (
             "✅ Pseudo Discord synchronisé "
             f"sur **{result['new_main_name']}**."
+
             if nickname_changed
+
             else
+
             "⚠️ Le changement de Main est validé, "
             "mais le pseudo Discord n'a pas pu "
             "être modifié."
@@ -3402,15 +4425,21 @@ def interactions():
             ].get(
                 "nick"
             )
+
             or
+
             caller_user.get(
                 "global_name"
             )
+
             or
+
             caller_user.get(
                 "username"
             )
+
             or
+
             "Utilisateur Discord"
         )
 
@@ -3453,11 +4482,15 @@ def interactions():
 
         if (
             selected_target
+
             and
+
             target_user_id
             !=
             discord_user_id
+
             and
+
             not interaction_is_staff(
                 data
             )
@@ -3510,15 +4543,21 @@ def interactions():
                 target_member.get(
                     "nick"
                 )
+
                 or
+
                 target_user.get(
                     "global_name"
                 )
+
                 or
+
                 target_user.get(
                     "username"
                 )
+
                 or
+
                 target_display_name
             )
 
@@ -4144,8 +5183,11 @@ def callback():
 
                 existing_main_name = (
                     existing_main[1]
+
                     if existing_main
+
                     else
+
                     "Unknown"
                 )
 
@@ -4218,6 +5260,7 @@ def callback():
             response.status_code
             not in
             (200, 204)
+
             for response
             in role_responses
         ):
@@ -4547,6 +5590,34 @@ def register_commands():
 
         {
             "name":
+                "member-remove",
+
+            "description":
+                "Supprimer complètement "
+                "le profil EVE d'un membre",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type":
+                        6,
+
+                    "name":
+                        "membre",
+
+                    "description":
+                        "Membre Freeborn à supprimer",
+
+                    "required":
+                        True,
+                }
+            ],
+        },
+
+        {
+            "name":
                 "db-health",
 
             "description":
@@ -4624,8 +5695,9 @@ def register_commands():
                 "Discord commands registered: "
                 "/verify, /alt, /alt-remove, "
                 "/main-change, /member-info, "
-                "/db-health, /sync-status, "
-                "/sync-check, /sync-apply."
+                "/member-remove, /db-health, "
+                "/sync-status, /sync-check, "
+                "/sync-apply."
             )
 
         else:
@@ -4633,7 +5705,9 @@ def register_commands():
             print(
                 "Discord command "
                 "registration failed:",
+
                 response.status_code,
+
                 response.text,
             )
 
@@ -4642,6 +5716,7 @@ def register_commands():
         print(
             "Discord command "
             "registration error:",
+
             repr(error),
         )
 
@@ -4651,6 +5726,7 @@ def register_commands():
 # ============================================================
 
 init_database()
+
 register_commands()
 
 
@@ -4668,6 +5744,9 @@ if __name__ == "__main__":
     )
 
     app.run(
-        host="0.0.0.0",
-        port=port,
+        host=
+            "0.0.0.0",
+
+        port=
+            port,
     )
