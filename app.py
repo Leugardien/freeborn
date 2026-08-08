@@ -32,12 +32,15 @@ DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
 
 DISCORD_MEMBER_ROLE_ID = os.environ["DISCORD_MEMBER_ROLE_ID"]
 DISCORD_RECRUIT_ROLE_ID = os.environ["DISCORD_RECRUIT_ROLE_ID"]
+
 DISCORD_EVE_VERIFIED_ROLE_ID = os.environ[
     "DISCORD_EVE_VERIFIED_ROLE_ID"
 ]
+
 DISCORD_MAIN_CHARACTER_ROLE_ID = os.environ[
     "DISCORD_MAIN_CHARACTER_ROLE_ID"
 ]
+
 DISCORD_ALT_CHARACTER_ROLE_ID = os.environ[
     "DISCORD_ALT_CHARACTER_ROLE_ID"
 ]
@@ -209,8 +212,10 @@ def save_main_character(
         character_id
     )
 
-    existing_character = get_character_record(
-        character_id
+    existing_character = (
+        get_character_record(
+            character_id
+        )
     )
 
     if existing_character:
@@ -227,8 +232,10 @@ def save_main_character(
                 "to another Discord account"
             )
 
-    existing_main = get_main_character(
-        discord_user_id
+    existing_main = (
+        get_main_character(
+            discord_user_id
+        )
     )
 
     if existing_main:
@@ -292,8 +299,10 @@ def save_alt_character(
     character_name,
     corporation_id,
 ):
-    existing = get_character_record(
-        character_id
+    existing = (
+        get_character_record(
+            character_id
+        )
     )
 
     if existing:
@@ -358,7 +367,7 @@ def save_alt_character(
 
 
 # ============================================================
-# DISCORD SIGNATURE VERIFICATION
+# DISCORD SIGNATURE
 # ============================================================
 
 def verify_discord_signature(req):
@@ -397,7 +406,7 @@ def verify_discord_signature(req):
 
 
 # ============================================================
-# EVE TOKEN VERIFICATION
+# EVE TOKEN
 # ============================================================
 
 def get_eve_identity(access_token):
@@ -408,7 +417,9 @@ def get_eve_identity(access_token):
 
     metadata_response.raise_for_status()
 
-    metadata = metadata_response.json()
+    metadata = (
+        metadata_response.json()
+    )
 
     jwks_response = requests.get(
         metadata["jwks_uri"],
@@ -436,7 +447,8 @@ def get_eve_identity(access_token):
         for key in jwks["keys"]
         if (
             key.get("kid") == key_id
-            and key.get("alg") == algorithm
+            and
+            key.get("alg") == algorithm
         )
     ]
 
@@ -445,7 +457,9 @@ def get_eve_identity(access_token):
             "Unable to find matching EVE signing key"
         )
 
-    signing_key = matching_keys[0]
+    signing_key = (
+        matching_keys[0]
+    )
 
     payload = jwt.decode(
         access_token,
@@ -488,12 +502,18 @@ def get_eve_identity(access_token):
             audiences
         ]
 
-    if "EVE Online" not in audiences:
+    if (
+        "EVE Online"
+        not in audiences
+    ):
         raise ValueError(
             "EVE Online audience missing"
         )
 
-    if EVE_CLIENT_ID not in audiences:
+    if (
+        EVE_CLIENT_ID
+        not in audiences
+    ):
         raise ValueError(
             "Application Client ID missing "
             "from EVE token audience"
@@ -603,7 +623,125 @@ def sync_discord_nickname(
 
 
 # ============================================================
-# HOME
+# SYNC CHECK
+# ============================================================
+
+def run_sync_check(
+    include_fake_outside=False,
+):
+    characters = (
+        get_all_characters()
+    )
+
+    result_lines = []
+
+    freeborn_count = 0
+    outside_count = 0
+    error_count = 0
+
+    for character in characters:
+        (
+            character_id,
+            discord_user_id,
+            character_name,
+            character_type,
+            stored_corporation_id,
+        ) = character
+
+        try:
+            esi_response = requests.get(
+                (
+                    f"{ESI_BASE_URL}/characters/"
+                    f"{character_id}/"
+                ),
+                timeout=15,
+            )
+
+            if (
+                esi_response.status_code
+                != 200
+            ):
+                error_count += 1
+
+                result_lines.append(
+                    f"⚠️ **{character_name}** "
+                    f"({character_type}) — "
+                    "ESI indisponible"
+                )
+
+                continue
+
+            current_data = (
+                esi_response.json()
+            )
+
+            current_corporation_id = (
+                current_data[
+                    "corporation_id"
+                ]
+            )
+
+            if (
+                current_corporation_id
+                ==
+                FREEBORN_CORPORATION_ID
+            ):
+                freeborn_count += 1
+
+                result_lines.append(
+                    f"✅ **{character_name}** "
+                    f"({character_type}) — "
+                    "Freeborn Legacy"
+                )
+
+            else:
+                outside_count += 1
+
+                result_lines.append(
+                    f"❌ **{character_name}** "
+                    f"({character_type}) — "
+                    "hors Freeborn Legacy"
+                )
+
+        except Exception as error:
+            error_count += 1
+
+            print(
+                "Sync ESI lookup failed:",
+                character_name,
+                repr(error),
+            )
+
+            result_lines.append(
+                f"⚠️ **{character_name}** "
+                f"({character_type}) — "
+                "erreur ESI"
+            )
+
+    # --------------------------------------------------------
+    # CONTROLLED TEST ONLY
+    # No database write
+    # No Discord role modification
+    # --------------------------------------------------------
+
+    if include_fake_outside:
+        outside_count += 1
+
+        result_lines.append(
+            "❌ **TEST - Former Member** "
+            "(main) — hors Freeborn Legacy"
+        )
+
+    return (
+        result_lines,
+        freeborn_count,
+        outside_count,
+        error_count,
+    )
+
+
+# ============================================================
+# HOME / HEALTH
 # ============================================================
 
 @app.route("/")
@@ -615,19 +753,8 @@ def home():
     Service de vérification EVE Online
     pour Freeborn Legacy.
     </p>
-
-    <p>
-    Commandes Discord :
-    <strong>/verify</strong>,
-    <strong>/alt</strong> et
-    <strong>/sync-check</strong>.
-    </p>
     """
 
-
-# ============================================================
-# HEALTH
-# ============================================================
 
 @app.route("/health")
 def health():
@@ -719,7 +846,7 @@ def db_health():
 
 
 # ============================================================
-# DISCORD INTERACTIONS
+# INTERACTIONS
 # ============================================================
 
 @app.route(
@@ -739,12 +866,15 @@ def interactions():
 
     if data["type"] == 1:
         return jsonify({
-            "type": 1
+            "type":
+                1
         })
 
     if data["type"] != 2:
         return jsonify({
-            "type": 4,
+            "type":
+                4,
+
             "data": {
                 "content":
                     "Commande inconnue.",
@@ -766,14 +896,19 @@ def interactions():
         data["guild_id"]
     )
 
-    if guild_id != DISCORD_GUILD_ID:
+    if (
+        guild_id
+        !=
+        DISCORD_GUILD_ID
+    ):
         return jsonify({
-            "type": 4,
+            "type":
+                4,
+
             "data": {
                 "content":
                     "❌ Cette commande est "
-                    "réservée au serveur "
-                    "Freeborn Legacy.",
+                    "réservée à Freeborn Legacy.",
 
                 "flags":
                     64,
@@ -782,146 +917,136 @@ def interactions():
 
     # ========================================================
     # /sync-check
-    # READ-ONLY OBSERVATION MODE
     # ========================================================
 
     if command_name == "sync-check":
         try:
-            characters = (
-                get_all_characters()
+            (
+                result_lines,
+                freeborn_count,
+                outside_count,
+                error_count,
+            ) = run_sync_check(
+                include_fake_outside=False
             )
 
         except Exception as error:
             print(
-                "Sync database lookup failed:",
+                "Sync check failed:",
                 repr(error),
             )
 
             return jsonify({
-                "type": 4,
+                "type":
+                    4,
+
                 "data": {
                     "content":
-                        "⚠️ Impossible de lire "
-                        "la base Freeborn pour "
-                        "le moment.",
+                        "⚠️ Erreur lors du "
+                        "contrôle Freeborn.",
 
                     "flags":
                         64,
                 },
             })
-
-        if not characters:
-            return jsonify({
-                "type": 4,
-                "data": {
-                    "content":
-                        "ℹ️ Aucun personnage "
-                        "n'est encore enregistré.",
-
-                    "flags":
-                        64,
-                },
-            })
-
-        result_lines = []
-
-        freeborn_count = 0
-        outside_count = 0
-        error_count = 0
-
-        for character in characters:
-            (
-                character_id,
-                stored_discord_user_id,
-                character_name,
-                character_type,
-                stored_corporation_id,
-            ) = character
-
-            try:
-                esi_response = requests.get(
-                    (
-                        f"{ESI_BASE_URL}/characters/"
-                        f"{character_id}/"
-                    ),
-                    timeout=15,
-                )
-
-                if (
-                    esi_response.status_code
-                    != 200
-                ):
-                    error_count += 1
-
-                    result_lines.append(
-                        f"⚠️ **{character_name}** "
-                        f"({character_type}) — "
-                        "ESI indisponible"
-                    )
-
-                    continue
-
-                character_data = (
-                    esi_response.json()
-                )
-
-                current_corporation_id = (
-                    character_data[
-                        "corporation_id"
-                    ]
-                )
-
-                if (
-                    current_corporation_id
-                    ==
-                    FREEBORN_CORPORATION_ID
-                ):
-                    freeborn_count += 1
-
-                    result_lines.append(
-                        f"✅ **{character_name}** "
-                        f"({character_type}) — "
-                        "Freeborn Legacy"
-                    )
-
-                else:
-                    outside_count += 1
-
-                    result_lines.append(
-                        f"❌ **{character_name}** "
-                        f"({character_type}) — "
-                        "hors Freeborn Legacy"
-                    )
-
-            except Exception as error:
-                error_count += 1
-
-                print(
-                    "Sync ESI lookup failed:",
-                    character_name,
-                    repr(error),
-                )
-
-                result_lines.append(
-                    f"⚠️ **{character_name}** "
-                    f"({character_type}) — "
-                    "erreur ESI"
-                )
 
         summary = (
             "🔎 **Freeborn Sync Check**\n\n"
-            + "\n".join(result_lines)
+
+            + "\n".join(
+                result_lines
+            )
+
             + "\n\n"
-            + f"✅ Freeborn : **{freeborn_count}**\n"
+
+            + f"✅ Freeborn : "
+              f"**{freeborn_count}**\n"
+
             + f"❌ Hors corporation : "
               f"**{outside_count}**\n"
-            + f"⚠️ Erreurs : **{error_count}**\n\n"
+
+            + f"⚠️ Erreurs : "
+              f"**{error_count}**\n\n"
+
             + "_Mode observation : "
               "aucun rôle n'a été modifié._"
         )
 
         return jsonify({
-            "type": 4,
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    summary,
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # /sync-test-out
+    # ========================================================
+
+    if command_name == "sync-test-out":
+        try:
+            (
+                result_lines,
+                freeborn_count,
+                outside_count,
+                error_count,
+            ) = run_sync_check(
+                include_fake_outside=True
+            )
+
+        except Exception as error:
+            print(
+                "Sync simulation failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Erreur lors de "
+                        "la simulation.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        summary = (
+            "🧪 **Freeborn Sync TEST**\n\n"
+
+            + "\n".join(
+                result_lines
+            )
+
+            + "\n\n"
+
+            + f"✅ Freeborn : "
+              f"**{freeborn_count}**\n"
+
+            + f"❌ Hors corporation : "
+              f"**{outside_count}**\n"
+
+            + f"⚠️ Erreurs : "
+              f"**{error_count}**\n\n"
+
+            + "🧪 **SIMULATION UNIQUEMENT**\n"
+              "Aucune donnée Neon n'a été modifiée.\n"
+              "Aucun rôle Discord n'a été modifié."
+        )
+
+        return jsonify({
+            "type":
+                4,
+
             "data": {
                 "content":
                     summary,
@@ -954,17 +1079,18 @@ def interactions():
 
         except Exception as error:
             print(
-                "Main character lookup failed:",
+                "Main lookup failed:",
                 repr(error),
             )
 
             return jsonify({
-                "type": 4,
+                "type":
+                    4,
+
                 "data": {
                     "content":
-                        "⚠️ Impossible de vérifier "
-                        "ton personnage principal "
-                        "pour le moment.",
+                        "⚠️ Impossible de lire "
+                        "ton Main Character.",
 
                     "flags":
                         64,
@@ -973,13 +1099,13 @@ def interactions():
 
         if not main_exists:
             return jsonify({
-                "type": 4,
+                "type":
+                    4,
+
                 "data": {
                     "content":
-                        "❌ Tu dois d'abord "
-                        "enregistrer ton personnage "
-                        "principal avec **/verify** "
-                        "avant d'ajouter un alt.",
+                        "❌ Utilise d'abord "
+                        "**/verify** pour ton Main.",
 
                     "flags":
                         64,
@@ -988,7 +1114,9 @@ def interactions():
 
     else:
         return jsonify({
-            "type": 4,
+            "type":
+                4,
+
             "data": {
                 "content":
                     "Commande inconnue.",
@@ -1030,13 +1158,14 @@ def interactions():
         f"{urlencode(params)}"
     )
 
-    if verification_type == "main":
+    if (
+        verification_type
+        == "main"
+    ):
         message = (
             "🔐 **Freeborn Verify**\n\n"
 
-            "Pour vérifier ton appartenance "
-            "à **Freeborn Legacy**, "
-            "connecte ton personnage "
+            "Connecte ton personnage "
             "principal EVE Online :\n\n"
 
             f"[Vérifier mon personnage EVE]"
@@ -1047,16 +1176,17 @@ def interactions():
         message = (
             "🔗 **Freeborn Alt Verify**\n\n"
 
-            "Sélectionne le personnage EVE "
-            "que tu souhaites enregistrer "
-            "comme **Alt Character** :\n\n"
+            "Sélectionne le personnage "
+            "à enregistrer comme Alt :\n\n"
 
             f"[Ajouter mon Alt EVE]"
             f"({login_url})"
         )
 
     return jsonify({
-        "type": 4,
+        "type":
+            4,
+
         "data": {
             "content":
                 message,
@@ -1068,7 +1198,7 @@ def interactions():
 
 
 # ============================================================
-# EVE CALLBACK
+# CALLBACK
 # ============================================================
 
 @app.route("/callback")
@@ -1099,7 +1229,6 @@ def callback():
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Verification link expired</h2>
-        <p>Relance la commande sur Discord.</p>
         """, 400
 
     except BadSignature:
@@ -1127,19 +1256,13 @@ def callback():
         )
     )
 
-    if guild_id != DISCORD_GUILD_ID:
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Invalid Discord server</h2>
-        """, 400
-
-    if verification_type not in (
-        "main",
-        "alt",
+    if (
+        guild_id
+        != DISCORD_GUILD_ID
     ):
         return """
         <h1>Freeborn Verify</h1>
-        <h2>❌ Invalid verification type</h2>
+        <h2>❌ Invalid Discord server</h2>
         """, 400
 
     token_response = requests.post(
@@ -1161,15 +1284,17 @@ def callback():
         timeout=15,
     )
 
-    if token_response.status_code != 200:
+    if (
+        token_response.status_code
+        != 200
+    ):
         return """
         <h1>Freeborn Verify</h1>
         <h2>❌ Unable to obtain EVE access token</h2>
         """, 400
 
     access_token = (
-        token_response
-        .json()[
+        token_response.json()[
             "access_token"
         ]
     )
@@ -1201,10 +1326,13 @@ def callback():
         timeout=15,
     )
 
-    if character_response.status_code != 200:
+    if (
+        character_response.status_code
+        != 200
+    ):
         return """
         <h1>Freeborn Verify</h1>
-        <h2>❌ Unable to retrieve character information</h2>
+        <h2>❌ Unable to retrieve character</h2>
         """, 400
 
     character_data = (
@@ -1239,11 +1367,13 @@ def callback():
         """
 
     # ========================================================
-    # MAIN CHARACTER FLOW
+    # MAIN
     # ========================================================
 
-    if verification_type == "main":
-
+    if (
+        verification_type
+        == "main"
+    ):
         try:
             save_main_character(
                 discord_user_id,
@@ -1255,11 +1385,6 @@ def callback():
         except ValueError as error:
             error_text = str(
                 error
-            )
-
-            print(
-                "Main verification refused:",
-                repr(error),
             )
 
             if (
@@ -1287,34 +1412,24 @@ def callback():
                 {character_name}
                 </p>
 
-                <h2>❌ MAIN ALREADY REGISTERED</h2>
+                <h2>
+                ❌ MAIN ALREADY REGISTERED
+                </h2>
 
                 <p>
-                Ton personnage principal actuel est
-                <strong>{existing_main_name}</strong>.
-                </p>
-
-                <p>
-                Tu ne peux pas enregistrer
-                <strong>{character_name}</strong>
-                comme second Main Character.
-                </p>
-
-                <p>
-                Une commande dédiée au changement
-                de Main sera ajoutée ultérieurement.
+                Ton Main actuel est
+                <strong>
+                {existing_main_name}
+                </strong>.
                 </p>
                 """, 400
 
             return """
             <h1>Freeborn Verify</h1>
 
-            <h2>❌ CHARACTER ALREADY LINKED</h2>
-
-            <p>
-            Ce personnage EVE est déjà associé
-            à un autre compte Discord.
-            </p>
+            <h2>
+            ❌ CHARACTER ALREADY LINKED
+            </h2>
             """, 400
 
         except Exception as error:
@@ -1325,99 +1440,45 @@ def callback():
 
             return """
             <h1>Freeborn Verify</h1>
-
             <h2>⚠️ Database error</h2>
-
-            <p>
-            L'enregistrement du Main
-            a échoué.
-            </p>
             """, 500
 
-        member_role_response = (
+        role_responses = [
             add_discord_role(
                 guild_id,
                 discord_user_id,
                 DISCORD_MEMBER_ROLE_ID,
-            )
-        )
+            ),
 
-        if (
-            member_role_response.status_code
-            not in
-            (200, 204)
-        ):
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ Verification succeeded</h2>
-            <p>
-            L'attribution du rôle Membre
-            a échoué.
-            </p>
-            """, 500
-
-        eve_verified_response = (
             add_discord_role(
                 guild_id,
                 discord_user_id,
                 DISCORD_EVE_VERIFIED_ROLE_ID,
-            )
-        )
+            ),
 
-        if (
-            eve_verified_response.status_code
-            not in
-            (200, 204)
-        ):
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ Verification succeeded</h2>
-            <p>
-            L'attribution du rôle
-            EVE Verified a échoué.
-            </p>
-            """, 500
-
-        main_character_response = (
             add_discord_role(
                 guild_id,
                 discord_user_id,
                 DISCORD_MAIN_CHARACTER_ROLE_ID,
-            )
-        )
+            ),
+        ]
 
-        if (
-            main_character_response.status_code
-            not in
-            (200, 204)
+        if any(
+            response.status_code
+            not in (200, 204)
+            for response
+            in role_responses
         ):
             return """
             <h1>Freeborn Verify</h1>
-            <h2>⚠️ Verification succeeded</h2>
-            <p>
-            L'attribution du rôle
-            Main Character a échoué.
-            </p>
+            <h2>⚠️ Role assignment error</h2>
             """, 500
 
-        recruit_role_response = (
-            remove_discord_role(
-                guild_id,
-                discord_user_id,
-                DISCORD_RECRUIT_ROLE_ID,
-            )
+        remove_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_RECRUIT_ROLE_ID,
         )
-
-        if (
-            recruit_role_response.status_code
-            not in
-            (200, 204)
-        ):
-            print(
-                "Discord recruit role removal failed:",
-                recruit_role_response.status_code,
-                recruit_role_response.text,
-            )
 
         nickname_response = (
             sync_discord_nickname(
@@ -1432,13 +1493,6 @@ def callback():
             in
             (200, 204)
         )
-
-        if not nickname_changed:
-            print(
-                "Discord nickname sync failed:",
-                nickname_response.status_code,
-                nickname_response.text,
-            )
 
         nickname_status = (
             "<p>Le pseudo Discord a été synchronisé "
@@ -1473,43 +1527,20 @@ def callback():
         {nickname_status}
 
         <p>
-        Tu peux maintenant retourner
-        sur Discord.
+        Tu peux retourner sur Discord.
         </p>
         """
 
     # ========================================================
-    # ALT CHARACTER FLOW
+    # ALT
     # ========================================================
 
-    try:
-        main_exists = (
-            has_main_character(
-                discord_user_id
-            )
-        )
-
-    except Exception as error:
-        print(
-            "Main lookup during alt verification failed:",
-            repr(error),
-        )
-
+    if not has_main_character(
+        discord_user_id
+    ):
         return """
         <h1>Freeborn Verify</h1>
-        <h2>⚠️ Database error</h2>
-        """, 500
-
-    if not main_exists:
-        return """
-        <h1>Freeborn Verify</h1>
-
         <h2>❌ MAIN REQUIRED</h2>
-
-        <p>
-        Tu dois d'abord enregistrer
-        ton personnage principal avec /verify.
-        </p>
         """, 400
 
     try:
@@ -1529,27 +1560,16 @@ def callback():
             <h1>Freeborn Verify</h1>
 
             <p>
-            <strong>Character:</strong>
-            {character_name}
+            <strong>{character_name}</strong>
+            est déjà ton Main Character.
             </p>
 
             <h2>❌ REFUSED</h2>
-
-            <p>
-            Ce personnage est déjà enregistré
-            comme ton <strong>Main Character</strong>.
-            </p>
             """, 400
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>❌ REFUSED</h2>
-
-        <p>
-        Ce personnage est déjà lié
-        à un autre compte Discord.
-        </p>
+        <h2>❌ CHARACTER ALREADY LINKED</h2>
         """, 400
 
     except Exception as error:
@@ -1560,13 +1580,7 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
-
         <h2>⚠️ Database error</h2>
-
-        <p>
-        L'enregistrement de l'Alt
-        a échoué.
-        </p>
         """, 500
 
     alt_role_response = (
@@ -1584,14 +1598,7 @@ def callback():
     ):
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>⚠️ Alt enregistré</h2>
-
-        <p>
-        Le personnage a été enregistré,
-        mais l'attribution du rôle
-        Alt Character a échoué.
-        </p>
+        <h2>⚠️ Alt role error</h2>
         """, 500
 
     return f"""
@@ -1611,13 +1618,7 @@ def callback():
 
     <p>
     <strong>{character_name}</strong>
-    a été ajouté comme
-    <strong>Alt Character</strong>.
-    </p>
-
-    <p>
-    Tu peux maintenant retourner
-    sur Discord.
+    a été ajouté comme Alt Character.
     </p>
     """
 
@@ -1645,6 +1646,7 @@ def register_commands():
             "type":
                 1,
         },
+
         {
             "name":
                 "alt",
@@ -1656,6 +1658,7 @@ def register_commands():
             "type":
                 1,
         },
+
         {
             "name":
                 "sync-check",
@@ -1663,6 +1666,18 @@ def register_commands():
             "description":
                 "Contrôler les personnages "
                 "Freeborn enregistrés",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "sync-test-out",
+
+            "description":
+                "Tester la détection "
+                "d'un départ de corporation",
 
             "type":
                 1,
@@ -1686,25 +1701,24 @@ def register_commands():
             timeout=15,
         )
 
-        if response.status_code == 200:
+        if (
+            response.status_code
+            == 200
+        ):
             print(
-                "Discord commands "
-                "/verify, /alt and "
-                "/sync-check registered."
+                "Discord commands registered."
             )
 
         else:
             print(
-                "Unable to register "
-                "Discord commands:",
+                "Discord command registration failed:",
                 response.status_code,
                 response.text,
             )
 
     except Exception as error:
         print(
-            "Discord command "
-            "registration error:",
+            "Discord command registration error:",
             repr(error),
         )
 
