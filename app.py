@@ -1,6 +1,7 @@
 import os
 from urllib.parse import urlencode
 
+import psycopg
 import requests
 from flask import Flask, jsonify, request
 from nacl.exceptions import BadSignatureError
@@ -10,6 +11,11 @@ from jose import jwt
 
 
 app = Flask(__name__)
+
+
+# ============================================================
+# ENVIRONMENT VARIABLES
+# ============================================================
 
 EVE_CLIENT_ID = os.environ["EVE_CLIENT_ID"]
 EVE_CLIENT_SECRET = os.environ["EVE_CLIENT_SECRET"]
@@ -23,36 +29,116 @@ DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 DISCORD_PUBLIC_KEY = os.environ["DISCORD_PUBLIC_KEY"]
 DISCORD_APPLICATION_ID = os.environ["DISCORD_APPLICATION_ID"]
 DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
+
 DISCORD_MEMBER_ROLE_ID = os.environ["DISCORD_MEMBER_ROLE_ID"]
 DISCORD_RECRUIT_ROLE_ID = os.environ["DISCORD_RECRUIT_ROLE_ID"]
-DISCORD_EVE_VERIFIED_ROLE_ID = os.environ["DISCORD_EVE_VERIFIED_ROLE_ID"]
-DISCORD_MAIN_CHARACTER_ROLE_ID = os.environ["DISCORD_MAIN_CHARACTER_ROLE_ID"]
+DISCORD_EVE_VERIFIED_ROLE_ID = os.environ[
+    "DISCORD_EVE_VERIFIED_ROLE_ID"
+]
+DISCORD_MAIN_CHARACTER_ROLE_ID = os.environ[
+    "DISCORD_MAIN_CHARACTER_ROLE_ID"
+]
 
 FLASK_SECRET_KEY = os.environ["FLASK_SECRET_KEY"]
 
-EVE_AUTHORIZE_URL = "https://login.eveonline.com/v2/oauth/authorize/"
-EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
+DATABASE_URL = os.environ["DATABASE_URL"]
+
+
+# ============================================================
+# URLS
+# ============================================================
+
+EVE_AUTHORIZE_URL = (
+    "https://login.eveonline.com/v2/oauth/authorize/"
+)
+
+EVE_TOKEN_URL = (
+    "https://login.eveonline.com/v2/oauth/token"
+)
+
 EVE_METADATA_URL = (
     "https://login.eveonline.com/"
     ".well-known/oauth-authorization-server"
 )
 
 ESI_BASE_URL = "https://esi.evetech.net/latest"
+
 DISCORD_API = "https://discord.com/api/v10"
+
+
+# ============================================================
+# EVE VALID ISSUERS
+# ============================================================
 
 VALID_EVE_ISSUERS = {
     "login.eveonline.com",
     "https://login.eveonline.com",
 }
 
+
+# ============================================================
+# STATE SECURITY
+# ============================================================
+
 state_serializer = URLSafeTimedSerializer(
     FLASK_SECRET_KEY
 )
 
 
+# ============================================================
+# DATABASE
+# ============================================================
+
+def init_database():
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS eve_characters (
+                        character_id BIGINT PRIMARY KEY,
+                        discord_user_id TEXT NOT NULL,
+                        character_name TEXT NOT NULL,
+                        character_type TEXT NOT NULL
+                            CHECK (
+                                character_type IN ('main', 'alt')
+                            ),
+                        corporation_id BIGINT NOT NULL,
+                        verified_at TIMESTAMPTZ
+                            NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ
+                            NOT NULL DEFAULT NOW()
+                    );
+                    """
+                )
+
+            conn.commit()
+
+        print(
+            "Database connection OK - "
+            "eve_characters table ready."
+        )
+
+    except Exception as error:
+        print(
+            "Database initialization failed:",
+            repr(error),
+        )
+
+
+# ============================================================
+# DISCORD SIGNATURE VERIFICATION
+# ============================================================
+
 def verify_discord_signature(req):
-    signature = req.headers.get("X-Signature-Ed25519")
-    timestamp = req.headers.get("X-Signature-Timestamp")
+    signature = req.headers.get(
+        "X-Signature-Ed25519"
+    )
+
+    timestamp = req.headers.get(
+        "X-Signature-Timestamp"
+    )
 
     if not signature or not timestamp:
         return False
@@ -78,6 +164,10 @@ def verify_discord_signature(req):
         return False
 
 
+# ============================================================
+# EVE TOKEN VERIFICATION
+# ============================================================
+
 def get_eve_identity(access_token):
     metadata_response = requests.get(
         EVE_METADATA_URL,
@@ -85,6 +175,7 @@ def get_eve_identity(access_token):
     )
 
     metadata_response.raise_for_status()
+
     metadata = metadata_response.json()
 
     jwks_response = requests.get(
@@ -93,6 +184,7 @@ def get_eve_identity(access_token):
     )
 
     jwks_response.raise_for_status()
+
     jwks = jwks_response.json()
 
     header = jwt.get_unverified_header(
@@ -141,9 +233,15 @@ def get_eve_identity(access_token):
             f"Invalid EVE issuer: {issuer}"
         )
 
-    audiences = payload.get("aud", [])
+    audiences = payload.get(
+        "aud",
+        [],
+    )
 
-    if isinstance(audiences, str):
+    if isinstance(
+        audiences,
+        str,
+    ):
         audiences = [audiences]
 
     if "EVE Online" not in audiences:
@@ -157,7 +255,10 @@ def get_eve_identity(access_token):
             "from EVE token audience"
         )
 
-    subject = payload.get("sub", "")
+    subject = payload.get(
+        "sub",
+        "",
+    )
 
     if not subject.startswith(
         "CHARACTER:EVE:"
@@ -167,15 +268,27 @@ def get_eve_identity(access_token):
         )
 
     character_id = subject.split(":")[-1]
+
     character_name = payload.get(
         "name",
         "Unknown",
     )
 
-    return character_id, character_name
+    return (
+        character_id,
+        character_name,
+    )
 
 
-def add_discord_role(guild_id, user_id, role_id):
+# ============================================================
+# DISCORD ROLE HELPERS
+# ============================================================
+
+def add_discord_role(
+    guild_id,
+    user_id,
+    role_id,
+):
     role_url = (
         f"{DISCORD_API}/guilds/"
         f"{guild_id}/members/"
@@ -193,7 +306,11 @@ def add_discord_role(guild_id, user_id, role_id):
     )
 
 
-def remove_discord_role(guild_id, user_id, role_id):
+def remove_discord_role(
+    guild_id,
+    user_id,
+    role_id,
+):
     role_url = (
         f"{DISCORD_API}/guilds/"
         f"{guild_id}/members/"
@@ -211,20 +328,30 @@ def remove_discord_role(guild_id, user_id, role_id):
     )
 
 
+# ============================================================
+# HOME
+# ============================================================
+
 @app.route("/")
 def home():
     return """
     <h1>Freeborn Verify</h1>
+
     <p>
     Service de vérification EVE Online
     pour Freeborn Legacy.
     </p>
+
     <p>
     Utilisez <strong>/verify</strong>
-    sur le serveur Discord Freeborn Legacy.
+    sur Discord.
     </p>
     """
 
+
+# ============================================================
+# HEALTH
+# ============================================================
 
 @app.route("/health")
 def health():
@@ -233,6 +360,53 @@ def health():
         "service": "freeborn-verify",
     }
 
+
+# ============================================================
+# DATABASE HEALTH
+# ============================================================
+
+@app.route("/db-health")
+def db_health():
+    try:
+        with psycopg.connect(
+            DATABASE_URL
+        ) as conn:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM eve_characters;
+                    """
+                )
+
+                character_count = (
+                    cur.fetchone()[0]
+                )
+
+        return {
+            "status": "ok",
+            "database": "connected",
+            "table": "eve_characters",
+            "characters": character_count,
+        }
+
+    except Exception as error:
+        print(
+            "Database health check failed:",
+            repr(error),
+        )
+
+        return {
+            "status": "error",
+            "database": "unavailable",
+        }, 500
+
+
+# ============================================================
+# DISCORD INTERACTIONS
+# ============================================================
 
 @app.route(
     "/interactions",
@@ -263,15 +437,17 @@ def interactions():
             data["member"]["user"]["id"]
         )
 
-        guild_id = data["guild_id"]
+        guild_id = (
+            data["guild_id"]
+        )
 
         if guild_id != DISCORD_GUILD_ID:
             return jsonify({
                 "type": 4,
                 "data": {
                     "content":
-                        "❌ Cette commande est "
-                        "réservée au serveur "
+                        "❌ Cette commande "
+                        "est réservée au serveur "
                         "Freeborn Legacy.",
                     "flags": 64,
                 },
@@ -281,6 +457,7 @@ def interactions():
             state_serializer.dumps({
                 "discord_user_id":
                     discord_user_id,
+
                 "guild_id":
                     guild_id,
             })
@@ -289,10 +466,13 @@ def interactions():
         params = {
             "response_type":
                 "code",
+
             "redirect_uri":
                 EVE_CALLBACK_URL,
+
             "client_id":
                 EVE_CLIENT_ID,
+
             "state":
                 state,
         }
@@ -304,17 +484,21 @@ def interactions():
 
         return jsonify({
             "type": 4,
+
             "data": {
                 "content": (
                     "🔐 **Freeborn Verify**\n\n"
+
                     "Pour vérifier ton "
                     "appartenance à "
                     "**Freeborn Legacy**, "
                     "connecte ton personnage "
                     "EVE Online :\n\n"
+
                     f"[Vérifier mon personnage EVE]"
                     f"({login_url})"
                 ),
+
                 "flags": 64,
             },
         })
@@ -324,15 +508,26 @@ def interactions():
         "data": {
             "content":
                 "Commande inconnue.",
-            "flags": 64,
+
+            "flags":
+                64,
         },
     })
 
 
+# ============================================================
+# EVE CALLBACK
+# ============================================================
+
 @app.route("/callback")
 def callback():
-    code = request.args.get("code")
-    state = request.args.get("state")
+    code = request.args.get(
+        "code"
+    )
+
+    state = request.args.get(
+        "state"
+    )
 
     if not code or not state:
         return """
@@ -381,16 +576,20 @@ def callback():
 
     token_response = requests.post(
         EVE_TOKEN_URL,
+
         auth=(
             EVE_CLIENT_ID,
             EVE_CLIENT_SECRET,
         ),
+
         data={
             "grant_type":
                 "authorization_code",
+
             "code":
                 code,
         },
+
         timeout=15,
     )
 
@@ -437,6 +636,7 @@ def callback():
             f"{ESI_BASE_URL}/characters/"
             f"{character_id}/"
         ),
+
         timeout=15,
     )
 
@@ -452,7 +652,9 @@ def callback():
         <h2>❌ Unable to retrieve character information</h2>
         """, 400
 
-    character_data = character_response.json()
+    character_data = (
+        character_response.json()
+    )
 
     corporation_id = (
         character_data[
@@ -467,21 +669,26 @@ def callback():
     ):
         return f"""
         <h1>Freeborn Verify</h1>
+
         <p>
         <strong>Character:</strong>
         {character_name}
         </p>
+
         <h2>❌ REFUSED</h2>
+
         <p>
         Ce personnage n'appartient
         pas à Freeborn Legacy.
         </p>
         """
 
-    member_role_response = add_discord_role(
-        guild_id,
-        discord_user_id,
-        DISCORD_MEMBER_ROLE_ID,
+    member_role_response = (
+        add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_MEMBER_ROLE_ID,
+        )
     )
 
     if (
@@ -493,15 +700,17 @@ def callback():
         <h1>Freeborn Verify</h1>
         <h2>⚠️ EVE verification succeeded</h2>
         <p>
-        Mais l'attribution du rôle
-        Membre a échoué.
+        L'attribution du rôle Membre
+        a échoué.
         </p>
         """, 500
 
-    eve_verified_response = add_discord_role(
-        guild_id,
-        discord_user_id,
-        DISCORD_EVE_VERIFIED_ROLE_ID,
+    eve_verified_response = (
+        add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_EVE_VERIFIED_ROLE_ID,
+        )
     )
 
     if (
@@ -511,17 +720,19 @@ def callback():
     ):
         return """
         <h1>Freeborn Verify</h1>
-        <h2>⚠️ Vérification EVE réussie</h2>
+        <h2>⚠️ EVE verification succeeded</h2>
         <p>
-        Le rôle Membre a été attribué,
-        mais le rôle EVE Verified a échoué.
+        L'attribution du rôle
+        EVE Verified a échoué.
         </p>
         """, 500
 
-    main_character_response = add_discord_role(
-        guild_id,
-        discord_user_id,
-        DISCORD_MAIN_CHARACTER_ROLE_ID,
+    main_character_response = (
+        add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_MAIN_CHARACTER_ROLE_ID,
+        )
     )
 
     if (
@@ -531,18 +742,19 @@ def callback():
     ):
         return """
         <h1>Freeborn Verify</h1>
-        <h2>⚠️ Vérification EVE réussie</h2>
+        <h2>⚠️ EVE verification succeeded</h2>
         <p>
-        Les rôles Membre et EVE Verified
-        ont été attribués,
-        mais le rôle Main Character a échoué.
+        L'attribution du rôle
+        Main Character a échoué.
         </p>
         """, 500
 
-    recruit_role_response = remove_discord_role(
-        guild_id,
-        discord_user_id,
-        DISCORD_RECRUIT_ROLE_ID,
+    recruit_role_response = (
+        remove_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_RECRUIT_ROLE_ID,
+        )
     )
 
     if (
@@ -551,7 +763,8 @@ def callback():
         (200, 204)
     ):
         print(
-            "Discord recruit role removal failed:",
+            "Discord recruit role "
+            "removal failed:",
             recruit_role_response.status_code,
             recruit_role_response.text,
         )
@@ -592,11 +805,14 @@ def callback():
     </p>
 
     <p>
-    Tu peux maintenant
-    retourner sur Discord.
+    Tu peux maintenant retourner sur Discord.
     </p>
     """
 
+
+# ============================================================
+# REGISTER /verify
+# ============================================================
 
 def register_verify_command():
     url = (
@@ -609,9 +825,11 @@ def register_verify_command():
         {
             "name":
                 "verify",
+
             "description":
                 "Vérifier ton personnage EVE "
                 "pour Freeborn Legacy",
+
             "type":
                 1,
         }
@@ -620,13 +838,17 @@ def register_verify_command():
     try:
         response = requests.put(
             url,
+
             headers={
                 "Authorization":
                     f"Bot {DISCORD_BOT_TOKEN}",
+
                 "Content-Type":
                     "application/json",
             },
+
             json=commands,
+
             timeout=15,
         )
 
@@ -652,8 +874,18 @@ def register_verify_command():
         )
 
 
+# ============================================================
+# INITIALIZATION
+# ============================================================
+
+init_database()
+
 register_verify_command()
 
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
     port = int(
