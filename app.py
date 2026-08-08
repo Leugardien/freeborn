@@ -26,6 +26,7 @@ DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
 DISCORD_MEMBER_ROLE_ID = os.environ["DISCORD_MEMBER_ROLE_ID"]
 DISCORD_RECRUIT_ROLE_ID = os.environ["DISCORD_RECRUIT_ROLE_ID"]
 DISCORD_EVE_VERIFIED_ROLE_ID = os.environ["DISCORD_EVE_VERIFIED_ROLE_ID"]
+DISCORD_MAIN_CHARACTER_ROLE_ID = os.environ["DISCORD_MAIN_CHARACTER_ROLE_ID"]
 
 FLASK_SECRET_KEY = os.environ["FLASK_SECRET_KEY"]
 
@@ -50,13 +51,8 @@ state_serializer = URLSafeTimedSerializer(
 
 
 def verify_discord_signature(req):
-    signature = req.headers.get(
-        "X-Signature-Ed25519"
-    )
-
-    timestamp = req.headers.get(
-        "X-Signature-Timestamp"
-    )
+    signature = req.headers.get("X-Signature-Ed25519")
+    timestamp = req.headers.get("X-Signature-Timestamp")
 
     if not signature or not timestamp:
         return False
@@ -456,9 +452,7 @@ def callback():
         <h2>❌ Unable to retrieve character information</h2>
         """, 400
 
-    character_data = (
-        character_response.json()
-    )
+    character_data = character_response.json()
 
     corporation_id = (
         character_data[
@@ -495,12 +489,6 @@ def callback():
         not in
         (200, 204)
     ):
-        print(
-            "Discord member role assignment failed:",
-            member_role_response.status_code,
-            member_role_response.text,
-        )
-
         return """
         <h1>Freeborn Verify</h1>
         <h2>⚠️ EVE verification succeeded</h2>
@@ -521,18 +509,33 @@ def callback():
         not in
         (200, 204)
     ):
-        print(
-            "Discord EVE Verified role assignment failed:",
-            eve_verified_response.status_code,
-            eve_verified_response.text,
-        )
-
         return """
         <h1>Freeborn Verify</h1>
         <h2>⚠️ Vérification EVE réussie</h2>
         <p>
         Le rôle Membre a été attribué,
         mais le rôle EVE Verified a échoué.
+        </p>
+        """, 500
+
+    main_character_response = add_discord_role(
+        guild_id,
+        discord_user_id,
+        DISCORD_MAIN_CHARACTER_ROLE_ID,
+    )
+
+    if (
+        main_character_response.status_code
+        not in
+        (200, 204)
+    ):
+        return """
+        <h1>Freeborn Verify</h1>
+        <h2>⚠️ Vérification EVE réussie</h2>
+        <p>
+        Les rôles Membre et EVE Verified
+        ont été attribués,
+        mais le rôle Main Character a échoué.
         </p>
         """, 500
 
@@ -575,6 +578,11 @@ def callback():
 
     <p>
     Le rôle <strong>EVE Verified</strong>
+    a été attribué.
+    </p>
+
+    <p>
+    Le rôle <strong>Main Character</strong>
     a été attribué.
     </p>
 
