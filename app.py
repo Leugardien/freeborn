@@ -13,6 +13,7 @@ app.secret_key = os.environ["FLASK_SECRET_KEY"]
 EVE_CLIENT_ID = os.environ["EVE_CLIENT_ID"]
 EVE_CLIENT_SECRET = os.environ["EVE_CLIENT_SECRET"]
 EVE_CALLBACK_URL = os.environ["EVE_CALLBACK_URL"]
+FREEBORN_CORPORATION_ID = int(os.environ["FREEBORN_CORPORATION_ID"])
 
 EVE_AUTHORIZE_URL = "https://login.eveonline.com/v2/oauth/authorize/"
 EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
@@ -83,7 +84,6 @@ def callback():
     character_id = payload["sub"].split(":")[-1]
     character_name = payload.get("name", "Unknown")
 
-    # Character information
     character_response = requests.get(
         f"{ESI_BASE_URL}/characters/{character_id}/",
         timeout=15,
@@ -95,7 +95,6 @@ def callback():
     character_data = character_response.json()
     corporation_id = character_data["corporation_id"]
 
-    # Corporation information
     corporation_response = requests.get(
         f"{ESI_BASE_URL}/corporations/{corporation_id}/",
         timeout=15,
@@ -107,14 +106,18 @@ def callback():
     corporation_data = corporation_response.json()
     corporation_name = corporation_data["name"]
 
+    if corporation_id == FREEBORN_CORPORATION_ID:
+        status = "✅ VERIFIED — Freeborn Legacy member"
+    else:
+        status = "❌ REFUSED — Character is not a Freeborn Legacy member"
+
     return f"""
     <h1>Freeborn Verify</h1>
 
     <p><strong>Character:</strong> {character_name}</p>
-    <p><strong>Character ID:</strong> {character_id}</p>
-
     <p><strong>Corporation:</strong> {corporation_name}</p>
-    <p><strong>Corporation ID:</strong> {corporation_id}</p>
+
+    <h2>{status}</h2>
     """
 
 
