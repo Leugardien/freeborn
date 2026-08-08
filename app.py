@@ -73,7 +73,6 @@ def callback():
 
     access_token = token_response.json()["access_token"]
 
-    # Decode the JWT payload to obtain the EVE character ID and name.
     payload_part = access_token.split(".")[1]
     payload_part += "=" * (-len(payload_part) % 4)
 
@@ -84,22 +83,37 @@ def callback():
     character_id = payload["sub"].split(":")[-1]
     character_name = payload.get("name", "Unknown")
 
-    # Public ESI lookup for character corporation.
-    esi_response = requests.get(
+    # Character information
+    character_response = requests.get(
         f"{ESI_BASE_URL}/characters/{character_id}/",
         timeout=15,
     )
 
-    if esi_response.status_code != 200:
-        return "Unable to retrieve character information from ESI.", 400
+    if character_response.status_code != 200:
+        return "Unable to retrieve character information.", 400
 
-    character_data = esi_response.json()
+    character_data = character_response.json()
     corporation_id = character_data["corporation_id"]
+
+    # Corporation information
+    corporation_response = requests.get(
+        f"{ESI_BASE_URL}/corporations/{corporation_id}/",
+        timeout=15,
+    )
+
+    if corporation_response.status_code != 200:
+        return "Unable to retrieve corporation information.", 400
+
+    corporation_data = corporation_response.json()
+    corporation_name = corporation_data["name"]
 
     return f"""
     <h1>Freeborn Verify</h1>
+
     <p><strong>Character:</strong> {character_name}</p>
     <p><strong>Character ID:</strong> {character_id}</p>
+
+    <p><strong>Corporation:</strong> {corporation_name}</p>
     <p><strong>Corporation ID:</strong> {corporation_id}</p>
     """
 
