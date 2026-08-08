@@ -38,6 +38,10 @@ DISCORD_PUBLIC_KEY = os.environ["DISCORD_PUBLIC_KEY"]
 DISCORD_APPLICATION_ID = os.environ["DISCORD_APPLICATION_ID"]
 DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
 
+# Discord channels used for persistent command history
+DISCORD_EVE_VERIFICATION_CHANNEL_ID = "1535497827503964190"
+DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID = "1535497895929708648"
+
 DISCORD_MEMBER_ROLE_ID = os.environ[
     "DISCORD_MEMBER_ROLE_ID"
 ]
@@ -185,6 +189,28 @@ def init_database():
                     ALTER TABLE eve_characters
                     ADD COLUMN IF NOT EXISTS
                     left_corporation_at TIMESTAMPTZ;
+                    """
+                )
+
+                # One Discord account may have only one Main Character.
+                # The application already enforces this rule, but this
+                # partial unique index also protects the database against
+                # concurrent requests or a future application bug.
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                    uq_eve_characters_one_main_per_discord
+                    ON eve_characters (discord_user_id)
+                    WHERE character_type = 'main';
+                    """
+                )
+
+                # Most profile lookups are performed by Discord user ID.
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_eve_characters_discord_user_id
+                    ON eve_characters (discord_user_id);
                     """
                 )
 
@@ -392,35 +418,6 @@ def get_member_alts(
             )
 
             return cur.fetchall()
-
-
-def count_member_alts(
-    discord_user_id
-):
-
-    with psycopg.connect(
-        DATABASE_URL
-    ) as conn:
-
-        with conn.cursor() as cur:
-
-            cur.execute(
-                """
-                SELECT COUNT(*)
-
-                FROM eve_characters
-
-                WHERE discord_user_id = %s
-                AND character_type = 'alt';
-                """,
-                (
-                    str(discord_user_id),
-                ),
-            )
-
-            return int(
-                cur.fetchone()[0]
-            )
 
 
 def get_database_stats():
@@ -1657,7 +1654,45 @@ def interaction_is_staff(
     )
 
 
-def staff_access_denied():
+def interaction_response_flags(data):
+
+    channel_id = str(
+        data.get("channel_id", "")
+    )
+
+    if channel_id in {
+        DISCORD_EVE_VERIFICATION_CHANNEL_ID,
+        DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID,
+    }:
+
+        return 0
+
+    return 64
+
+
+def interaction_response_flags_payload(data):
+    """
+    Discord: for a public interaction response, omit the flags field
+    entirely. For responses outside the two audit channels, explicitly
+    request EPHEMERAL (64).
+    """
+
+    if interaction_response_flags(data) == 64:
+        return {"flags": 64}
+
+    return {}
+
+
+def staff_access_denied(
+    data=None,
+):
+
+    flags = (
+        interaction_response_flags(data)
+        if data
+        else
+        64
+    )
 
     return jsonify({
         "type":
@@ -1671,9 +1706,10 @@ def staff_access_denied():
                 "**CEO** et **Directeur**.",
 
             "flags":
-                64,
+                flags,
         },
     })
+
 
 
 # ============================================================
@@ -3528,8 +3564,7 @@ def interactions():
                 "content":
                     "Commande inconnue.",
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -3573,8 +3608,7 @@ def interactions():
                     "réservée à "
                     "Freeborn Legacy.",
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -3603,8 +3637,34 @@ def interactions():
     ):
 
         return (
-            staff_access_denied()
+            staff_access_denied(data)
         )
+
+    if (
+        command_name
+        in STAFF_ONLY_COMMANDS
+
+        and
+
+        str(data.get("channel_id", ""))
+        !=
+        DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID
+    ):
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "📍 **Commande staff réservée**\n\n"
+                    "Utilise cette commande dans "
+                    "<#1535497895929708648> "
+                    "(**character-management**).",
+
+                **interaction_response_flags_payload(data),
+            },
+        })
 
     # ========================================================
     # /member-remove
@@ -3654,8 +3714,7 @@ def interactions():
                     "content":
                         "❌ Aucun membre sélectionné.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -3680,8 +3739,7 @@ def interactions():
                         "ton propre profil avec "
                         "**/member-remove**.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -3776,8 +3834,7 @@ def interactions():
                         "⚠️ Impossible de lire "
                         "le profil de ce membre.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -3795,8 +3852,7 @@ def interactions():
                         "dans Freeborn Verify.\n\n"
                         "Aucune modification effectuée.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -3888,8 +3944,7 @@ def interactions():
                         "⚠️ Impossible de générer "
                         "la confirmation sécurisée.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -3903,8 +3958,7 @@ def interactions():
                         preview_lines
                     ),
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
 
                 "components": [
                     {
@@ -3994,8 +4048,7 @@ def interactions():
                         "❌ Aucun Alt Character "
                         "n'a été sélectionné.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4023,8 +4076,7 @@ def interactions():
                         "⚠️ Impossible de lire "
                         "tes Alt Characters.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4056,8 +4108,7 @@ def interactions():
                         "Ton Main ne peut jamais être "
                         "supprimé avec **/alt-remove**.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4086,8 +4137,7 @@ def interactions():
                         "❌ **Suppression refusée**\n\n"
                         f"{str(error)}",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4107,8 +4157,7 @@ def interactions():
                         "⚠️ **Erreur base de données**\n\n"
                         "L'Alt n'a pas été supprimé.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4197,8 +4246,7 @@ def interactions():
 
                     f"{role_text}",
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -4238,8 +4286,7 @@ def interactions():
                         "Aucune modification "
                         "n'a été effectuée.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4251,8 +4298,7 @@ def interactions():
                 "content":
                     message,
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -4292,8 +4338,7 @@ def interactions():
                         "Aucune modification "
                         "n'a été effectuée.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4305,8 +4350,7 @@ def interactions():
                 "content":
                     message,
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -4345,8 +4389,7 @@ def interactions():
                         "⚠️ Impossible de lire "
                         "ton Main Character.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4362,8 +4405,7 @@ def interactions():
                         "n'est enregistré.\n\n"
                         "Utilise d'abord **/verify**.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4405,8 +4447,7 @@ def interactions():
                         "❌ Aucun Alt Character "
                         "n'a été sélectionné.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4434,8 +4475,7 @@ def interactions():
                         "⚠️ Impossible de lire "
                         "tes Alt Characters.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4465,8 +4505,7 @@ def interactions():
                         "un Alt Character enregistré "
                         "sur ton compte.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4496,8 +4535,7 @@ def interactions():
                         "l'état actuel du personnage.\n\n"
                         "Aucune donnée n'a été modifiée.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4525,8 +4563,7 @@ def interactions():
                         "pas à **Freeborn Legacy**.\n\n"
                         "Ton Main actuel reste inchangé.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4556,8 +4593,7 @@ def interactions():
                         "❌ **Changement impossible**\n\n"
                         f"{str(error)}",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4578,8 +4614,7 @@ def interactions():
                         "Le changement de Main "
                         "n'a pas été effectué.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4660,8 +4695,7 @@ def interactions():
                     "Aucun personnage EVE "
                     "n'a été supprimé.",
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -4761,7 +4795,7 @@ def interactions():
         ):
 
             return (
-                staff_access_denied()
+                staff_access_denied(data)
             )
 
         resolved = (
@@ -4851,8 +4885,7 @@ def interactions():
                         "⚠️ Impossible de lire "
                         "ce profil actuellement.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4864,8 +4897,7 @@ def interactions():
                 "content":
                     message,
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -4903,8 +4935,7 @@ def interactions():
                         "❌ Base de données "
                         "indisponible.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4937,8 +4968,7 @@ def interactions():
                 "content":
                     message,
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -4978,8 +5008,7 @@ def interactions():
                         "⚠️ Erreur lors du "
                         "contrôle Freeborn.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -4994,8 +5023,7 @@ def interactions():
                         applied=False,
                     ),
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -5035,8 +5063,7 @@ def interactions():
                         "⚠️ La synchronisation "
                         "a rencontré une erreur.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -5052,8 +5079,7 @@ def interactions():
                         applied=True,
                     ),
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -5111,8 +5137,7 @@ def interactions():
                         "⚠️ Impossible de lire "
                         "ton Main Character.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -5128,8 +5153,7 @@ def interactions():
                         "**/verify** "
                         "pour ton Main.",
 
-                    "flags":
-                        64,
+                    **interaction_response_flags_payload(data),
                 },
             })
 
@@ -5143,8 +5167,7 @@ def interactions():
                 "content":
                     "Commande inconnue.",
 
-                "flags":
-                    64,
+                **interaction_response_flags_payload(data),
             },
         })
 
@@ -5220,8 +5243,7 @@ def interactions():
             "content":
                 message,
 
-            "flags":
-                64,
+            **interaction_response_flags_payload(data),
         },
     })
 
@@ -5863,6 +5885,11 @@ def register_commands():
             "type":
                 1,
 
+            # Hidden/disabled by default. Explicit Discord role
+            # overwrites allow Founder, CEO and Director.
+            "default_member_permissions":
+                "0",
+
             "options": [
                 {
                     "type":
@@ -5890,6 +5917,11 @@ def register_commands():
 
             "type":
                 1,
+
+            # Hidden/disabled by default. Explicit Discord role
+            # overwrites allow Founder, CEO and Director.
+            "default_member_permissions":
+                "0",
         },
 
         {
@@ -5902,6 +5934,11 @@ def register_commands():
 
             "type":
                 1,
+
+            # Hidden/disabled by default. Explicit Discord role
+            # overwrites allow Founder, CEO and Director.
+            "default_member_permissions":
+                "0",
         },
 
         {
@@ -5914,6 +5951,11 @@ def register_commands():
 
             "type":
                 1,
+
+            # Hidden/disabled by default. Explicit Discord role
+            # overwrites allow Founder, CEO and Director.
+            "default_member_permissions":
+                "0",
         },
 
         {
@@ -5926,6 +5968,11 @@ def register_commands():
 
             "type":
                 1,
+
+            # Hidden/disabled by default. Explicit Discord role
+            # overwrites allow Founder, CEO and Director.
+            "default_member_permissions":
+                "0",
         },
 
         {
@@ -5938,6 +5985,11 @@ def register_commands():
 
             "type":
                 1,
+
+            # Hidden/disabled by default. Explicit Discord role
+            # overwrites allow Founder, CEO and Director.
+            "default_member_permissions":
+                "0",
         },
     ]
 
