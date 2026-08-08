@@ -40,7 +40,6 @@ DISCORD_MAIN_CHARACTER_ROLE_ID = os.environ[
 ]
 
 FLASK_SECRET_KEY = os.environ["FLASK_SECRET_KEY"]
-
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 
@@ -48,37 +47,22 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # URLS
 # ============================================================
 
-EVE_AUTHORIZE_URL = (
-    "https://login.eveonline.com/v2/oauth/authorize/"
-)
-
-EVE_TOKEN_URL = (
-    "https://login.eveonline.com/v2/oauth/token"
-)
-
+EVE_AUTHORIZE_URL = "https://login.eveonline.com/v2/oauth/authorize/"
+EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
 EVE_METADATA_URL = (
     "https://login.eveonline.com/"
     ".well-known/oauth-authorization-server"
 )
 
 ESI_BASE_URL = "https://esi.evetech.net/latest"
-
 DISCORD_API = "https://discord.com/api/v10"
 
-
-# ============================================================
-# EVE VALID ISSUERS
-# ============================================================
 
 VALID_EVE_ISSUERS = {
     "login.eveonline.com",
     "https://login.eveonline.com",
 }
 
-
-# ============================================================
-# STATE SECURITY
-# ============================================================
 
 state_serializer = URLSafeTimedSerializer(
     FLASK_SECRET_KEY
@@ -93,7 +77,6 @@ def init_database():
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
-
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS eve_characters (
@@ -125,6 +108,49 @@ def init_database():
             "Database initialization failed:",
             repr(error),
         )
+
+
+def save_main_character(
+    discord_user_id,
+    character_id,
+    character_name,
+    corporation_id,
+):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO eve_characters (
+                    character_id,
+                    discord_user_id,
+                    character_name,
+                    character_type,
+                    corporation_id
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    'main',
+                    %s
+                )
+                ON CONFLICT (character_id)
+                DO UPDATE SET
+                    discord_user_id = EXCLUDED.discord_user_id,
+                    character_name = EXCLUDED.character_name,
+                    character_type = 'main',
+                    corporation_id = EXCLUDED.corporation_id,
+                    updated_at = NOW();
+                """,
+                (
+                    int(character_id),
+                    str(discord_user_id),
+                    character_name,
+                    int(corporation_id),
+                ),
+            )
+
+        conn.commit()
 
 
 # ============================================================
@@ -175,7 +201,6 @@ def get_eve_identity(access_token):
     )
 
     metadata_response.raise_for_status()
-
     metadata = metadata_response.json()
 
     jwks_response = requests.get(
@@ -184,7 +209,6 @@ def get_eve_identity(access_token):
     )
 
     jwks_response.raise_for_status()
-
     jwks = jwks_response.json()
 
     header = jwt.get_unverified_header(
@@ -233,15 +257,9 @@ def get_eve_identity(access_token):
             f"Invalid EVE issuer: {issuer}"
         )
 
-    audiences = payload.get(
-        "aud",
-        [],
-    )
+    audiences = payload.get("aud", [])
 
-    if isinstance(
-        audiences,
-        str,
-    ):
+    if isinstance(audiences, str):
         audiences = [audiences]
 
     if "EVE Online" not in audiences:
@@ -255,10 +273,7 @@ def get_eve_identity(access_token):
             "from EVE token audience"
         )
 
-    subject = payload.get(
-        "sub",
-        "",
-    )
+    subject = payload.get("sub", "")
 
     if not subject.startswith(
         "CHARACTER:EVE:"
@@ -268,7 +283,6 @@ def get_eve_identity(access_token):
         )
 
     character_id = subject.split(":")[-1]
-
     character_name = payload.get(
         "name",
         "Unknown",
@@ -373,7 +387,6 @@ def db_health():
         ) as conn:
 
             with conn.cursor() as cur:
-
                 cur.execute(
                     """
                     SELECT COUNT(*)
@@ -457,7 +470,6 @@ def interactions():
             state_serializer.dumps({
                 "discord_user_id":
                     discord_user_id,
-
                 "guild_id":
                     guild_id,
             })
@@ -466,13 +478,10 @@ def interactions():
         params = {
             "response_type":
                 "code",
-
             "redirect_uri":
                 EVE_CALLBACK_URL,
-
             "client_id":
                 EVE_CLIENT_ID,
-
             "state":
                 state,
         }
@@ -484,21 +493,17 @@ def interactions():
 
         return jsonify({
             "type": 4,
-
             "data": {
                 "content": (
                     "🔐 **Freeborn Verify**\n\n"
-
                     "Pour vérifier ton "
                     "appartenance à "
                     "**Freeborn Legacy**, "
                     "connecte ton personnage "
                     "EVE Online :\n\n"
-
                     f"[Vérifier mon personnage EVE]"
                     f"({login_url})"
                 ),
-
                 "flags": 64,
             },
         })
@@ -508,7 +513,6 @@ def interactions():
         "data": {
             "content":
                 "Commande inconnue.",
-
             "flags":
                 64,
         },
@@ -521,13 +525,8 @@ def interactions():
 
 @app.route("/callback")
 def callback():
-    code = request.args.get(
-        "code"
-    )
-
-    state = request.args.get(
-        "state"
-    )
+    code = request.args.get("code")
+    state = request.args.get("state")
 
     if not code or not state:
         return """
@@ -576,20 +575,16 @@ def callback():
 
     token_response = requests.post(
         EVE_TOKEN_URL,
-
         auth=(
             EVE_CLIENT_ID,
             EVE_CLIENT_SECRET,
         ),
-
         data={
             "grant_type":
                 "authorization_code",
-
             "code":
                 code,
         },
-
         timeout=15,
     )
 
@@ -636,7 +631,6 @@ def callback():
             f"{ESI_BASE_URL}/characters/"
             f"{character_id}/"
         ),
-
         timeout=15,
     )
 
@@ -769,6 +763,39 @@ def callback():
             recruit_role_response.text,
         )
 
+    try:
+        save_main_character(
+            discord_user_id,
+            character_id,
+            character_name,
+            corporation_id,
+        )
+
+        print(
+            "Main character saved:",
+            character_name,
+            character_id,
+            discord_user_id,
+        )
+
+    except Exception as error:
+        print(
+            "Database save failed:",
+            repr(error),
+        )
+
+        return """
+        <h1>Freeborn Verify</h1>
+
+        <h2>⚠️ Vérification réussie</h2>
+
+        <p>
+        Les rôles Discord ont été appliqués,
+        mais l'enregistrement du personnage
+        principal a échoué.
+        </p>
+        """, 500
+
     return f"""
     <h1>Freeborn Verify</h1>
 
@@ -805,6 +832,12 @@ def callback():
     </p>
 
     <p>
+    Le personnage principal
+    <strong>{character_name}</strong>
+    a été enregistré.
+    </p>
+
+    <p>
     Tu peux maintenant retourner sur Discord.
     </p>
     """
@@ -838,7 +871,6 @@ def register_verify_command():
     try:
         response = requests.put(
             url,
-
             headers={
                 "Authorization":
                     f"Bot {DISCORD_BOT_TOKEN}",
@@ -846,9 +878,7 @@ def register_verify_command():
                 "Content-Type":
                     "application/json",
             },
-
             json=commands,
-
             timeout=15,
         )
 
