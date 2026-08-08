@@ -339,7 +339,6 @@ def get_member_characters(
                 WHERE discord_user_id = %s
 
                 ORDER BY
-
                     CASE
                         WHEN character_type = 'main'
                         THEN 0
@@ -503,7 +502,6 @@ def save_main_character(
             cur.execute(
                 """
                 INSERT INTO eve_characters (
-
                     character_id,
                     discord_user_id,
                     character_name,
@@ -512,11 +510,9 @@ def save_main_character(
                     in_corporation,
                     last_checked_at,
                     left_corporation_at
-
                 )
 
                 VALUES (
-
                     %s,
                     %s,
                     %s,
@@ -525,13 +521,11 @@ def save_main_character(
                     TRUE,
                     NOW(),
                     NULL
-
                 )
 
                 ON CONFLICT (character_id)
 
                 DO UPDATE SET
-
                     discord_user_id =
                         EXCLUDED.discord_user_id,
 
@@ -620,7 +614,6 @@ def save_alt_character(
             cur.execute(
                 """
                 INSERT INTO eve_characters (
-
                     character_id,
                     discord_user_id,
                     character_name,
@@ -629,11 +622,9 @@ def save_alt_character(
                     in_corporation,
                     last_checked_at,
                     left_corporation_at
-
                 )
 
                 VALUES (
-
                     %s,
                     %s,
                     %s,
@@ -642,13 +633,11 @@ def save_alt_character(
                     TRUE,
                     NOW(),
                     NULL
-
                 )
 
                 ON CONFLICT (character_id)
 
                 DO UPDATE SET
-
                     character_name =
                         EXCLUDED.character_name,
 
@@ -813,10 +802,6 @@ def build_member_info(
         "",
     ]
 
-    # --------------------------------------------------------
-    # MAIN
-    # --------------------------------------------------------
-
     if main_rows:
 
         main = (
@@ -860,10 +845,6 @@ def build_member_info(
             "❌ Aucun Main enregistré",
             "",
         ])
-
-    # --------------------------------------------------------
-    # ALTS
-    # --------------------------------------------------------
 
     lines.append(
         f"### 🔹 Alt Characters "
@@ -1828,6 +1809,10 @@ def home():
     Service de vérification EVE Online
     pour Freeborn Legacy.
     </p>
+
+    <p>
+    Freeborn Verify est opérationnel.
+    </p>
     """
 
 
@@ -1927,6 +1912,10 @@ def interactions():
         request.get_json()
     )
 
+    # --------------------------------------------------------
+    # DISCORD PING
+    # --------------------------------------------------------
+
     if data["type"] == 1:
 
         return jsonify({
@@ -1991,15 +1980,13 @@ def interactions():
         })
 
     # ========================================================
-    # PURE STAFF COMMANDS
+    # STAFF-ONLY COMMANDS
     # ========================================================
 
     STAFF_ONLY_COMMANDS = {
         "db-health",
         "sync-check",
         "sync-apply",
-        "sync-test-out",
-        "sync-test-revoke",
     }
 
     if (
@@ -2019,10 +2006,10 @@ def interactions():
     # /member-info
     #
     # /member-info
-    # -> accessible to every member for own profile
+    # -> everyone can view own profile
     #
     # /member-info @someone
-    # -> staff only if target != caller
+    # -> Founder / CEO / Director only
     # ========================================================
 
     if (
@@ -2089,14 +2076,7 @@ def interactions():
                 break
 
         # ----------------------------------------------------
-        # SECURITY
-        #
-        # A normal member can:
-        # /member-info
-        # /member-info @himself
-        #
-        # Only staff can:
-        # /member-info @another_member
+        # ACCESS CONTROL
         # ----------------------------------------------------
 
         if (
@@ -2116,7 +2096,7 @@ def interactions():
             )
 
         # ----------------------------------------------------
-        # RESOLVED USER / MEMBER INFORMATION
+        # DISCORD RESOLVED USER DATA
         # ----------------------------------------------------
 
         resolved = (
@@ -2220,7 +2200,7 @@ def interactions():
 
     # ========================================================
     # /db-health
-    # STAFF
+    # STAFF ONLY
     # ========================================================
 
     if (
@@ -2293,7 +2273,7 @@ def interactions():
 
     # ========================================================
     # /sync-check
-    # STAFF
+    # STAFF ONLY
     # ========================================================
 
     if (
@@ -2350,7 +2330,7 @@ def interactions():
 
     # ========================================================
     # /sync-apply
-    # STAFF
+    # STAFF ONLY
     # ========================================================
 
     if (
@@ -2400,98 +2380,6 @@ def interactions():
                         actions=actions,
                         applied=True,
                     ),
-
-                "flags":
-                    64,
-            },
-        })
-
-    # ========================================================
-    # TEST COMMANDS
-    # STAFF - TEMPORARY
-    # ========================================================
-
-    if (
-        command_name
-        ==
-        "sync-test-out"
-    ):
-
-        message = (
-            "🧪 **Freeborn Sync TEST**\n\n"
-
-            "✅ **LeGardien** "
-            "(main) — Freeborn Legacy\n"
-
-            "✅ **Neo Valtheris** "
-            "(alt) — Freeborn Legacy\n"
-
-            "❌ **TEST - Former Member** "
-            "(main) — hors Freeborn Legacy\n\n"
-
-            "🧪 **SIMULATION UNIQUEMENT**\n"
-
-            "Aucune donnée Neon "
-            "n'a été modifiée.\n"
-
-            "Aucun rôle Discord "
-            "n'a été modifié."
-        )
-
-        return jsonify({
-            "type":
-                4,
-
-            "data": {
-                "content":
-                    message,
-
-                "flags":
-                    64,
-            },
-        })
-
-    if (
-        command_name
-        ==
-        "sync-test-revoke"
-    ):
-
-        message = (
-            "🧪 **Freeborn Revocation TEST**\n\n"
-
-            "Personnage détecté : "
-            "**TEST - Former Member**\n"
-
-            "Statut : "
-            "❌ hors Freeborn Legacy\n\n"
-
-            "### Actions prévues\n"
-
-            "➡️ Retirer **Membre**\n"
-
-            "➡️ Retirer "
-            "**EVE Verified**\n"
-
-            "➡️ Retirer "
-            "**Main Character**\n"
-
-            "➡️ Retirer "
-            "**Alt Character**\n\n"
-
-            "🛡️ **MODE SIMULATION**\n"
-
-            "Aucun rôle réel "
-            "n'a été modifié."
-        )
-
-        return jsonify({
-            "type":
-                4,
-
-            "data": {
-                "content":
-                    message,
 
                 "flags":
                     64,
@@ -2758,6 +2646,10 @@ def callback():
         </h2>
         """, 400
 
+    # ========================================================
+    # TOKEN EXCHANGE
+    # ========================================================
+
     token_response = requests.post(
         EVE_TOKEN_URL,
 
@@ -2797,6 +2689,10 @@ def callback():
         ]
     )
 
+    # ========================================================
+    # EVE IDENTITY
+    # ========================================================
+
     try:
 
         (
@@ -2820,6 +2716,10 @@ def callback():
         ❌ Unable to validate EVE identity
         </h2>
         """, 400
+
+    # ========================================================
+    # CHARACTER ESI
+    # ========================================================
 
     character_response = requests.get(
         (
@@ -2853,6 +2753,10 @@ def callback():
             "corporation_id"
         ]
     )
+
+    # ========================================================
+    # CORPORATION CHECK
+    # ========================================================
 
     if (
         corporation_id
@@ -2920,15 +2824,26 @@ def callback():
                 return f"""
                 <h1>Freeborn Verify</h1>
 
+                <p>
+                <strong>Character:</strong>
+                {character_name}
+                </p>
+
                 <h2>
                 ❌ MAIN ALREADY REGISTERED
                 </h2>
 
                 <p>
-                Ton Main actuel est
+                Ton personnage principal actuel est
                 <strong>
                 {existing_main_name}
                 </strong>.
+                </p>
+
+                <p>
+                Tu ne peux pas enregistrer
+                <strong>{character_name}</strong>
+                comme second Main Character.
                 </p>
                 """, 400
 
@@ -2938,6 +2853,11 @@ def callback():
             <h2>
             ❌ CHARACTER ALREADY LINKED
             </h2>
+
+            <p>
+            Ce personnage EVE est déjà associé
+            à un autre compte Discord.
+            </p>
             """, 400
 
         except Exception as error:
@@ -3074,6 +2994,11 @@ def callback():
         <h2>
         ❌ MAIN REQUIRED
         </h2>
+
+        <p>
+        Tu dois d'abord enregistrer
+        ton Main avec /verify.
+        </p>
         """, 400
 
     try:
@@ -3111,6 +3036,11 @@ def callback():
         <h2>
         ❌ CHARACTER ALREADY LINKED
         </h2>
+
+        <p>
+        Ce personnage est déjà associé
+        à un autre compte Discord.
+        </p>
         """, 400
 
     except Exception as error:
@@ -3169,7 +3099,12 @@ def callback():
 
     <p>
     <strong>{character_name}</strong>
-    a été ajouté comme Alt Character.
+    a été ajouté comme
+    <strong>Alt Character</strong>.
+    </p>
+
+    <p>
+    Tu peux retourner sur Discord.
     </p>
     """
 
@@ -3283,30 +3218,6 @@ def register_commands():
             "type":
                 1,
         },
-
-        {
-            "name":
-                "sync-test-out",
-
-            "description":
-                "Tester un départ "
-                "de corporation",
-
-            "type":
-                1,
-        },
-
-        {
-            "name":
-                "sync-test-revoke",
-
-            "description":
-                "Simuler une révocation "
-                "d'accès",
-
-            "type":
-                1,
-        },
     ]
 
     try:
@@ -3336,7 +3247,9 @@ def register_commands():
         ):
 
             print(
-                "Discord commands registered."
+                "Discord commands registered: "
+                "/verify, /alt, /member-info, "
+                "/db-health, /sync-check, /sync-apply."
             )
 
         else:
