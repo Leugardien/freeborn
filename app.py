@@ -6,7 +6,11 @@ import requests
 from flask import Flask, jsonify, request
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
-from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from itsdangerous import (
+    URLSafeTimedSerializer,
+    BadSignature,
+    SignatureExpired,
+)
 from jose import jwt
 
 
@@ -89,6 +93,7 @@ def init_database():
     try:
         with psycopg.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
+
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS eve_characters (
@@ -105,6 +110,36 @@ def init_database():
                         updated_at TIMESTAMPTZ
                             NOT NULL DEFAULT NOW()
                     );
+                    """
+                )
+
+                # --------------------------------------------
+                # Sync status columns
+                # Existing table is upgraded automatically.
+                # --------------------------------------------
+
+                cur.execute(
+                    """
+                    ALTER TABLE eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    in_corporation BOOLEAN
+                    NOT NULL DEFAULT TRUE;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    last_checked_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    left_corporation_at TIMESTAMPTZ;
                     """
                 )
 
@@ -182,7 +217,10 @@ def get_all_characters():
                     discord_user_id,
                     character_name,
                     character_type,
-                    corporation_id
+                    corporation_id,
+                    in_corporation,
+                    last_checked_at,
+                    left_corporation_at
                 FROM eve_characters
                 ORDER BY
                     discord_user_id,
@@ -265,22 +303,39 @@ def save_main_character(
                     discord_user_id,
                     character_name,
                     character_type,
-                    corporation_id
+                    corporation_id,
+                    in_corporation,
+                    last_checked_at,
+                    left_corporation_at
                 )
                 VALUES (
                     %s,
                     %s,
                     %s,
                     'main',
-                    %s
+                    %s,
+                    TRUE,
+                    NOW(),
+                    NULL
                 )
                 ON CONFLICT (character_id)
                 DO UPDATE SET
-                    discord_user_id = EXCLUDED.discord_user_id,
-                    character_name = EXCLUDED.character_name,
-                    character_type = 'main',
-                    corporation_id = EXCLUDED.corporation_id,
-                    updated_at = NOW();
+                    discord_user_id =
+                        EXCLUDED.discord_user_id,
+                    character_name =
+                        EXCLUDED.character_name,
+                    character_type =
+                        'main',
+                    corporation_id =
+                        EXCLUDED.corporation_id,
+                    in_corporation =
+                        TRUE,
+                    last_checked_at =
+                        NOW(),
+                    left_corporation_at =
+                        NULL,
+                    updated_at =
+                        NOW();
                 """,
                 (
                     character_id,
@@ -340,20 +395,35 @@ def save_alt_character(
                     discord_user_id,
                     character_name,
                     character_type,
-                    corporation_id
+                    corporation_id,
+                    in_corporation,
+                    last_checked_at,
+                    left_corporation_at
                 )
                 VALUES (
                     %s,
                     %s,
                     %s,
                     'alt',
-                    %s
+                    %s,
+                    TRUE,
+                    NOW(),
+                    NULL
                 )
                 ON CONFLICT (character_id)
                 DO UPDATE SET
-                    character_name = EXCLUDED.character_name,
-                    corporation_id = EXCLUDED.corporation_id,
-                    updated_at = NOW();
+                    character_name =
+                        EXCLUDED.character_name,
+                    corporation_id =
+                        EXCLUDED.corporation_id,
+                    in_corporation =
+                        TRUE,
+                    last_checked_at =
+                        NOW(),
+                    left_corporation_at =
+                        NULL,
+                    updated_at =
+                        NOW();
                 """,
                 (
                     int(character_id),
@@ -362,6 +432,57 @@ def save_alt_character(
                     int(corporation_id),
                 ),
             )
+
+        conn.commit()
+
+
+def update_character_sync_status(
+    character_id,
+    corporation_id,
+    in_corporation,
+):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+
+            if in_corporation:
+                cur.execute(
+                    """
+                    UPDATE eve_characters
+                    SET
+                        corporation_id = %s,
+                        in_corporation = TRUE,
+                        last_checked_at = NOW(),
+                        left_corporation_at = NULL,
+                        updated_at = NOW()
+                    WHERE character_id = %s;
+                    """,
+                    (
+                        int(corporation_id),
+                        int(character_id),
+                    ),
+                )
+
+            else:
+                cur.execute(
+                    """
+                    UPDATE eve_characters
+                    SET
+                        corporation_id = %s,
+                        in_corporation = FALSE,
+                        last_checked_at = NOW(),
+                        left_corporation_at =
+                            COALESCE(
+                                left_corporation_at,
+                                NOW()
+                            ),
+                        updated_at = NOW()
+                    WHERE character_id = %s;
+                    """,
+                    (
+                        int(corporation_id),
+                        int(character_id),
+                    ),
+                )
 
         conn.commit()
 
@@ -403,6 +524,28 @@ def verify_discord_signature(req):
         ValueError,
     ):
         return False
+
+
+def interaction_is_admin(data):
+    """
+    Discord Administrator permission bit = 1 << 3 = 8
+    """
+
+    try:
+        permissions = int(
+            data["member"]["permissions"]
+        )
+
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return False
+
+    return (
+        permissions & 8
+    ) == 8
 
 
 # ============================================================
@@ -622,22 +765,126 @@ def sync_discord_nickname(
     )
 
 
+def revoke_main_access(
+    discord_user_id,
+):
+    """
+    Main left Freeborn:
+    remove all verification/access roles.
+
+    Database records are NOT deleted.
+    """
+
+    role_ids = [
+        DISCORD_MEMBER_ROLE_ID,
+        DISCORD_EVE_VERIFIED_ROLE_ID,
+        DISCORD_MAIN_CHARACTER_ROLE_ID,
+        DISCORD_ALT_CHARACTER_ROLE_ID,
+    ]
+
+    results = []
+
+    for role_id in role_ids:
+        response = (
+            remove_discord_role(
+                DISCORD_GUILD_ID,
+                discord_user_id,
+                role_id,
+            )
+        )
+
+        results.append(
+            response.status_code
+        )
+
+    return results
+
+
+def revoke_alt_role_if_needed(
+    discord_user_id,
+    sync_results,
+):
+    """
+    Remove Alt Character role only when:
+    - Main is still Freeborn.
+    - Every known alt received a valid ESI result.
+    - None of those alts remains in Freeborn.
+    """
+
+    user_results = [
+        item
+        for item in sync_results
+        if (
+            item["discord_user_id"]
+            == str(discord_user_id)
+        )
+    ]
+
+    main_results = [
+        item
+        for item in user_results
+        if item["character_type"] == "main"
+    ]
+
+    alt_results = [
+        item
+        for item in user_results
+        if item["character_type"] == "alt"
+    ]
+
+    if not main_results:
+        return None
+
+    main = main_results[0]
+
+    if (
+        main["status"]
+        != "ok"
+        or
+        not main["in_corporation"]
+    ):
+        return None
+
+    if not alt_results:
+        return None
+
+    # If one alt has an ESI error, do nothing.
+    if any(
+        item["status"] != "ok"
+        for item in alt_results
+    ):
+        return None
+
+    # At least one alt is still Freeborn.
+    if any(
+        item["in_corporation"]
+        for item in alt_results
+    ):
+        return None
+
+    response = (
+        remove_discord_role(
+            DISCORD_GUILD_ID,
+            discord_user_id,
+            DISCORD_ALT_CHARACTER_ROLE_ID,
+        )
+    )
+
+    return response.status_code
+
+
 # ============================================================
-# SYNC CHECK
+# SYNC ENGINE
 # ============================================================
 
-def run_sync_check(
-    include_fake_outside=False,
+def run_sync(
+    apply_changes=False,
 ):
     characters = (
         get_all_characters()
     )
 
-    result_lines = []
-
-    freeborn_count = 0
-    outside_count = 0
-    error_count = 0
+    sync_results = []
 
     for character in characters:
         (
@@ -646,10 +893,36 @@ def run_sync_check(
             character_name,
             character_type,
             stored_corporation_id,
+            stored_in_corporation,
+            last_checked_at,
+            left_corporation_at,
         ) = character
 
+        result = {
+            "character_id":
+                int(character_id),
+
+            "discord_user_id":
+                str(discord_user_id),
+
+            "character_name":
+                character_name,
+
+            "character_type":
+                character_type,
+
+            "status":
+                "error",
+
+            "in_corporation":
+                None,
+
+            "current_corporation_id":
+                None,
+        }
+
         try:
-            esi_response = requests.get(
+            response = requests.get(
                 (
                     f"{ESI_BASE_URL}/characters/"
                     f"{character_id}/"
@@ -657,114 +930,342 @@ def run_sync_check(
                 timeout=15,
             )
 
-            if (
-                esi_response.status_code
-                != 200
-            ):
-                error_count += 1
+            # --------------------------------------------
+            # CRITICAL SECURITY:
+            # Any non-200 response = NO REVOCATION.
+            # --------------------------------------------
 
-                result_lines.append(
-                    f"⚠️ **{character_name}** "
-                    f"({character_type}) — "
-                    "ESI indisponible"
+            if response.status_code != 200:
+                result["status"] = "esi_error"
+
+                sync_results.append(
+                    result
                 )
 
                 continue
 
-            current_data = (
-                esi_response.json()
-            )
-
-            current_corporation_id = (
-                current_data[
-                    "corporation_id"
-                ]
-            )
+            data = response.json()
 
             if (
+                "corporation_id"
+                not in data
+            ):
+                result["status"] = "esi_error"
+
+                sync_results.append(
+                    result
+                )
+
+                continue
+
+            current_corporation_id = int(
+                data["corporation_id"]
+            )
+
+            in_corporation = (
                 current_corporation_id
                 ==
                 FREEBORN_CORPORATION_ID
-            ):
-                freeborn_count += 1
+            )
 
-                result_lines.append(
-                    f"✅ **{character_name}** "
-                    f"({character_type}) — "
-                    "Freeborn Legacy"
-                )
+            result["status"] = "ok"
 
-            else:
-                outside_count += 1
+            result["in_corporation"] = (
+                in_corporation
+            )
 
-                result_lines.append(
-                    f"❌ **{character_name}** "
-                    f"({character_type}) — "
-                    "hors Freeborn Legacy"
+            result[
+                "current_corporation_id"
+            ] = current_corporation_id
+
+            # --------------------------------------------
+            # Only real sync updates database state.
+            # /sync-check stays entirely read-only.
+            # --------------------------------------------
+
+            if apply_changes:
+                update_character_sync_status(
+                    character_id,
+                    current_corporation_id,
+                    in_corporation,
                 )
 
         except Exception as error:
-            error_count += 1
-
             print(
-                "Sync ESI lookup failed:",
+                "Sync ESI error:",
                 character_name,
                 repr(error),
             )
 
-            result_lines.append(
-                f"⚠️ **{character_name}** "
-                f"({character_type}) — "
-                "erreur ESI"
-            )
+            result["status"] = "esi_error"
 
-    if include_fake_outside:
-        outside_count += 1
-
-        result_lines.append(
-            "❌ **TEST - Former Member** "
-            "(main) — hors Freeborn Legacy"
+        sync_results.append(
+            result
         )
 
+    # ========================================================
+    # APPLY DISCORD REVOCATIONS
+    # ========================================================
+
+    actions = []
+
+    if apply_changes:
+
+        discord_users = sorted(
+            {
+                item["discord_user_id"]
+                for item in sync_results
+            }
+        )
+
+        for discord_user_id in discord_users:
+
+            user_results = [
+                item
+                for item in sync_results
+                if (
+                    item["discord_user_id"]
+                    ==
+                    discord_user_id
+                )
+            ]
+
+            main_results = [
+                item
+                for item in user_results
+                if (
+                    item["character_type"]
+                    ==
+                    "main"
+                )
+            ]
+
+            # --------------------------------------------
+            # MAIN LOGIC
+            # --------------------------------------------
+
+            if main_results:
+                main = main_results[0]
+
+                # ESI ERROR:
+                # absolutely no account revocation.
+                if (
+                    main["status"]
+                    != "ok"
+                ):
+                    actions.append({
+                        "discord_user_id":
+                            discord_user_id,
+
+                        "action":
+                            "none",
+
+                        "reason":
+                            "Main ESI error",
+                    })
+
+                    continue
+
+                # MAIN CONFIRMED OUTSIDE CORP:
+                # revoke all access roles.
+                if not main["in_corporation"]:
+                    role_results = (
+                        revoke_main_access(
+                            discord_user_id
+                        )
+                    )
+
+                    actions.append({
+                        "discord_user_id":
+                            discord_user_id,
+
+                        "action":
+                            "main_revoked",
+
+                        "character_name":
+                            main[
+                                "character_name"
+                            ],
+
+                        "role_results":
+                            role_results,
+                    })
+
+                    continue
+
+            # --------------------------------------------
+            # ALT LOGIC
+            # Main remains valid.
+            # --------------------------------------------
+
+            alt_result = (
+                revoke_alt_role_if_needed(
+                    discord_user_id,
+                    sync_results,
+                )
+            )
+
+            if alt_result is not None:
+                actions.append({
+                    "discord_user_id":
+                        discord_user_id,
+
+                    "action":
+                        "alt_role_removed",
+
+                    "status_code":
+                        alt_result,
+                })
+
     return (
-        result_lines,
-        freeborn_count,
-        outside_count,
-        error_count,
+        sync_results,
+        actions,
     )
 
 
 # ============================================================
-# REVOCATION SIMULATION
+# FORMAT SYNC
 # ============================================================
 
-def build_revocation_simulation():
-    """
-    IMPORTANT:
-    This function DOES NOT call Discord.
-    This function DOES NOT modify Neon.
-    It only returns the actions that would be performed.
-    """
+def build_sync_message(
+    sync_results,
+    actions=None,
+    applied=False,
+):
+    lines = []
 
-    fake_member = {
-        "character_name":
-            "TEST - Former Member",
+    freeborn_count = 0
+    outside_count = 0
+    error_count = 0
 
-        "character_type":
-            "main",
-    }
+    for item in sync_results:
 
-    planned_actions = [
-        "Retirer le rôle **Membre**",
-        "Retirer le rôle **EVE Verified**",
-        "Retirer le rôle **Main Character**",
-        "Retirer le rôle **Alt Character**",
-    ]
+        name = (
+            item["character_name"]
+        )
 
-    return (
-        fake_member,
-        planned_actions,
+        character_type = (
+            item["character_type"]
+        )
+
+        if (
+            item["status"]
+            != "ok"
+        ):
+            error_count += 1
+
+            lines.append(
+                f"⚠️ **{name}** "
+                f"({character_type}) — "
+                "ESI indisponible / erreur"
+            )
+
+        elif item["in_corporation"]:
+            freeborn_count += 1
+
+            lines.append(
+                f"✅ **{name}** "
+                f"({character_type}) — "
+                "Freeborn Legacy"
+            )
+
+        else:
+            outside_count += 1
+
+            lines.append(
+                f"❌ **{name}** "
+                f"({character_type}) — "
+                "hors Freeborn Legacy"
+            )
+
+    if applied:
+        title = (
+            "⚙️ **Freeborn Sync APPLY**"
+        )
+
+        footer = (
+            "\n\n🛡️ Les révocations ne sont "
+            "effectuées qu'après confirmation "
+            "ESI valide."
+        )
+
+    else:
+        title = (
+            "🔎 **Freeborn Sync Check**"
+        )
+
+        footer = (
+            "\n\n_Mode observation : "
+            "aucun rôle n'a été modifié._"
+        )
+
+    message = (
+        f"{title}\n\n"
+
+        + "\n".join(lines)
+
+        + "\n\n"
+
+        + f"✅ Freeborn : "
+          f"**{freeborn_count}**\n"
+
+        + f"❌ Hors corporation : "
+          f"**{outside_count}**\n"
+
+        + f"⚠️ Erreurs ESI : "
+          f"**{error_count}**"
+
+        + footer
     )
+
+    if (
+        applied
+        and actions
+    ):
+        action_lines = []
+
+        for action in actions:
+
+            if (
+                action["action"]
+                ==
+                "main_revoked"
+            ):
+                action_lines.append(
+                    "🔒 "
+                    f"**{action['character_name']}** "
+                    "— accès Discord révoqués"
+                )
+
+            elif (
+                action["action"]
+                ==
+                "alt_role_removed"
+            ):
+                action_lines.append(
+                    "🔗 Rôle **Alt Character** "
+                    "retiré"
+                )
+
+            elif (
+                action["action"]
+                ==
+                "none"
+            ):
+                action_lines.append(
+                    "🛡️ Aucune révocation : "
+                    "ESI non fiable"
+                )
+
+        if action_lines:
+            message += (
+                "\n\n### Actions\n"
+                + "\n".join(
+                    action_lines
+                )
+            )
+
+    return message
 
 
 # ============================================================
@@ -802,6 +1303,7 @@ def db_health():
         ) as conn:
 
             with conn.cursor() as cur:
+
                 cur.execute(
                     """
                     SELECT COUNT(*)
@@ -837,6 +1339,18 @@ def db_health():
                     cur.fetchone()[0]
                 )
 
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM eve_characters
+                    WHERE in_corporation = FALSE;
+                    """
+                )
+
+                outside_count = (
+                    cur.fetchone()[0]
+                )
+
         return {
             "status":
                 "ok",
@@ -855,6 +1369,9 @@ def db_health():
 
             "alts":
                 alt_count,
+
+            "outside_corporation":
+                outside_count,
         }
 
     except Exception as error:
@@ -881,6 +1398,7 @@ def db_health():
     methods=["POST"],
 )
 def interactions():
+
     if not verify_discord_signature(
         request
     ):
@@ -947,14 +1465,13 @@ def interactions():
     # ========================================================
 
     if command_name == "sync-check":
+
         try:
             (
-                result_lines,
-                freeborn_count,
-                outside_count,
-                error_count,
-            ) = run_sync_check(
-                include_fake_outside=False
+                sync_results,
+                actions,
+            ) = run_sync(
+                apply_changes=False
             )
 
         except Exception as error:
@@ -977,35 +1494,16 @@ def interactions():
                 },
             })
 
-        summary = (
-            "🔎 **Freeborn Sync Check**\n\n"
-
-            + "\n".join(
-                result_lines
-            )
-
-            + "\n\n"
-
-            + f"✅ Freeborn : "
-              f"**{freeborn_count}**\n"
-
-            + f"❌ Hors corporation : "
-              f"**{outside_count}**\n"
-
-            + f"⚠️ Erreurs : "
-              f"**{error_count}**\n\n"
-
-            + "_Mode observation : "
-              "aucun rôle n'a été modifié._"
-        )
-
         return jsonify({
             "type":
                 4,
 
             "data": {
                 "content":
-                    summary,
+                    build_sync_message(
+                        sync_results,
+                        applied=False,
+                    ),
 
                 "flags":
                     64,
@@ -1013,23 +1511,42 @@ def interactions():
         })
 
     # ========================================================
-    # /sync-test-out
+    # /sync-apply
+    # REAL REVOCATION
+    # ADMIN ONLY
     # ========================================================
 
-    if command_name == "sync-test-out":
+    if command_name == "sync-apply":
+
+        if not interaction_is_admin(
+            data
+        ):
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Accès refusé**\n\n"
+                        "Cette commande est "
+                        "réservée aux administrateurs.",
+
+                    "flags":
+                        64,
+                },
+            })
+
         try:
             (
-                result_lines,
-                freeborn_count,
-                outside_count,
-                error_count,
-            ) = run_sync_check(
-                include_fake_outside=True
+                sync_results,
+                actions,
+            ) = run_sync(
+                apply_changes=True
             )
 
         except Exception as error:
             print(
-                "Sync simulation failed:",
+                "Sync apply failed:",
                 repr(error),
             )
 
@@ -1039,36 +1556,13 @@ def interactions():
 
                 "data": {
                     "content":
-                        "⚠️ Erreur lors de "
-                        "la simulation.",
+                        "⚠️ La synchronisation "
+                        "a rencontré une erreur.",
 
                     "flags":
                         64,
                 },
             })
-
-        summary = (
-            "🧪 **Freeborn Sync TEST**\n\n"
-
-            + "\n".join(
-                result_lines
-            )
-
-            + "\n\n"
-
-            + f"✅ Freeborn : "
-              f"**{freeborn_count}**\n"
-
-            + f"❌ Hors corporation : "
-              f"**{outside_count}**\n"
-
-            + f"⚠️ Erreurs : "
-              f"**{error_count}**\n\n"
-
-            + "🧪 **SIMULATION UNIQUEMENT**\n"
-              "Aucune donnée Neon n'a été modifiée.\n"
-              "Aucun rôle Discord n'a été modifié."
-        )
 
         return jsonify({
             "type":
@@ -1076,7 +1570,11 @@ def interactions():
 
             "data": {
                 "content":
-                    summary,
+                    build_sync_message(
+                        sync_results,
+                        actions=actions,
+                        applied=True,
+                    ),
 
                 "flags":
                     64,
@@ -1084,44 +1582,27 @@ def interactions():
         })
 
     # ========================================================
-    # /sync-test-revoke
+    # TEST COMMANDS
     # ========================================================
 
-    if command_name == "sync-test-revoke":
-        (
-            fake_member,
-            planned_actions,
-        ) = build_revocation_simulation()
+    if command_name == "sync-test-out":
 
-        actions_text = "\n".join(
-            f"➡️ {action}"
-            for action in planned_actions
-        )
+        message = (
+            "🧪 **Freeborn Sync TEST**\n\n"
 
-        summary = (
-            "🧪 **Freeborn Revocation TEST**\n\n"
+            "✅ **LeGardien** (main) — "
+            "Freeborn Legacy\n"
 
-            f"Personnage détecté : "
-            f"**{fake_member['character_name']}**\n"
+            "✅ **Neo Valtheris** (alt) — "
+            "Freeborn Legacy\n"
 
-            f"Type : "
-            f"**{fake_member['character_type']}**\n"
+            "❌ **TEST - Former Member** "
+            "(main) — hors Freeborn Legacy\n\n"
 
-            "Statut : "
-            "❌ **hors Freeborn Legacy**\n\n"
+            "🧪 **SIMULATION UNIQUEMENT**\n"
 
-            "### Actions prévues\n"
-
-            f"{actions_text}\n\n"
-
-            "🛡️ **MODE SIMULATION**\n"
-
-            "✅ Aucun rôle Discord n'a été retiré.\n"
-
-            "✅ Aucune donnée Neon n'a été modifiée.\n"
-
-            "✅ Aucun compte Discord réel "
-            "n'a été ciblé."
+            "Aucune donnée Neon n'a été modifiée.\n"
+            "Aucun rôle Discord n'a été modifié."
         )
 
         return jsonify({
@@ -1130,7 +1611,42 @@ def interactions():
 
             "data": {
                 "content":
-                    summary,
+                    message,
+
+                "flags":
+                    64,
+            },
+        })
+
+    if command_name == "sync-test-revoke":
+
+        message = (
+            "🧪 **Freeborn Revocation TEST**\n\n"
+
+            "Personnage détecté : "
+            "**TEST - Former Member**\n"
+
+            "Statut : ❌ hors Freeborn Legacy\n\n"
+
+            "### Actions prévues\n"
+
+            "➡️ Retirer **Membre**\n"
+            "➡️ Retirer **EVE Verified**\n"
+            "➡️ Retirer **Main Character**\n"
+            "➡️ Retirer **Alt Character**\n\n"
+
+            "🛡️ **MODE SIMULATION**\n"
+
+            "Aucun rôle réel n'a été modifié."
+        )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    message,
 
                 "flags":
                     64,
@@ -1284,6 +1800,7 @@ def interactions():
 
 @app.route("/callback")
 def callback():
+
     code = request.args.get(
         "code"
     )
@@ -1339,7 +1856,8 @@ def callback():
 
     if (
         guild_id
-        != DISCORD_GUILD_ID
+        !=
+        DISCORD_GUILD_ID
     ):
         return """
         <h1>Freeborn Verify</h1>
@@ -1455,6 +1973,7 @@ def callback():
         verification_type
         == "main"
     ):
+
         try:
             save_main_character(
                 discord_user_id,
@@ -1464,13 +1983,10 @@ def callback():
             )
 
         except ValueError as error:
-            error_text = str(
-                error
-            )
 
             if (
                 "already has main character"
-                in error_text
+                in str(error)
             ):
                 existing_main = (
                     get_main_character(
@@ -1488,29 +2004,19 @@ def callback():
                 return f"""
                 <h1>Freeborn Verify</h1>
 
-                <p>
-                <strong>Character:</strong>
-                {character_name}
-                </p>
-
                 <h2>
                 ❌ MAIN ALREADY REGISTERED
                 </h2>
 
                 <p>
                 Ton Main actuel est
-                <strong>
-                {existing_main_name}
-                </strong>.
+                <strong>{existing_main_name}</strong>.
                 </p>
                 """, 400
 
             return """
             <h1>Freeborn Verify</h1>
-
-            <h2>
-            ❌ CHARACTER ALREADY LINKED
-            </h2>
+            <h2>❌ CHARACTER ALREADY LINKED</h2>
             """, 400
 
         except Exception as error:
@@ -1633,6 +2139,7 @@ def callback():
         )
 
     except ValueError as error:
+
         if (
             "Main character cannot"
             in str(error)
@@ -1709,6 +2216,7 @@ def callback():
 # ============================================================
 
 def register_commands():
+
     url = (
         f"{DISCORD_API}/applications/"
         f"{DISCORD_APPLICATION_ID}/guilds/"
@@ -1746,7 +2254,19 @@ def register_commands():
 
             "description":
                 "Contrôler les personnages "
-                "Freeborn enregistrés",
+                "Freeborn sans modifier les rôles",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "sync-apply",
+
+            "description":
+                "Synchroniser et révoquer "
+                "les anciens membres",
 
             "type":
                 1,
@@ -1757,8 +2277,8 @@ def register_commands():
                 "sync-test-out",
 
             "description":
-                "Tester la détection "
-                "d'un départ de corporation",
+                "Tester un départ "
+                "de corporation",
 
             "type":
                 1,
@@ -1769,8 +2289,8 @@ def register_commands():
                 "sync-test-revoke",
 
             "description":
-                "Simuler la révocation "
-                "des accès d'un ancien membre",
+                "Simuler une révocation "
+                "d'accès",
 
             "type":
                 1,
@@ -1830,6 +2350,7 @@ register_commands()
 # ============================================================
 
 if __name__ == "__main__":
+
     port = int(
         os.environ.get(
             "PORT",
