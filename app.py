@@ -1,12 +1,14 @@
 import os
 import secrets
+import base64
+import json
 from urllib.parse import urlencode
 
 import requests
 from flask import Flask, redirect, request, session
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "temporary-dev-key")
+app.secret_key = os.environ["FLASK_SECRET_KEY"]
 
 EVE_CLIENT_ID = os.environ["EVE_CLIENT_ID"]
 EVE_CLIENT_SECRET = os.environ["EVE_CLIENT_SECRET"]
@@ -14,6 +16,7 @@ EVE_CALLBACK_URL = os.environ["EVE_CALLBACK_URL"]
 
 EVE_AUTHORIZE_URL = "https://login.eveonline.com/v2/oauth/authorize/"
 EVE_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
+ESI_BASE_URL = "https://esi.evetech.net/latest"
 
 
 @app.route("/")
@@ -68,10 +71,36 @@ def callback():
     if token_response.status_code != 200:
         return "Unable to obtain EVE access token.", 400
 
-    return """
+    access_token = token_response.json()["access_token"]
+
+    # Decode the JWT payload to obtain the EVE character ID and name.
+    payload_part = access_token.split(".")[1]
+    payload_part += "=" * (-len(payload_part) % 4)
+
+    payload = json.loads(
+        base64.urlsafe_b64decode(payload_part).decode("utf-8")
+    )
+
+    character_id = payload["sub"].split(":")[-1]
+    character_name = payload.get("name", "Unknown")
+
+    # Public ESI lookup for character corporation.
+    esi_response = requests.get(
+        f"{ESI_BASE_URL}/characters/{character_id}/",
+        timeout=15,
+    )
+
+    if esi_response.status_code != 200:
+        return "Unable to retrieve character information from ESI.", 400
+
+    character_data = esi_response.json()
+    corporation_id = character_data["corporation_id"]
+
+    return f"""
     <h1>Freeborn Verify</h1>
-    <p>Authentication with EVE Online succeeded.</p>
-    <p>Next step: character and corporation verification.</p>
+    <p><strong>Character:</strong> {character_name}</p>
+    <p><strong>Character ID:</strong> {character_id}</p>
+    <p><strong>Corporation ID:</strong> {corporation_id}</p>
     """
 
 
