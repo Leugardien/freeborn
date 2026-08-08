@@ -1366,6 +1366,215 @@ def build_member_info(
 
 
 # ============================================================
+# MEMBER LIST
+# ============================================================
+
+def build_member_list_message():
+
+    characters = (
+        get_all_characters()
+    )
+
+    stats = (
+        get_database_stats()
+    )
+
+    if not characters:
+
+        return (
+            "👥 **Freeborn Member List**\n\n"
+            "ℹ️ Aucun compte EVE n'est actuellement "
+            "enregistré dans Freeborn Verify.\n\n"
+            "🛡️ **Mode lecture seule**\n"
+            "Aucune donnée Neon n'a été modifiée.\n"
+            "Aucun rôle Discord n'a été modifié."
+        )
+
+    members = {}
+
+    for row in characters:
+
+        (
+            character_id,
+            discord_user_id,
+            character_name,
+            character_type,
+            corporation_id,
+            in_corporation,
+            last_checked_at,
+            left_corporation_at,
+        ) = row
+
+        discord_user_id = str(
+            discord_user_id
+        )
+
+        if discord_user_id not in members:
+
+            members[discord_user_id] = {
+                "main": None,
+                "alts": [],
+                "all_in_corporation": True,
+            }
+
+        if character_type == "main":
+
+            members[discord_user_id]["main"] = (
+                character_name
+            )
+
+        else:
+
+            members[discord_user_id]["alts"].append(
+                character_name
+            )
+
+        if not in_corporation:
+
+            members[discord_user_id][
+                "all_in_corporation"
+            ] = False
+
+    sorted_members = sorted(
+        members.items(),
+        key=lambda item: (
+            (
+                item[1]["main"]
+                or "~"
+            ).lower(),
+            item[0],
+        ),
+    )
+
+    header = [
+        "👥 **Freeborn Member List**",
+        "",
+        (
+            "Comptes enregistrés : "
+            f"**{stats['members']}**"
+        ),
+        "",
+    ]
+
+    summary = [
+        "",
+        "### 📊 Résumé",
+        f"👥 Comptes Discord : **{stats['members']}**",
+        f"🎮 Personnages : **{stats['characters']}**",
+        f"🔗 Main Characters : **{stats['mains']}**",
+        f"🔹 Alt Characters : **{stats['alts']}**",
+        (
+            "🚪 Hors corporation : "
+            f"**{stats['outside_corporation']}**"
+        ),
+        "",
+        "🛡️ **Mode lecture seule**",
+        "Aucune donnée Neon n'a été modifiée.",
+        "Aucun rôle Discord n'a été modifié.",
+    ]
+
+    output_lines = list(header)
+    displayed = 0
+    maximum_accounts = 25
+    safe_message_limit = 1900
+
+    for index, (
+        discord_user_id,
+        member_data,
+    ) in enumerate(
+        sorted_members[:maximum_accounts],
+        start=1,
+    ):
+
+        main_name = (
+            member_data["main"]
+            or "Aucun Main"
+        )
+
+        alt_names = sorted(
+            member_data["alts"],
+            key=str.lower,
+        )
+
+        if alt_names:
+
+            visible_alts = (
+                alt_names[:5]
+            )
+
+            alt_text = ", ".join(
+                visible_alts
+            )
+
+            if len(alt_names) > 5:
+
+                alt_text += (
+                    f" +{len(alt_names) - 5} autre(s)"
+                )
+
+        else:
+
+            alt_text = "Aucun"
+
+        status_text = (
+            "✅ Freeborn Legacy"
+            if member_data[
+                "all_in_corporation"
+            ]
+            else
+            "❌ Statut hors corporation enregistré"
+        )
+
+        block = [
+            f"**{index}.** <@{discord_user_id}>",
+            f"🔗 Main : **{main_name}**",
+            f"🔹 Alts : **{alt_text}**",
+            f"{status_text}",
+            "",
+        ]
+
+        candidate = "\n".join(
+            output_lines
+            + block
+            + summary
+        )
+
+        if len(candidate) > safe_message_limit:
+
+            break
+
+        output_lines.extend(
+            block
+        )
+
+        displayed += 1
+
+    hidden_count = (
+        len(sorted_members)
+        - displayed
+    )
+
+    if hidden_count > 0:
+
+        output_lines.extend([
+            (
+                "ℹ️ Liste limitée : "
+                f"**{hidden_count}** compte(s) "
+                "supplémentaire(s) non affiché(s)."
+            ),
+            "",
+        ])
+
+    output_lines.extend(
+        summary
+    )
+
+    return "\n".join(
+        output_lines
+    )
+
+
+# ============================================================
 # DISCORD SIGNATURE
 # ============================================================
 
@@ -3375,6 +3584,7 @@ def interactions():
 
     STAFF_ONLY_COMMANDS = {
         "member-remove",
+        "member-list",
         "db-health",
         "sync-status",
         "sync-check",
@@ -3986,6 +4196,60 @@ def interactions():
                     "reste inchangé.\n"
 
                     f"{role_text}",
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # /member-list
+    # STAFF ONLY - READ ONLY
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "member-list"
+    ):
+
+        try:
+
+            message = (
+                build_member_list_message()
+            )
+
+        except Exception as error:
+
+            print(
+                "Member list failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "👥 **Freeborn Member List**\n\n"
+                        "⚠️ Impossible de lire "
+                        "la liste des membres actuellement.\n\n"
+                        "Aucune modification "
+                        "n'a été effectuée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    message,
 
                 "flags":
                     64,
@@ -5618,6 +5882,18 @@ def register_commands():
 
         {
             "name":
+                "member-list",
+
+            "description":
+                "Afficher la liste des "
+                "membres EVE enregistrés",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
                 "db-health",
 
             "description":
@@ -5695,8 +5971,9 @@ def register_commands():
                 "Discord commands registered: "
                 "/verify, /alt, /alt-remove, "
                 "/main-change, /member-info, "
-                "/member-remove, /db-health, "
-                "/sync-status, /sync-check, "
+                "/member-remove, /member-list, "
+                "/db-health, /sync-status, "
+                "/sync-check, "
                 "/sync-apply."
             )
 
