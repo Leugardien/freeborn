@@ -383,6 +383,17 @@ def get_database_stats():
 
             cur.execute(
                 """
+                SELECT COUNT(DISTINCT discord_user_id)
+                FROM eve_characters;
+                """
+            )
+
+            member_count = (
+                cur.fetchone()[0]
+            )
+
+            cur.execute(
+                """
                 SELECT COUNT(*)
                 FROM eve_characters
                 WHERE character_type = 'main';
@@ -417,9 +428,23 @@ def get_database_stats():
                 cur.fetchone()[0]
             )
 
+            cur.execute(
+                """
+                SELECT MAX(last_checked_at)
+                FROM eve_characters;
+                """
+            )
+
+            latest_check = (
+                cur.fetchone()[0]
+            )
+
     return {
         "characters":
             character_count,
+
+        "members":
+            member_count,
 
         "mains":
             main_count,
@@ -429,6 +454,9 @@ def get_database_stats():
 
         "outside_corporation":
             outside_count,
+
+        "latest_check":
+            latest_check,
     }
 
 
@@ -738,10 +766,6 @@ def change_main_character(
 
             with conn.cursor() as cur:
 
-                # --------------------------------------------
-                # Lock current Main
-                # --------------------------------------------
-
                 cur.execute(
                     """
                     SELECT
@@ -776,10 +800,6 @@ def change_main_character(
                     old_main[1]
                 )
 
-                # --------------------------------------------
-                # Lock selected Alt
-                # --------------------------------------------
-
                 cur.execute(
                     """
                     SELECT
@@ -813,10 +833,6 @@ def change_main_character(
                     new_main[1]
                 )
 
-                # --------------------------------------------
-                # Old Main becomes Alt
-                # --------------------------------------------
-
                 cur.execute(
                     """
                     UPDATE eve_characters
@@ -831,10 +847,6 @@ def change_main_character(
                         discord_user_id,
                     ),
                 )
-
-                # --------------------------------------------
-                # Selected Alt becomes Main
-                # --------------------------------------------
 
                 cur.execute(
                     """
@@ -919,10 +931,13 @@ def build_member_info(
 
         return (
             "👤 **Freeborn Member Info**\n\n"
+
             f"Discord : "
             f"**{discord_display_name}**\n"
+
             f"Discord ID : "
             f"`{discord_user_id}`\n\n"
+
             "❌ Aucun personnage EVE "
             "n'est enregistré pour ce compte."
         )
@@ -1987,6 +2002,152 @@ def build_sync_message(
 
 
 # ============================================================
+# SYNC STATUS MESSAGE
+# ============================================================
+
+def build_sync_status_message():
+
+    stats = (
+        get_database_stats()
+    )
+
+    (
+        sync_results,
+        actions,
+    ) = run_sync(
+        apply_changes=False
+    )
+
+    freeborn_count = 0
+    outside_count = 0
+    error_count = 0
+
+    outside_names = []
+    error_names = []
+
+    for item in sync_results:
+
+        if (
+            item["status"]
+            != "ok"
+        ):
+
+            error_count += 1
+
+            error_names.append(
+                item[
+                    "character_name"
+                ]
+            )
+
+            continue
+
+        if item[
+            "in_corporation"
+        ]:
+
+            freeborn_count += 1
+
+        else:
+
+            outside_count += 1
+
+            outside_names.append(
+                item[
+                    "character_name"
+                ]
+            )
+
+    if (
+        error_count
+        ==
+        0
+        and
+        outside_count
+        ==
+        0
+    ):
+
+        overall_status = (
+            "✅ **OPÉRATIONNEL**"
+        )
+
+    elif (
+        error_count
+        >
+        0
+    ):
+
+        overall_status = (
+            "⚠️ **ATTENTION**"
+        )
+
+    else:
+
+        overall_status = (
+            "🚨 **ACTION REQUISE**"
+        )
+
+    lines = [
+        "📡 **Freeborn Sync Status**",
+        "",
+        f"État général : {overall_status}",
+        "",
+        "### 🗄️ Base Freeborn",
+        f"👥 Comptes suivis : **{stats['members']}**",
+        f"🎮 Personnages : **{stats['characters']}**",
+        f"🔗 Main Characters : **{stats['mains']}**",
+        f"🔹 Alt Characters : **{stats['alts']}**",
+        (
+            "🕒 Dernière synchro enregistrée : "
+            f"**{format_datetime(stats['latest_check'])}**"
+        ),
+        "",
+        "### 🌐 Contrôle ESI en direct",
+        f"✅ Freeborn : **{freeborn_count}**",
+        f"❌ Hors corporation : **{outside_count}**",
+        f"⚠️ Erreurs ESI : **{error_count}**",
+    ]
+
+    if outside_names:
+
+        lines.extend([
+            "",
+            "### 🚪 Personnages hors corporation",
+        ])
+
+        for name in outside_names:
+
+            lines.append(
+                f"❌ **{name}**"
+            )
+
+    if error_names:
+
+        lines.extend([
+            "",
+            "### ⚠️ Personnages non vérifiables",
+        ])
+
+        for name in error_names:
+
+            lines.append(
+                f"⚠️ **{name}**"
+            )
+
+    lines.extend([
+        "",
+        "🛡️ **Mode lecture seule**",
+        "Aucune donnée Neon n'a été modifiée.",
+        "Aucun rôle Discord n'a été modifié.",
+    ])
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
 # AUTOCOMPLETE
 # ============================================================
 
@@ -2365,6 +2526,7 @@ def interactions():
 
     STAFF_ONLY_COMMANDS = {
         "db-health",
+        "sync-status",
         "sync-check",
         "sync-apply",
     }
@@ -2381,6 +2543,60 @@ def interactions():
         return (
             staff_access_denied()
         )
+
+    # ========================================================
+    # /sync-status
+    # STAFF ONLY - READ ONLY
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "sync-status"
+    ):
+
+        try:
+
+            message = (
+                build_sync_status_message()
+            )
+
+        except Exception as error:
+
+            print(
+                "Sync status failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "📡 **Freeborn Sync Status**\n\n"
+                        "⚠️ Impossible de générer "
+                        "l'état global actuellement.\n\n"
+                        "Aucune modification "
+                        "n'a été effectuée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    message,
+
+                "flags":
+                    64,
+            },
+        })
 
     # ========================================================
     # /main-change
@@ -2482,11 +2698,6 @@ def interactions():
                 },
             })
 
-        # ----------------------------------------------------
-        # Verify selected character really belongs to caller
-        # and is currently an Alt
-        # ----------------------------------------------------
-
         try:
 
             alts = (
@@ -2554,10 +2765,6 @@ def interactions():
             stored_in_corporation,
         ) = selected_alt
 
-        # ----------------------------------------------------
-        # LIVE ESI CHECK
-        # ----------------------------------------------------
-
         eve_data = (
             get_current_eve_character(
                 new_main_id
@@ -2610,10 +2817,6 @@ def interactions():
                         64,
                 },
             })
-
-        # ----------------------------------------------------
-        # DATABASE TRANSACTION
-        # ----------------------------------------------------
 
         try:
 
@@ -2668,10 +2871,6 @@ def interactions():
                 },
             })
 
-        # ----------------------------------------------------
-        # Ensure account roles remain present
-        # ----------------------------------------------------
-
         add_discord_role(
             guild_id,
             discord_user_id,
@@ -2695,10 +2894,6 @@ def interactions():
             discord_user_id,
             DISCORD_ALT_CHARACTER_ROLE_ID,
         )
-
-        # ----------------------------------------------------
-        # Nickname follows new Main
-        # ----------------------------------------------------
 
         nickname_response = (
             sync_discord_nickname(
@@ -3905,6 +4100,18 @@ def register_commands():
 
         {
             "name":
+                "sync-status",
+
+            "description":
+                "Afficher l'état global "
+                "de la synchronisation",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
                 "sync-check",
 
             "description":
@@ -3958,7 +4165,8 @@ def register_commands():
                 "Discord commands registered: "
                 "/verify, /alt, /main-change, "
                 "/member-info, /db-health, "
-                "/sync-check, /sync-apply."
+                "/sync-status, /sync-check, "
+                "/sync-apply."
             )
 
         else:
