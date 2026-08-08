@@ -5,16 +5,13 @@ import psycopg
 import requests
 
 from flask import Flask, jsonify, request
-
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
-
 from itsdangerous import (
     URLSafeTimedSerializer,
     BadSignature,
     SignatureExpired,
 )
-
 from jose import jwt
 
 
@@ -103,7 +100,6 @@ EVE_METADATA_URL = (
 )
 
 ESI_BASE_URL = "https://esi.evetech.net/latest"
-
 DISCORD_API = "https://discord.com/api/v10"
 
 
@@ -136,22 +132,16 @@ def init_database():
                     """
                     CREATE TABLE IF NOT EXISTS eve_characters (
                         character_id BIGINT PRIMARY KEY,
-
                         discord_user_id TEXT NOT NULL,
-
                         character_name TEXT NOT NULL,
-
                         character_type TEXT NOT NULL
                             CHECK (
                                 character_type
                                 IN ('main', 'alt')
                             ),
-
                         corporation_id BIGINT NOT NULL,
-
                         verified_at TIMESTAMPTZ
                             NOT NULL DEFAULT NOW(),
-
                         updated_at TIMESTAMPTZ
                             NOT NULL DEFAULT NOW()
                     );
@@ -217,12 +207,9 @@ def get_main_character(
                 SELECT
                     character_id,
                     character_name
-
                 FROM eve_characters
-
                 WHERE discord_user_id = %s
                 AND character_type = 'main'
-
                 LIMIT 1;
                 """,
                 (
@@ -261,9 +248,7 @@ def get_character_record(
                     discord_user_id,
                     character_name,
                     character_type
-
                 FROM eve_characters
-
                 WHERE character_id = %s;
                 """,
                 (
@@ -293,18 +278,14 @@ def get_all_characters():
                     in_corporation,
                     last_checked_at,
                     left_corporation_at
-
                 FROM eve_characters
-
                 ORDER BY
                     discord_user_id,
-
                     CASE
                         WHEN character_type = 'main'
                         THEN 0
                         ELSE 1
                     END,
-
                     character_name;
                 """
             )
@@ -333,19 +314,45 @@ def get_member_characters(
                     verified_at,
                     last_checked_at,
                     left_corporation_at
-
                 FROM eve_characters
-
                 WHERE discord_user_id = %s
-
                 ORDER BY
                     CASE
                         WHEN character_type = 'main'
                         THEN 0
                         ELSE 1
                     END,
-
                     character_name;
+                """,
+                (
+                    str(discord_user_id),
+                ),
+            )
+
+            return cur.fetchall()
+
+
+def get_member_alts(
+    discord_user_id
+):
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    character_id,
+                    character_name,
+                    corporation_id,
+                    in_corporation
+                FROM eve_characters
+                WHERE discord_user_id = %s
+                AND character_type = 'alt'
+                ORDER BY character_name;
                 """,
                 (
                     str(discord_user_id),
@@ -511,7 +518,6 @@ def save_main_character(
                     last_checked_at,
                     left_corporation_at
                 )
-
                 VALUES (
                     %s,
                     %s,
@@ -522,35 +528,25 @@ def save_main_character(
                     NOW(),
                     NULL
                 )
-
                 ON CONFLICT (character_id)
-
                 DO UPDATE SET
                     discord_user_id =
                         EXCLUDED.discord_user_id,
-
                     character_name =
                         EXCLUDED.character_name,
-
                     character_type =
                         'main',
-
                     corporation_id =
                         EXCLUDED.corporation_id,
-
                     in_corporation =
                         TRUE,
-
                     last_checked_at =
                         NOW(),
-
                     left_corporation_at =
                         NULL,
-
                     updated_at =
                         NOW();
                 """,
-
                 (
                     character_id,
                     discord_user_id,
@@ -623,7 +619,6 @@ def save_alt_character(
                     last_checked_at,
                     left_corporation_at
                 )
-
                 VALUES (
                     %s,
                     %s,
@@ -634,29 +629,21 @@ def save_alt_character(
                     NOW(),
                     NULL
                 )
-
                 ON CONFLICT (character_id)
-
                 DO UPDATE SET
                     character_name =
                         EXCLUDED.character_name,
-
                     corporation_id =
                         EXCLUDED.corporation_id,
-
                     in_corporation =
                         TRUE,
-
                     last_checked_at =
                         NOW(),
-
                     left_corporation_at =
                         NULL,
-
                     updated_at =
                         NOW();
                 """,
-
                 (
                     int(character_id),
                     str(discord_user_id),
@@ -685,17 +672,14 @@ def update_character_sync_status(
                 cur.execute(
                     """
                     UPDATE eve_characters
-
                     SET
                         corporation_id = %s,
                         in_corporation = TRUE,
                         last_checked_at = NOW(),
                         left_corporation_at = NULL,
                         updated_at = NOW()
-
                     WHERE character_id = %s;
                     """,
-
                     (
                         int(corporation_id),
                         int(character_id),
@@ -707,23 +691,18 @@ def update_character_sync_status(
                 cur.execute(
                     """
                     UPDATE eve_characters
-
                     SET
                         corporation_id = %s,
                         in_corporation = FALSE,
                         last_checked_at = NOW(),
-
                         left_corporation_at =
                             COALESCE(
                                 left_corporation_at,
                                 NOW()
                             ),
-
                         updated_at = NOW()
-
                     WHERE character_id = %s;
                     """,
-
                     (
                         int(corporation_id),
                         int(character_id),
@@ -731,6 +710,175 @@ def update_character_sync_status(
                 )
 
         conn.commit()
+
+
+# ============================================================
+# MAIN CHANGE
+# ============================================================
+
+def change_main_character(
+    discord_user_id,
+    new_main_character_id,
+    new_main_corporation_id,
+):
+
+    discord_user_id = str(
+        discord_user_id
+    )
+
+    new_main_character_id = int(
+        new_main_character_id
+    )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+
+        try:
+
+            with conn.cursor() as cur:
+
+                # --------------------------------------------
+                # Lock current Main
+                # --------------------------------------------
+
+                cur.execute(
+                    """
+                    SELECT
+                        character_id,
+                        character_name,
+                        corporation_id
+                    FROM eve_characters
+                    WHERE discord_user_id = %s
+                    AND character_type = 'main'
+                    FOR UPDATE;
+                    """,
+                    (
+                        discord_user_id,
+                    ),
+                )
+
+                old_main = (
+                    cur.fetchone()
+                )
+
+                if not old_main:
+
+                    raise ValueError(
+                        "No current Main Character"
+                    )
+
+                old_main_id = int(
+                    old_main[0]
+                )
+
+                old_main_name = (
+                    old_main[1]
+                )
+
+                # --------------------------------------------
+                # Lock selected Alt
+                # --------------------------------------------
+
+                cur.execute(
+                    """
+                    SELECT
+                        character_id,
+                        character_name,
+                        corporation_id
+                    FROM eve_characters
+                    WHERE character_id = %s
+                    AND discord_user_id = %s
+                    AND character_type = 'alt'
+                    FOR UPDATE;
+                    """,
+                    (
+                        new_main_character_id,
+                        discord_user_id,
+                    ),
+                )
+
+                new_main = (
+                    cur.fetchone()
+                )
+
+                if not new_main:
+
+                    raise ValueError(
+                        "Selected character is not "
+                        "a registered Alt"
+                    )
+
+                new_main_name = (
+                    new_main[1]
+                )
+
+                # --------------------------------------------
+                # Old Main becomes Alt
+                # --------------------------------------------
+
+                cur.execute(
+                    """
+                    UPDATE eve_characters
+                    SET
+                        character_type = 'alt',
+                        updated_at = NOW()
+                    WHERE character_id = %s
+                    AND discord_user_id = %s;
+                    """,
+                    (
+                        old_main_id,
+                        discord_user_id,
+                    ),
+                )
+
+                # --------------------------------------------
+                # Selected Alt becomes Main
+                # --------------------------------------------
+
+                cur.execute(
+                    """
+                    UPDATE eve_characters
+                    SET
+                        character_type = 'main',
+                        corporation_id = %s,
+                        in_corporation = TRUE,
+                        last_checked_at = NOW(),
+                        left_corporation_at = NULL,
+                        updated_at = NOW()
+                    WHERE character_id = %s
+                    AND discord_user_id = %s;
+                    """,
+                    (
+                        int(
+                            new_main_corporation_id
+                        ),
+                        new_main_character_id,
+                        discord_user_id,
+                    ),
+                )
+
+            conn.commit()
+
+            return {
+                "old_main_id":
+                    old_main_id,
+
+                "old_main_name":
+                    old_main_name,
+
+                "new_main_id":
+                    new_main_character_id,
+
+                "new_main_name":
+                    new_main_name,
+            }
+
+        except Exception:
+
+            conn.rollback()
+
+            raise
 
 
 # ============================================================
@@ -771,13 +919,10 @@ def build_member_info(
 
         return (
             "👤 **Freeborn Member Info**\n\n"
-
             f"Discord : "
             f"**{discord_display_name}**\n"
-
             f"Discord ID : "
             f"`{discord_user_id}`\n\n"
-
             "❌ Aucun personnage EVE "
             "n'est enregistré pour ce compte."
         )
@@ -940,7 +1085,6 @@ def verify_discord_signature(
         verify_key.verify(
             timestamp.encode()
             + body,
-
             bytes.fromhex(
                 signature
             ),
@@ -1172,6 +1316,61 @@ def get_eve_identity(
 
 
 # ============================================================
+# ESI CHARACTER
+# ============================================================
+
+def get_current_eve_character(
+    character_id
+):
+
+    try:
+
+        response = requests.get(
+            (
+                f"{ESI_BASE_URL}/characters/"
+                f"{int(character_id)}/"
+            ),
+            timeout=15,
+        )
+
+    except Exception as error:
+
+        print(
+            "ESI character lookup error:",
+            character_id,
+            repr(error),
+        )
+
+        return None
+
+    if (
+        response.status_code
+        != 200
+    ):
+
+        print(
+            "ESI character lookup failed:",
+            character_id,
+            response.status_code,
+        )
+
+        return None
+
+    data = (
+        response.json()
+    )
+
+    if (
+        "corporation_id"
+        not in data
+    ):
+
+        return None
+
+    return data
+
+
+# ============================================================
 # DISCORD HELPERS
 # ============================================================
 
@@ -1190,12 +1389,10 @@ def add_discord_role(
 
     return requests.put(
         role_url,
-
         headers={
             "Authorization":
                 f"Bot {DISCORD_BOT_TOKEN}",
         },
-
         timeout=15,
     )
 
@@ -1215,12 +1412,10 @@ def remove_discord_role(
 
     return requests.delete(
         role_url,
-
         headers={
             "Authorization":
                 f"Bot {DISCORD_BOT_TOKEN}",
         },
-
         timeout=15,
     )
 
@@ -1239,7 +1434,6 @@ def sync_discord_nickname(
 
     return requests.patch(
         member_url,
-
         headers={
             "Authorization":
                 f"Bot {DISCORD_BOT_TOKEN}",
@@ -1247,12 +1441,10 @@ def sync_discord_nickname(
             "Content-Type":
                 "application/json",
         },
-
         json={
             "nick":
                 character_name,
         },
-
         timeout=15,
     )
 
@@ -1429,7 +1621,6 @@ def run_sync(
                     f"{ESI_BASE_URL}/characters/"
                     f"{character_id}/"
                 ),
-
                 timeout=15,
             )
 
@@ -1796,6 +1987,163 @@ def build_sync_message(
 
 
 # ============================================================
+# AUTOCOMPLETE
+# ============================================================
+
+def handle_autocomplete(
+    data
+):
+
+    command_name = (
+        data[
+            "data"
+        ].get(
+            "name"
+        )
+    )
+
+    if (
+        command_name
+        !=
+        "main-change"
+    ):
+
+        return jsonify({
+            "type":
+                8,
+
+            "data": {
+                "choices":
+                    []
+            },
+        })
+
+    try:
+
+        discord_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+    except Exception:
+
+        return jsonify({
+            "type":
+                8,
+
+            "data": {
+                "choices":
+                    []
+            },
+        })
+
+    search_text = ""
+
+    options = (
+        data[
+            "data"
+        ].get(
+            "options",
+            [],
+        )
+    )
+
+    for option in options:
+
+        if (
+            option.get("name")
+            ==
+            "personnage"
+        ):
+
+            search_text = str(
+                option.get(
+                    "value",
+                    "",
+                )
+            ).lower()
+
+            break
+
+    try:
+
+        alts = (
+            get_member_alts(
+                discord_user_id
+            )
+        )
+
+    except Exception as error:
+
+        print(
+            "Main change autocomplete "
+            "database error:",
+            repr(error),
+        )
+
+        alts = []
+
+    choices = []
+
+    for alt in alts:
+
+        (
+            character_id,
+            character_name,
+            corporation_id,
+            in_corporation,
+        ) = alt
+
+        if (
+            search_text
+            and
+            search_text
+            not in
+            character_name.lower()
+        ):
+
+            continue
+
+        status_text = (
+            "Freeborn"
+            if in_corporation
+            else
+            "à revérifier"
+        )
+
+        choices.append({
+            "name":
+                f"{character_name} — "
+                f"{status_text}",
+
+            "value":
+                str(character_id),
+        })
+
+        if (
+            len(choices)
+            >= 25
+        ):
+
+            break
+
+    return jsonify({
+        "type":
+            8,
+
+        "data": {
+            "choices":
+                choices,
+        },
+    })
+
+
+# ============================================================
 # HOME
 # ============================================================
 
@@ -1912,18 +2260,46 @@ def interactions():
         request.get_json()
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # DISCORD PING
-    # --------------------------------------------------------
+    # ========================================================
 
-    if data["type"] == 1:
+    if (
+        data["type"]
+        ==
+        1
+    ):
 
         return jsonify({
             "type":
                 1
         })
 
-    if data["type"] != 2:
+    # ========================================================
+    # AUTOCOMPLETE
+    # ========================================================
+
+    if (
+        data["type"]
+        ==
+        4
+    ):
+
+        return (
+            handle_autocomplete(
+                data
+            )
+        )
+
+    # ========================================================
+    # APPLICATION COMMAND
+    # ========================================================
+
+    if (
+        data["type"]
+        !=
+        2
+    ):
 
         return jsonify({
             "type":
@@ -1939,7 +2315,11 @@ def interactions():
         })
 
     command_name = (
-        data["data"]["name"]
+        data[
+            "data"
+        ][
+            "name"
+        ]
     )
 
     discord_user_id = str(
@@ -2003,13 +2383,380 @@ def interactions():
         )
 
     # ========================================================
+    # /main-change
+    # MEMBER COMMAND
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "main-change"
+    ):
+
+        try:
+
+            current_main = (
+                get_main_character(
+                    discord_user_id
+                )
+            )
+
+        except Exception as error:
+
+            print(
+                "Main change lookup failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Impossible de lire "
+                        "ton Main Character.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if not current_main:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun Main Character "
+                        "n'est enregistré.\n\n"
+                        "Utilise d'abord **/verify**.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        options = (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        )
+
+        selected_character_id = None
+
+        for option in options:
+
+            if (
+                option.get("name")
+                ==
+                "personnage"
+            ):
+
+                selected_character_id = (
+                    option.get(
+                        "value"
+                    )
+                )
+
+                break
+
+        if not selected_character_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun Alt Character "
+                        "n'a été sélectionné.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        # ----------------------------------------------------
+        # Verify selected character really belongs to caller
+        # and is currently an Alt
+        # ----------------------------------------------------
+
+        try:
+
+            alts = (
+                get_member_alts(
+                    discord_user_id
+                )
+            )
+
+        except Exception as error:
+
+            print(
+                "Main change alt lookup failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Impossible de lire "
+                        "tes Alt Characters.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        selected_alt = None
+
+        for alt in alts:
+
+            if (
+                str(alt[0])
+                ==
+                str(selected_character_id)
+            ):
+
+                selected_alt = alt
+
+                break
+
+        if not selected_alt:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Ce personnage n'est pas "
+                        "un Alt Character enregistré "
+                        "sur ton compte.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        (
+            new_main_id,
+            new_main_name,
+            stored_corporation_id,
+            stored_in_corporation,
+        ) = selected_alt
+
+        # ----------------------------------------------------
+        # LIVE ESI CHECK
+        # ----------------------------------------------------
+
+        eve_data = (
+            get_current_eve_character(
+                new_main_id
+            )
+        )
+
+        if eve_data is None:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ **Changement annulé**\n\n"
+                        "EVE ESI n'a pas pu confirmer "
+                        "l'état actuel du personnage.\n\n"
+                        "Aucune donnée n'a été modifiée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        current_corporation_id = int(
+            eve_data[
+                "corporation_id"
+            ]
+        )
+
+        if (
+            current_corporation_id
+            !=
+            FREEBORN_CORPORATION_ID
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ **Changement refusé**\n\n"
+                        f"**{new_main_name}** "
+                        "n'appartient actuellement "
+                        "pas à **Freeborn Legacy**.\n\n"
+                        "Ton Main actuel reste inchangé.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        # ----------------------------------------------------
+        # DATABASE TRANSACTION
+        # ----------------------------------------------------
+
+        try:
+
+            result = (
+                change_main_character(
+                    discord_user_id,
+                    new_main_id,
+                    current_corporation_id,
+                )
+            )
+
+        except ValueError as error:
+
+            print(
+                "Main change refused:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ **Changement impossible**\n\n"
+                        f"{str(error)}",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        except Exception as error:
+
+            print(
+                "Main change database error:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ **Erreur base de données**\n\n"
+                        "Le changement de Main "
+                        "n'a pas été effectué.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        # ----------------------------------------------------
+        # Ensure account roles remain present
+        # ----------------------------------------------------
+
+        add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_MEMBER_ROLE_ID,
+        )
+
+        add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_EVE_VERIFIED_ROLE_ID,
+        )
+
+        add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_MAIN_CHARACTER_ROLE_ID,
+        )
+
+        add_discord_role(
+            guild_id,
+            discord_user_id,
+            DISCORD_ALT_CHARACTER_ROLE_ID,
+        )
+
+        # ----------------------------------------------------
+        # Nickname follows new Main
+        # ----------------------------------------------------
+
+        nickname_response = (
+            sync_discord_nickname(
+                guild_id,
+                discord_user_id,
+                result[
+                    "new_main_name"
+                ],
+            )
+        )
+
+        nickname_changed = (
+            nickname_response.status_code
+            in
+            (200, 204)
+        )
+
+        nickname_text = (
+            "✅ Pseudo Discord synchronisé "
+            f"sur **{result['new_main_name']}**."
+            if nickname_changed
+            else
+            "⚠️ Le changement de Main est validé, "
+            "mais le pseudo Discord n'a pas pu "
+            "être modifié."
+        )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "🔄 **Freeborn Main Change**\n\n"
+
+                    f"Ancien Main : "
+                    f"**{result['old_main_name']}** "
+                    "→ Alt Character\n"
+
+                    f"Nouveau Main : "
+                    f"**{result['new_main_name']}** "
+                    "→ Main Character\n\n"
+
+                    "✅ Changement enregistré "
+                    "dans Freeborn Verify.\n"
+
+                    f"{nickname_text}\n\n"
+
+                    "Aucun personnage EVE "
+                    "n'a été supprimé.",
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
     # /member-info
-    #
-    # /member-info
-    # -> everyone can view own profile
-    #
-    # /member-info @someone
-    # -> Founder / CEO / Director only
     # ========================================================
 
     if (
@@ -2019,11 +2766,17 @@ def interactions():
     ):
 
         caller_user = (
-            data["member"]["user"]
+            data[
+                "member"
+            ][
+                "user"
+            ]
         )
 
         caller_display_name = (
-            data["member"].get(
+            data[
+                "member"
+            ].get(
                 "nick"
             )
             or
@@ -2075,10 +2828,6 @@ def interactions():
 
                 break
 
-        # ----------------------------------------------------
-        # ACCESS CONTROL
-        # ----------------------------------------------------
-
         if (
             selected_target
             and
@@ -2094,10 +2843,6 @@ def interactions():
             return (
                 staff_access_denied()
             )
-
-        # ----------------------------------------------------
-        # DISCORD RESOLVED USER DATA
-        # ----------------------------------------------------
 
         resolved = (
             data[
@@ -2125,14 +2870,14 @@ def interactions():
         target_user = (
             resolved_users.get(
                 target_user_id,
-                {}
+                {},
             )
         )
 
         target_member = (
             resolved_members.get(
                 target_user_id,
-                {}
+                {},
             )
         )
 
@@ -2578,10 +3323,7 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>
-        ❌ Authentication failed
-        </h2>
+        <h2>❌ Authentication failed</h2>
         """, 400
 
     try:
@@ -2597,20 +3339,14 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>
-        ❌ Verification link expired
-        </h2>
+        <h2>❌ Verification link expired</h2>
         """, 400
 
     except BadSignature:
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>
-        ❌ Invalid verification request
-        </h2>
+        <h2>❌ Invalid verification request</h2>
         """, 400
 
     discord_user_id = (
@@ -2640,15 +3376,8 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>
-        ❌ Invalid Discord server
-        </h2>
+        <h2>❌ Invalid Discord server</h2>
         """, 400
-
-    # ========================================================
-    # TOKEN EXCHANGE
-    # ========================================================
 
     token_response = requests.post(
         EVE_TOKEN_URL,
@@ -2677,10 +3406,7 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>
-        ❌ Unable to obtain EVE access token
-        </h2>
+        <h2>❌ Unable to obtain EVE access token</h2>
         """, 400
 
     access_token = (
@@ -2688,10 +3414,6 @@ def callback():
             "access_token"
         ]
     )
-
-    # ========================================================
-    # EVE IDENTITY
-    # ========================================================
 
     try:
 
@@ -2711,22 +3433,14 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>
-        ❌ Unable to validate EVE identity
-        </h2>
+        <h2>❌ Unable to validate EVE identity</h2>
         """, 400
-
-    # ========================================================
-    # CHARACTER ESI
-    # ========================================================
 
     character_response = requests.get(
         (
             f"{ESI_BASE_URL}/characters/"
             f"{character_id}/"
         ),
-
         timeout=15,
     )
 
@@ -2738,10 +3452,7 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>
-        ❌ Unable to retrieve character
-        </h2>
+        <h2>❌ Unable to retrieve character</h2>
         """, 400
 
     character_data = (
@@ -2753,10 +3464,6 @@ def callback():
             "corporation_id"
         ]
     )
-
-    # ========================================================
-    # CORPORATION CHECK
-    # ========================================================
 
     if (
         corporation_id
@@ -2772,9 +3479,7 @@ def callback():
         {character_name}
         </p>
 
-        <h2>
-        ❌ REFUSED
-        </h2>
+        <h2>❌ REFUSED</h2>
 
         <p>
         Ce personnage n'appartient
@@ -2829,30 +3534,24 @@ def callback():
                 {character_name}
                 </p>
 
-                <h2>
-                ❌ MAIN ALREADY REGISTERED
-                </h2>
+                <h2>❌ MAIN ALREADY REGISTERED</h2>
 
                 <p>
                 Ton personnage principal actuel est
-                <strong>
-                {existing_main_name}
-                </strong>.
+                <strong>{existing_main_name}</strong>.
                 </p>
 
                 <p>
-                Tu ne peux pas enregistrer
-                <strong>{character_name}</strong>
-                comme second Main Character.
+                Utilise la commande
+                <strong>/main-change</strong>
+                pour changer de Main Character.
                 </p>
                 """, 400
 
             return """
             <h1>Freeborn Verify</h1>
 
-            <h2>
-            ❌ CHARACTER ALREADY LINKED
-            </h2>
+            <h2>❌ CHARACTER ALREADY LINKED</h2>
 
             <p>
             Ce personnage EVE est déjà associé
@@ -2869,10 +3568,7 @@ def callback():
 
             return """
             <h1>Freeborn Verify</h1>
-
-            <h2>
-            ⚠️ Database error
-            </h2>
+            <h2>⚠️ Database error</h2>
             """, 500
 
         role_responses = [
@@ -2899,17 +3595,13 @@ def callback():
             response.status_code
             not in
             (200, 204)
-
             for response
             in role_responses
         ):
 
             return """
             <h1>Freeborn Verify</h1>
-
-            <h2>
-            ⚠️ Role assignment error
-            </h2>
+            <h2>⚠️ Role assignment error</h2>
             """, 500
 
         remove_discord_role(
@@ -2963,9 +3655,7 @@ def callback():
         Freeborn Legacy
         </p>
 
-        <h2>
-        ✅ VERIFIED
-        </h2>
+        <h2>✅ VERIFIED</h2>
 
         <p>
         <strong>{character_name}</strong>
@@ -2991,9 +3681,7 @@ def callback():
         return """
         <h1>Freeborn Verify</h1>
 
-        <h2>
-        ❌ MAIN REQUIRED
-        </h2>
+        <h2>❌ MAIN REQUIRED</h2>
 
         <p>
         Tu dois d'abord enregistrer
@@ -3025,17 +3713,13 @@ def callback():
             est déjà ton Main Character.
             </p>
 
-            <h2>
-            ❌ REFUSED
-            </h2>
+            <h2>❌ REFUSED</h2>
             """, 400
 
         return """
         <h1>Freeborn Verify</h1>
 
-        <h2>
-        ❌ CHARACTER ALREADY LINKED
-        </h2>
+        <h2>❌ CHARACTER ALREADY LINKED</h2>
 
         <p>
         Ce personnage est déjà associé
@@ -3052,10 +3736,7 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>
-        ⚠️ Database error
-        </h2>
+        <h2>⚠️ Database error</h2>
         """, 500
 
     alt_role_response = (
@@ -3074,10 +3755,7 @@ def callback():
 
         return """
         <h1>Freeborn Verify</h1>
-
-        <h2>
-        ⚠️ Alt role error
-        </h2>
+        <h2>⚠️ Alt role error</h2>
         """, 500
 
     return f"""
@@ -3093,9 +3771,7 @@ def callback():
     Freeborn Legacy
     </p>
 
-    <h2>
-    ✅ ALT VERIFIED
-    </h2>
+    <h2>✅ ALT VERIFIED</h2>
 
     <p>
     <strong>{character_name}</strong>
@@ -3149,6 +3825,38 @@ def register_commands():
 
             "type":
                 1,
+        },
+
+        {
+            "name":
+                "main-change",
+
+            "description":
+                "Choisir un de tes Alts "
+                "comme nouveau Main",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type":
+                        3,
+
+                    "name":
+                        "personnage",
+
+                    "description":
+                        "Alt Character "
+                        "qui deviendra ton Main",
+
+                    "required":
+                        True,
+
+                    "autocomplete":
+                        True,
+                }
+            ],
         },
 
         {
@@ -3248,8 +3956,9 @@ def register_commands():
 
             print(
                 "Discord commands registered: "
-                "/verify, /alt, /member-info, "
-                "/db-health, /sync-check, /sync-apply."
+                "/verify, /alt, /main-change, "
+                "/member-info, /db-health, "
+                "/sync-check, /sync-apply."
             )
 
         else:
@@ -3257,9 +3966,7 @@ def register_commands():
             print(
                 "Discord command "
                 "registration failed:",
-
                 response.status_code,
-
                 response.text,
             )
 
@@ -3268,7 +3975,6 @@ def register_commands():
         print(
             "Discord command "
             "registration error:",
-
             repr(error),
         )
 
@@ -3278,7 +3984,6 @@ def register_commands():
 # ============================================================
 
 init_database()
-
 register_commands()
 
 
@@ -3296,9 +4001,6 @@ if __name__ == "__main__":
     )
 
     app.run(
-        host=
-            "0.0.0.0",
-
-        port=
-            port,
+        host="0.0.0.0",
+        port=port,
     )
