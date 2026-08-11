@@ -190,6 +190,14 @@ AUDIT_VIEWER_ROLE_IDS = configured_role_ids(
     DISCORD_HR_ROLE_ID,
 )
 
+RECRUITMENT_REVIEWER_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+    DISCORD_OFFICER_ROLE_ID,
+)
+
 STAFF_ROLE_IDS = SYSTEM_ADMIN_ROLE_IDS
 
 
@@ -1070,6 +1078,15 @@ def resolve_guild_role_id(
 
         "veteran":
             DISCORD_VETERAN_ROLE_ID,
+
+        "eve_verified":
+            DISCORD_EVE_VERIFIED_ROLE_ID,
+
+        "main_character":
+            DISCORD_MAIN_CHARACTER_ROLE_ID,
+
+        "alt_character":
+            DISCORD_ALT_CHARACTER_ROLE_ID,
     }
 
     role_id = bootstrap_roles.get(
@@ -1381,6 +1398,273 @@ def has_required_policy_acceptances_v3(
                 charter
             ),
     }
+
+
+def get_guild_main_character_v3(
+    guild_id,
+    discord_user_id,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    character_id,
+                    character_name,
+                    corporation_id,
+                    in_corporation,
+                    verified_at,
+                    last_checked_at,
+                    left_corporation_at
+                FROM guild_eve_characters
+                WHERE guild_id = %s
+                AND discord_user_id = %s
+                AND character_type = 'main'
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                ),
+            )
+
+            return cur.fetchone()
+
+
+def save_main_character_v3(
+    guild_id,
+    discord_user_id,
+    character_id,
+    character_name,
+    corporation_id,
+):
+
+    guild_id = str(guild_id)
+    discord_user_id = str(discord_user_id)
+    character_id = int(character_id)
+    corporation_id = int(corporation_id)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        try:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT
+                        character_id,
+                        character_name
+                    FROM guild_eve_characters
+                    WHERE guild_id = %s
+                    AND discord_user_id = %s
+                    AND character_type = 'main'
+                    FOR UPDATE;
+                    """,
+                    (
+                        guild_id,
+                        discord_user_id,
+                    ),
+                )
+
+                existing_main = cur.fetchone()
+
+                if (
+                    existing_main
+                    and
+                    int(existing_main[0]) != character_id
+                ):
+
+                    raise ValueError(
+                        "Discord account already has main character"
+                    )
+
+                cur.execute(
+                    """
+                    SELECT discord_user_id
+                    FROM guild_eve_characters
+                    WHERE guild_id = %s
+                    AND character_id = %s
+                    FOR UPDATE;
+                    """,
+                    (
+                        guild_id,
+                        character_id,
+                    ),
+                )
+
+                linked = cur.fetchone()
+
+                if (
+                    linked
+                    and
+                    str(linked[0]) != discord_user_id
+                ):
+
+                    raise ValueError(
+                        "Character already linked to another Discord account"
+                    )
+
+                cur.execute(
+                    """
+                    INSERT INTO guild_eve_characters (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        character_name,
+                        character_type,
+                        corporation_id,
+                        in_corporation,
+                        verified_at,
+                        updated_at,
+                        last_checked_at,
+                        left_corporation_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, 'main',
+                        %s, TRUE, NOW(), NOW(), NOW(), NULL
+                    )
+                    ON CONFLICT (guild_id, character_id)
+                    DO UPDATE SET
+                        discord_user_id =
+                            EXCLUDED.discord_user_id,
+                        character_name =
+                            EXCLUDED.character_name,
+                        character_type =
+                            'main',
+                        corporation_id =
+                            EXCLUDED.corporation_id,
+                        in_corporation =
+                            TRUE,
+                        updated_at =
+                            NOW(),
+                        last_checked_at =
+                            NOW(),
+                        left_corporation_at =
+                            NULL;
+                    """,
+                    (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        str(character_name),
+                        corporation_id,
+                    ),
+                )
+
+            conn.commit()
+
+        except Exception:
+
+            conn.rollback()
+            raise
+
+
+def save_alt_character_v3(
+    guild_id,
+    discord_user_id,
+    character_id,
+    character_name,
+    corporation_id,
+):
+
+    guild_id = str(guild_id)
+    discord_user_id = str(discord_user_id)
+    character_id = int(character_id)
+    corporation_id = int(corporation_id)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        try:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT
+                        discord_user_id,
+                        character_type
+                    FROM guild_eve_characters
+                    WHERE guild_id = %s
+                    AND character_id = %s
+                    FOR UPDATE;
+                    """,
+                    (
+                        guild_id,
+                        character_id,
+                    ),
+                )
+
+                linked = cur.fetchone()
+
+                if linked:
+
+                    if str(linked[0]) != discord_user_id:
+
+                        raise ValueError(
+                            "Character already linked to another Discord account"
+                        )
+
+                    if linked[1] == "main":
+
+                        raise ValueError(
+                            "Main character cannot be registered as alt"
+                        )
+
+                cur.execute(
+                    """
+                    INSERT INTO guild_eve_characters (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        character_name,
+                        character_type,
+                        corporation_id,
+                        in_corporation,
+                        verified_at,
+                        updated_at,
+                        last_checked_at,
+                        left_corporation_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, 'alt',
+                        %s, TRUE, NOW(), NOW(), NOW(), NULL
+                    )
+                    ON CONFLICT (guild_id, character_id)
+                    DO UPDATE SET
+                        discord_user_id =
+                            EXCLUDED.discord_user_id,
+                        character_name =
+                            EXCLUDED.character_name,
+                        corporation_id =
+                            EXCLUDED.corporation_id,
+                        in_corporation =
+                            TRUE,
+                        updated_at =
+                            NOW(),
+                        last_checked_at =
+                            NOW(),
+                        left_corporation_at =
+                            NULL;
+                    """,
+                    (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        str(character_name),
+                        corporation_id,
+                    ),
+                )
+
+            conn.commit()
+
+        except Exception:
+
+            conn.rollback()
+            raise
 
 
 def has_verified_main_v3(
@@ -2657,6 +2941,17 @@ def interaction_is_recruitment_manager(
     return interaction_has_any_role(
         data,
         RECRUITMENT_MANAGER_ROLE_IDS,
+    )
+
+
+
+def interaction_is_recruitment_reviewer(
+    data
+):
+
+    return interaction_has_any_role(
+        data,
+        RECRUITMENT_REVIEWER_ROLE_IDS,
     )
 
 
@@ -5104,6 +5399,10 @@ def interactions():
         "member-promote",
     }
 
+    RECRUITMENT_REVIEWER_COMMANDS = {
+        "verify",
+    }
+
     if (
         command_name
         in STAFF_ONLY_COMMANDS
@@ -5132,6 +5431,33 @@ def interactions():
     ):
 
         return recruitment_access_denied()
+
+
+    if (
+        command_name
+        in RECRUITMENT_REVIEWER_COMMANDS
+
+        and
+
+        not interaction_is_recruitment_reviewer(
+            data
+        )
+    ):
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "⛔ **Accès refusé**\n\n"
+                    "La commande **/verify** est réservée "
+                    "aux rôles **Officier** et supérieurs.",
+
+                "flags":
+                    64,
+            },
+        })
 
     if (
         command_name
@@ -7180,8 +7506,263 @@ def interactions():
         "verify"
     ):
 
+        options = (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        )
+
+        target_user_id = None
+
+        for option in options:
+
+            if option.get("name") == "membre":
+
+                target_user_id = str(
+                    option["value"]
+                )
+
+                break
+
+        if not target_user_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun candidat sélectionné.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        status_row = get_member_status_v3(
+            guild_id,
+            target_user_id,
+        )
+
+        status_value = (
+            status_row[0]
+            if status_row
+            else None
+        )
+
+        status_labels = {
+            "guest":
+                "Invité",
+
+            "candidate":
+                "Candidat",
+
+            "candidate_accepted":
+                "Candidat Accepté",
+
+            "member":
+                "Membre",
+        }
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                target_user_id,
+            )
+        )
+
+        main_row = get_guild_main_character_v3(
+            guild_id,
+            target_user_id,
+        )
+
+        if not main_row and str(guild_id) == str(DISCORD_GUILD_ID):
+
+            legacy_main = get_main_character(
+                target_user_id
+            )
+
+            if legacy_main:
+
+                main_name = legacy_main[1]
+                main_text = (
+                    f"✅ **{main_name}** "
+                    "(ancien profil Freeborn)"
+                )
+
+            else:
+
+                main_text = "❌ Aucun Main EVE enregistré"
+
+        elif main_row:
+
+            (
+                main_character_id,
+                main_name,
+                main_corporation_id,
+                main_in_corporation,
+                main_verified_at,
+                main_last_checked_at,
+                main_left_at,
+            ) = main_row
+
+            main_text = (
+                f"✅ **{main_name}** "
+                f"(`{main_character_id}`)"
+            )
+
+        else:
+
+            main_text = "❌ Aucun Main EVE enregistré"
+
+        lines = [
+            "🔎 **Vérification recrutement Freeborn**",
+            "",
+            f"Candidat : <@{target_user_id}>",
+            (
+                "Statut Discord : "
+                f"**{status_labels.get(status_value, 'Non défini')}**"
+            ),
+            "",
+            "### Documents",
+            (
+                "✅ Règlement Corp"
+                if policy_state["corp_rules"]
+                else
+                "❌ Règlement Corp"
+            ),
+            (
+                "✅ Charte Freeborn"
+                if policy_state["charter"]
+                else
+                "❌ Charte Freeborn"
+            ),
+            "",
+            "### Identité EVE",
+            main_text,
+            "",
+        ]
+
+        if status_value == "candidate_accepted":
+
+            lines.append(
+                "✅ **Recrutement validé par la Direction/RH.**"
+            )
+
+        elif status_value == "candidate":
+
+            lines.append(
+                "🕒 **Candidature encore en cours.**"
+            )
+
+        elif status_value == "member":
+
+            lines.append(
+                "✅ Cette personne est déjà **Membre**."
+            )
+
+        else:
+
+            lines.append(
+                "⚠️ Le parcours Candidat n'est pas actif."
+            )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "\n".join(lines),
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # /freeborn
+    # FINAL MEMBER INTEGRATION
+    # ========================================================
+
+    elif (
+        command_name
+        ==
+        "freeborn"
+    ):
+
+        current_status = get_member_status_v3(
+            guild_id,
+            discord_user_id,
+        )
+
+        if (
+            not current_status
+            or
+            current_status[0]
+            not in {
+                "candidate",
+                "candidate_accepted",
+            }
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Parcours Freeborn incomplet**\n\n"
+                        "Tu dois d'abord passer par "
+                        "**Orientation → Candidat**.",
+
+                    **interaction_response_flags_payload(data),
+                },
+            })
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                discord_user_id,
+            )
+        )
+
+        if not policy_state["complete"]:
+
+            missing_documents = []
+
+            if not policy_state["corp_rules"]:
+
+                missing_documents.append(
+                    "Règlement Corp"
+                )
+
+            if not policy_state["charter"]:
+
+                missing_documents.append(
+                    "Charte Freeborn"
+                )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Parcours Freeborn incomplet**\n\n"
+                        "Il te reste à accepter : "
+                        + ", ".join(missing_documents)
+                        + ".",
+
+                    **interaction_response_flags_payload(data),
+                },
+            })
+
         verification_type = (
-            "main"
+            "freeborn"
         )
 
     # ========================================================
@@ -7296,6 +7877,22 @@ def interactions():
     if (
         verification_type
         ==
+        "freeborn"
+    ):
+
+        message = (
+            "🛡️ **Intégration Freeborn**\n\n"
+            "Connecte ton **Main EVE**. "
+            "Freeborn Verify contrôlera que ce personnage "
+            "appartient bien à la corporation EVE configurée "
+            "pour ce serveur.\n\n"
+            f"[Finaliser mon intégration Freeborn]"
+            f"({login_url})"
+        )
+
+    elif (
+        verification_type
+        ==
         "main"
     ):
 
@@ -7402,16 +7999,31 @@ def callback():
         )
     )
 
-    if (
+    guild_config = get_guild_config(
         guild_id
-        !=
-        DISCORD_GUILD_ID
+    )
+
+    if (
+        not guild_config
+        or
+        not guild_config[6]
     ):
 
         return """
         <h1>Freeborn Verify</h1>
-        <h2>❌ Invalid Discord server</h2>
+        <h2>❌ Invalid or inactive Discord server</h2>
         """, 400
+
+    expected_corporation_id = (
+        guild_config[2]
+    )
+
+    if not expected_corporation_id:
+
+        return """
+        <h1>Freeborn Verify</h1>
+        <h2>⚠️ No EVE corporation configured for this server</h2>
+        """, 500
 
     token_response = requests.post(
         EVE_TOKEN_URL,
@@ -7500,9 +8112,9 @@ def callback():
     )
 
     if (
-        corporation_id
+        int(corporation_id)
         !=
-        FREEBORN_CORPORATION_ID
+        int(expected_corporation_id)
     ):
 
         return f"""
@@ -7516,9 +8128,259 @@ def callback():
         <h2>❌ REFUSED</h2>
 
         <p>
-        Ce personnage n'appartient
-        pas à Freeborn Legacy.
+        Ce personnage n'appartient pas à la
+        corporation EVE configurée pour ce serveur Discord.
         </p>
+        """
+
+    # ========================================================
+    # FREEBORN FINAL INTEGRATION FLOW
+    # ========================================================
+
+    if (
+        verification_type
+        ==
+        "freeborn"
+    ):
+
+        current_status = get_member_status_v3(
+            guild_id,
+            discord_user_id,
+        )
+
+        if (
+            not current_status
+            or
+            current_status[0]
+            not in {
+                "candidate",
+                "candidate_accepted",
+            }
+        ):
+
+            return """
+            <h1>Freeborn Verify</h1>
+            <h2>❌ Discord recruitment status invalid</h2>
+            <p>
+            Le parcours Orientation → Candidat doit être
+            effectué avant /freeborn.
+            </p>
+            """, 400
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                discord_user_id,
+            )
+        )
+
+        if not policy_state["complete"]:
+
+            return """
+            <h1>Freeborn Verify</h1>
+            <h2>❌ Documents not accepted</h2>
+            <p>
+            Le Règlement Corp et la Charte Freeborn
+            doivent être acceptés avant /freeborn.
+            </p>
+            """, 400
+
+        try:
+
+            save_main_character_v3(
+                guild_id,
+                discord_user_id,
+                character_id,
+                character_name,
+                corporation_id,
+            )
+
+            if str(guild_id) == str(DISCORD_GUILD_ID):
+
+                try:
+
+                    save_main_character(
+                        discord_user_id,
+                        character_id,
+                        character_name,
+                        corporation_id,
+                    )
+
+                except ValueError as legacy_error:
+
+                    if (
+                        "already has main character"
+                        not in str(legacy_error)
+                        and
+                        "already linked"
+                        not in str(legacy_error).lower()
+                    ):
+
+                        raise
+
+        except ValueError as error:
+
+            return f"""
+            <h1>Freeborn Verify</h1>
+            <h2>❌ EVE identity conflict</h2>
+            <p>{str(error)}</p>
+            """, 400
+
+        except Exception as error:
+
+            print(
+                "V3 /freeborn main save failed:",
+                repr(error),
+            )
+
+            return """
+            <h1>Freeborn Verify</h1>
+            <h2>⚠️ Database error</h2>
+            """, 500
+
+        eve_verified_role_id = resolve_guild_role_id(
+            guild_id,
+            "eve_verified",
+        )
+
+        main_character_role_id = resolve_guild_role_id(
+            guild_id,
+            "main_character",
+        )
+
+        if (
+            not eve_verified_role_id
+            or
+            not main_character_role_id
+        ):
+
+            return """
+            <h1>Freeborn Verify</h1>
+            <h2>⚠️ EVE roles not configured</h2>
+            """, 500
+
+        identity_role_responses = [
+            add_discord_role(
+                guild_id,
+                discord_user_id,
+                eve_verified_role_id,
+            ),
+
+            add_discord_role(
+                guild_id,
+                discord_user_id,
+                main_character_role_id,
+            ),
+        ]
+
+        if any(
+            response.status_code
+            not in
+            (200, 204)
+
+            for response
+            in identity_role_responses
+        ):
+
+            return """
+            <h1>Freeborn Verify</h1>
+            <h2>⚠️ EVE role assignment error</h2>
+            """, 500
+
+        try:
+
+            role_result = (
+                apply_recruitment_status_role(
+                    guild_id,
+                    discord_user_id,
+                    "member",
+                )
+            )
+
+            if (
+                role_result["add_status_code"]
+                not in
+                (200, 204)
+            ):
+
+                raise RuntimeError(
+                    "Member role assignment failed: "
+                    f"{role_result['add_status_code']}"
+                )
+
+            set_member_status_v3(
+                guild_id,
+                discord_user_id,
+                "member",
+                discord_user_id,
+            )
+
+            add_audit_event_v3(
+                guild_id,
+                "freeborn_member_integrated",
+                target_discord_user_id=
+                    discord_user_id,
+                actor_discord_user_id=
+                    discord_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "V3 /freeborn promotion failed:",
+                repr(error),
+            )
+
+            return """
+            <h1>Freeborn Verify</h1>
+            <h2>⚠️ Discord member promotion error</h2>
+            """, 500
+
+        nickname_response = sync_discord_nickname(
+            guild_id,
+            discord_user_id,
+            character_name,
+        )
+
+        nickname_changed = (
+            nickname_response.status_code
+            in
+            (200, 204)
+        )
+
+        nickname_status = (
+            "<p>"
+            "Le pseudo Discord a été synchronisé sur "
+            f"<strong>{character_name}</strong>."
+            "</p>"
+
+            if nickname_changed
+
+            else
+
+            "<p>"
+            "Le personnage est validé, mais le pseudo Discord "
+            "n'a pas pu être modifié."
+            "</p>"
+        )
+
+        return f"""
+        <h1>Freeborn Verify</h1>
+        <h2>✅ BIENVENUE CHEZ FREEBORN</h2>
+
+        <p>
+        <strong>{character_name}</strong> a été vérifié
+        dans la corporation EVE configurée.
+        </p>
+
+        <p>
+        Ton parcours Discord est complet :
+        tu es maintenant <strong>Membre</strong>.
+        </p>
+
+        {nickname_status}
+
+        <p>Tu peux retourner sur Discord.</p>
         """
 
     # ========================================================
@@ -7843,14 +8705,43 @@ def register_commands():
 
         {
             "name":
-                "verify",
+                "freeborn",
 
             "description":
-                "Vérifier ton Main EVE "
-                "pour Freeborn Legacy",
+                "Finaliser ton intégration Freeborn",
 
             "type":
                 1,
+        },
+
+        {
+            "name":
+                "verify",
+
+            "description":
+                "Contrôler le dossier d'un candidat",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type":
+                        6,
+
+                    "name":
+                        "membre",
+
+                    "description":
+                        "Candidat à contrôler",
+
+                    "required":
+                        True,
+                }
+            ],
         },
 
         {
@@ -8210,7 +9101,7 @@ def register_commands():
             print(
                 "Discord commands registered: "
                 "/orientation-panel, "
-                "/verify, /alt, /alt-remove, "
+                "/freeborn, /verify, /alt, /alt-remove, "
                 "/main-change, /member-info, "
                 "/member-remove, /member-list, "
                 "/db-health, /sync-status, "
