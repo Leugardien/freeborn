@@ -6708,21 +6708,53 @@ def interactions():
                 },
             })
 
+        orientation_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/orientation-v2.png"
+        )
+
         return jsonify({
             "type":
                 4,
 
             "data": {
-                "content":
-                    "## 🧭 Orientation Freeborn\n\n"
-                    "Choisis la raison de ta présence "
-                    "sur le serveur.\n\n"
-                    "🌐 **Invité** — accès diplomatique / "
-                    "visiteur.\n"
-                    "📝 **Candidat** — commencer le parcours "
-                    "de recrutement.\n\n"
-                    "Ton choix est enregistré par "
-                    "Freeborn Verify.",
+                "embeds": [
+                    {
+                        "image": {
+                            "url":
+                                orientation_image_url
+                        },
+
+                        "color":
+                            0x2F81F7,
+                    },
+
+                    {
+                        "title":
+                            "🧭 CHOISIS TON ORIENTATION",
+
+                        "description":
+                            "Sélectionne le parcours correspondant à "
+                            "ta présence sur Freeborn Legacy.\n\n"
+                            "🔵 **Invité** → accès aux espaces "
+                            "diplomatiques et communautaires prévus "
+                            "pour les visiteurs.\n"
+                            "🟢 **Candidat** → commencer le parcours "
+                            "de recrutement Freeborn Legacy.\n\n"
+                            "📌 **Ton choix est enregistré par "
+                            "Freeborn Verify et le serveur adapte "
+                            "automatiquement tes accès.**",
+
+                        "color":
+                            0x2F81F7,
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Orientation • "
+                                "Invité ou Candidat"
+                        },
+                    },
+                ],
 
                 "components": [
                     {
