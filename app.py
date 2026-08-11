@@ -1,4 +1,5 @@
 import os
+from html import escape
 from urllib.parse import urlencode
 
 import psycopg
@@ -208,7 +209,6 @@ RECRUITMENT_REVIEWER_ROLE_IDS = configured_role_ids(
     DISCORD_HIGH_COUNCIL_ROLE_ID,
     DISCORD_DIRECTION_ROLE_ID,
     DISCORD_HR_ROLE_ID,
-    DISCORD_OFFICER_ROLE_ID,
 )
 
 STAFF_ROLE_IDS = SYSTEM_ADMIN_ROLE_IDS
@@ -249,6 +249,16 @@ state_serializer = URLSafeTimedSerializer(
 member_remove_signer = TimestampSigner(
     FLASK_SECRET_KEY,
     salt="freeborn-member-remove",
+)
+
+alt_remove_signer = TimestampSigner(
+    FLASK_SECRET_KEY,
+    salt="freeborn-alt-remove",
+)
+
+main_change_signer = TimestampSigner(
+    FLASK_SECRET_KEY,
+    salt="freeborn-main-change",
 )
 
 
@@ -3030,6 +3040,16 @@ def interaction_is_recruitment_reviewer(
     )
 
 
+def interaction_is_audit_viewer(
+    data
+):
+
+    return interaction_has_any_role(
+        data,
+        AUDIT_VIEWER_ROLE_IDS,
+    )
+
+
 def recruitment_access_denied():
 
     return jsonify({
@@ -3253,6 +3273,44 @@ def read_member_remove_token(
         target_user_id,
         requester_user_id,
     )
+
+
+# ============================================================
+# MEMBER SELF-SERVICE CONFIRMATION TOKENS
+# ============================================================
+
+def create_alt_remove_token(character_id, requester_user_id):
+
+    payload = f"{character_id}:{requester_user_id}"
+    return alt_remove_signer.sign(payload.encode()).decode()
+
+
+def read_alt_remove_token(token):
+
+    payload = alt_remove_signer.unsign(
+        token,
+        max_age=300,
+    ).decode()
+
+    character_id, requester_user_id = payload.split(":", 1)
+    return character_id, requester_user_id
+
+
+def create_main_change_token(character_id, requester_user_id):
+
+    payload = f"{character_id}:{requester_user_id}"
+    return main_change_signer.sign(payload.encode()).decode()
+
+
+def read_main_change_token(token):
+
+    payload = main_change_signer.unsign(
+        token,
+        max_age=300,
+    ).decode()
+
+    character_id, requester_user_id = payload.split(":", 1)
+    return character_id, requester_user_id
 
 
 # ============================================================
@@ -3530,6 +3588,76 @@ def remove_discord_role(
 
         timeout=15,
     )
+
+
+def get_discord_member(
+    guild_id,
+    user_id,
+):
+
+    response = requests.get(
+        f"{DISCORD_API}/guilds/{guild_id}/members/{user_id}",
+        headers={
+            "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        },
+        timeout=15,
+    )
+
+    if response.status_code != 200:
+        return None
+
+    return response.json()
+
+
+def send_discord_channel_message(
+    channel_id,
+    content,
+):
+
+    if not channel_id:
+        return None
+
+    return requests.post(
+        f"{DISCORD_API}/channels/{channel_id}/messages",
+        headers={
+            "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={"content": content},
+        timeout=15,
+    )
+
+
+def log_v3_event_to_discord(
+    guild_config,
+    content,
+):
+    """Best-effort visible audit log. Database audit remains authoritative."""
+
+    try:
+        logs_channel_id = (
+            str(guild_config[5])
+            if guild_config and guild_config[5]
+            else None
+        )
+
+        if not logs_channel_id:
+            return
+
+        response = send_discord_channel_message(
+            logs_channel_id,
+            content,
+        )
+
+        if response is not None and response.status_code not in (200, 201):
+            print(
+                "Discord V3 log failed:",
+                response.status_code,
+                response.text[:300],
+            )
+
+    except Exception as error:
+        print("Discord V3 log error:", repr(error))
 
 
 def sync_discord_nickname(
@@ -4321,6 +4449,7 @@ def handle_autocomplete(
             "alt-remove",
             "verify",
             "candidate-accept",
+            "member-remove",
         }
     ):
 
@@ -4332,6 +4461,70 @@ def handle_autocomplete(
                 "choices":
                     []
             },
+        })
+
+    # /member-remove lists only human Discord accounts that actually
+    # own at least one EVE profile in Freeborn Verify.
+    if command_name == "member-remove":
+
+        guild_id = str(data.get("guild_id", ""))
+        search_text = ""
+
+        for option in data["data"].get("options", []):
+            if option.get("name") == "membre":
+                search_text = str(option.get("value", "")).lower()
+                break
+
+        try:
+            with psycopg.connect(DATABASE_URL) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT discord_user_id
+                        FROM eve_characters
+                        ORDER BY discord_user_id;
+                        """
+                    )
+                    profile_rows = cur.fetchall()
+        except Exception as error:
+            print("Member remove autocomplete database error:", repr(error))
+            profile_rows = []
+
+        choices = []
+
+        for (target_user_id,) in profile_rows:
+            target_user_id = str(target_user_id)
+            member_payload = get_discord_member(guild_id, target_user_id)
+
+            if not member_payload:
+                continue
+
+            user_payload = member_payload.get("user", {})
+
+            if user_payload.get("bot", False):
+                continue
+
+            display_name = (
+                member_payload.get("nick")
+                or user_payload.get("global_name")
+                or user_payload.get("username")
+                or target_user_id
+            )
+
+            if search_text and search_text not in display_name.lower():
+                continue
+
+            choices.append({
+                "name": display_name,
+                "value": target_user_id,
+            })
+
+            if len(choices) >= 25:
+                break
+
+        return jsonify({
+            "type": 8,
+            "data": {"choices": choices},
         })
 
     # Staff recruitment commands use a controlled autocomplete list
@@ -5112,6 +5305,14 @@ def handle_message_component(
                     actor_user_id,
             )
 
+            log_v3_event_to_discord(
+                guild_config,
+                "📜 **Acceptation enregistrée**\n"
+                f"Membre : <@{actor_user_id}> (`{actor_user_id}`)\n"
+                f"Document : **{document_label}**\n"
+                f"Version : `{document_version}`",
+            )
+
         except Exception as error:
 
             print(
@@ -5150,6 +5351,144 @@ def handle_message_component(
             },
         })
 
+    # ========================================================
+    # ALT REMOVE CONFIRMATION
+    # ========================================================
+
+    if custom_id.startswith("ar_yes:") or custom_id.startswith("ar_no:"):
+
+        try:
+            actor_user_id = str(data["member"]["user"]["id"])
+            token = custom_id.split(":", 1)[1]
+            character_id, requester_user_id = read_alt_remove_token(token)
+        except SignatureExpired:
+            return jsonify({"type": 7, "data": {"content": "⌛ **Confirmation expirée**\n\nAucune suppression effectuée.", "components": []}})
+        except (BadSignature, ValueError, KeyError):
+            return jsonify({"type": 7, "data": {"content": "⛔ **Confirmation invalide**\n\nAucune modification effectuée.", "components": []}})
+
+        if actor_user_id != requester_user_id:
+            return jsonify({"type": 4, "data": {"content": "⛔ Cette confirmation ne t'appartient pas.", "flags": 64}})
+
+        if custom_id.startswith("ar_no:"):
+            return jsonify({"type": 7, "data": {"content": "🛡️ **Suppression annulée**\n\nTon profil Freeborn reste inchangé.", "components": []}})
+
+        try:
+            result = remove_alt_character(actor_user_id, character_id)
+        except ValueError as error:
+            return jsonify({"type": 7, "data": {"content": f"❌ **Suppression refusée**\n\n{str(error)}", "components": []}})
+        except Exception as error:
+            print("Alt remove confirmation failed:", repr(error))
+            return jsonify({"type": 7, "data": {"content": "⚠️ **Erreur base de données**\n\nL'Alt n'a pas été supprimé.", "components": []}})
+
+        if result["remaining_alts"] == 0:
+            role_response = remove_discord_role(
+                str(data.get("guild_id", DISCORD_GUILD_ID)),
+                actor_user_id,
+                DISCORD_ALT_CHARACTER_ROLE_ID,
+            )
+            role_text = (
+                "🔹 Aucun Alt restant : rôle **Alt Character** retiré."
+                if role_response.status_code in (200, 204)
+                else
+                "⚠️ Aucun Alt restant, mais le rôle **Alt Character** n'a pas pu être retiré."
+            )
+        else:
+            role_text = f"🔹 Alts restants : **{result['remaining_alts']}** — rôle **Alt Character** conservé."
+
+        current_main = get_main_character(actor_user_id)
+        current_main_name = current_main[1] if current_main else "Inconnu"
+
+        return jsonify({"type": 7, "data": {
+            "content":
+                "🗑️ **Freeborn Alt Remove**\n\n"
+                f"Alt supprimé : **{result['character_name']}**\n\n"
+                "✅ Le personnage a été retiré de ton profil Freeborn.\n"
+                f"✅ Ton Main **{current_main_name}** reste inchangé.\n"
+                f"{role_text}",
+            "components": [],
+        }})
+
+    # ========================================================
+    # MAIN CHANGE CONFIRMATION
+    # ========================================================
+
+    if custom_id.startswith("mc_yes:") or custom_id.startswith("mc_no:"):
+
+        try:
+            actor_user_id = str(data["member"]["user"]["id"])
+            guild_id = str(data["guild_id"])
+            token = custom_id.split(":", 1)[1]
+            character_id, requester_user_id = read_main_change_token(token)
+        except SignatureExpired:
+            return jsonify({"type": 7, "data": {"content": "⌛ **Confirmation expirée**\n\nAucun changement effectué.", "components": []}})
+        except (BadSignature, ValueError, KeyError):
+            return jsonify({"type": 7, "data": {"content": "⛔ **Confirmation invalide**\n\nAucune modification effectuée.", "components": []}})
+
+        if actor_user_id != requester_user_id:
+            return jsonify({"type": 4, "data": {"content": "⛔ Cette confirmation ne t'appartient pas.", "flags": 64}})
+
+        if custom_id.startswith("mc_no:"):
+            return jsonify({"type": 7, "data": {"content": "🛡️ **Changement annulé**\n\nTon Main reste inchangé.", "components": []}})
+
+        alts = get_member_alts(actor_user_id)
+        selected_alt = next((alt for alt in alts if str(alt[0]) == str(character_id)), None)
+
+        if not selected_alt:
+            return jsonify({"type": 7, "data": {"content": "❌ Ce personnage n'est plus un Alt Character enregistré sur ton compte.", "components": []}})
+
+        new_main_id, new_main_name, _, _ = selected_alt
+        eve_data = get_current_eve_character(new_main_id)
+
+        if eve_data is None:
+            return jsonify({"type": 7, "data": {"content": "⚠️ **Changement annulé**\n\nEVE ESI n'a pas pu confirmer l'état actuel du personnage.", "components": []}})
+
+        current_corporation_id = int(eve_data["corporation_id"])
+
+        if current_corporation_id != FREEBORN_CORPORATION_ID:
+            return jsonify({"type": 7, "data": {"content": f"❌ **Changement refusé**\n\n**{new_main_name}** n'appartient actuellement pas à **Freeborn Legacy**.", "components": []}})
+
+        try:
+            result = change_main_character(
+                actor_user_id,
+                new_main_id,
+                current_corporation_id,
+            )
+        except Exception as error:
+            print("Main change confirmation failed:", repr(error))
+            return jsonify({"type": 7, "data": {"content": "⚠️ **Changement impossible**\n\nAucune donnée n'a été modifiée.", "components": []}})
+
+        for role_id in (
+            DISCORD_MEMBER_ROLE_ID,
+            DISCORD_EVE_VERIFIED_ROLE_ID,
+            DISCORD_MAIN_CHARACTER_ROLE_ID,
+            DISCORD_ALT_CHARACTER_ROLE_ID,
+        ):
+            add_discord_role(guild_id, actor_user_id, role_id)
+
+        nickname_response = sync_discord_nickname(
+            guild_id,
+            actor_user_id,
+            result["new_main_name"],
+        )
+
+        nickname_text = (
+            f"✅ Pseudo Discord synchronisé sur **{result['new_main_name']}**."
+            if nickname_response.status_code in (200, 204)
+            else
+            "⚠️ Le changement de Main est validé, mais le pseudo Discord n'a pas pu être modifié (propriétaire du serveur ou hiérarchie Discord)."
+        )
+
+        return jsonify({"type": 7, "data": {
+            "content":
+                "🔄 **Freeborn Main Change**\n\n"
+                f"Ancien Main : **{result['old_main_name']}** → Alt Character\n"
+                f"Nouveau Main : **{result['new_main_name']}** → Main Character\n\n"
+                "✅ Changement enregistré dans Freeborn Verify.\n"
+                f"{nickname_text}\n\n"
+                "Aucun personnage EVE n'a été supprimé.",
+            "components": [],
+        }})
+
     # --------------------------------------------------------
     # Ignore unknown components
     # --------------------------------------------------------
@@ -5162,6 +5501,10 @@ def handle_message_component(
         custom_id.startswith(
             "mr_no:"
         )
+        or custom_id.startswith("ar_yes:")
+        or custom_id.startswith("ar_no:")
+        or custom_id.startswith("mc_yes:")
+        or custom_id.startswith("mc_no:")
     ):
 
         return jsonify({
@@ -5539,18 +5882,11 @@ def handle_message_component(
 @app.route("/")
 def home():
 
-    return """
-    <h1>Freeborn Verify</h1>
-
-    <p>
-    Service de vérification EVE Online
-    pour Freeborn Legacy.
-    </p>
-
-    <p>
-    Freeborn Verify est opérationnel.
-    </p>
-    """
+    return freeborn_web_page(
+        "Service opérationnel",
+        "Freeborn Verify V3 assure la vérification EVE Online et le parcours d'intégration de Freeborn Legacy.",
+        status="success",
+    )
 
 
 # ============================================================
@@ -5796,6 +6132,18 @@ def interactions():
         "corp-rules-panel",
         "charter-panel",
         "member-remove",
+        "sync-apply",
+    }
+
+    AUDIT_VIEWER_COMMANDS = {
+        "member-list",
+        "db-health",
+        "sync-status",
+        "sync-check",
+    }
+
+    TECHNICAL_CHANNEL_COMMANDS = {
+        "member-remove",
         "member-list",
         "db-health",
         "sync-status",
@@ -5830,6 +6178,30 @@ def interactions():
 
     if (
         command_name
+        in AUDIT_VIEWER_COMMANDS
+
+        and
+
+        not interaction_is_audit_viewer(
+            data
+        )
+    ):
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "⛔ **Accès refusé**\n\n"
+                    "Cette commande de consultation est réservée aux rôles "
+                    "**CEO**, **Haut Conseil**, **Direction** et "
+                    "**Ressources Humaines**.",
+                "flags": 64,
+            },
+        })
+
+
+    if (
+        command_name
         in RECRUITMENT_MANAGER_COMMANDS
 
         and
@@ -5860,8 +6232,9 @@ def interactions():
             "data": {
                 "content":
                     "⛔ **Accès refusé**\n\n"
-                    "La commande **/verify** est réservée "
-                    "aux rôles **Officier** et supérieurs.",
+                    "La commande **/verify** est réservée aux rôles "
+                    "**CEO**, **Haut Conseil**, **Direction** et "
+                    "**Ressources Humaines**.",
 
                 "flags":
                     64,
@@ -5870,37 +6243,41 @@ def interactions():
 
     if (
         command_name
-        in (
-            STAFF_ONLY_COMMANDS
-            -
-            {
-                "orientation-panel",
-                "corp-rules-panel",
-                "charter-panel",
-            }
-        )
-
-        and
-
-        str(data.get("channel_id", ""))
-        !=
-        DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID
+        in TECHNICAL_CHANNEL_COMMANDS
     ):
 
-        return jsonify({
-            "type":
-                4,
+        staff_channel_id = (
+            str(guild_config[4])
+            if guild_config and guild_config[4]
+            else None
+        )
 
-            "data": {
-                "content":
-                    "📍 **Commande staff réservée**\n\n"
-                    "Utilise cette commande dans "
-                    "<#1535497895929708648> "
-                    "(**character-management**).",
+        if (
+            not staff_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            staff_channel_id
+        ):
 
-                **interaction_response_flags_payload(data),
-            },
-        })
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "📍 **Commande staff réservée**\n\n"
+                        "Utilise cette commande dans "
+                        + (
+                            f"<#{staff_channel_id}>."
+                            if staff_channel_id
+                            else
+                            "le salon de gestion du bot configuré pour ce serveur."
+                        ),
+
+                    **interaction_response_flags_payload(data),
+                },
+            })
 
     # ========================================================
     # /orientation-panel
@@ -6081,7 +6458,7 @@ def interactions():
                                     3,
 
                                 "label":
-                                    "J'accepte le Règlement Corp",
+                                    "J'ai lu et accepté",
 
                                 "custom_id":
                                     "v3_accept_corp_rules",
@@ -6149,7 +6526,7 @@ def interactions():
                                     3,
 
                                 "label":
-                                    "J'accepte la Charte Freeborn",
+                                    "J'ai lu et accepté",
 
                                 "custom_id":
                                     "v3_accept_charter",
@@ -6463,8 +6840,8 @@ def interactions():
                     "content":
                         "⛔ **Promotion impossible**\n\n"
                         "Aucun Main EVE valide n'est enregistré "
-                        "pour ce candidat. Il doit d'abord "
-                        "effectuer **/verify**.",
+                        "pour ce candidat. Le candidat doit d'abord "
+                        "finaliser son intégration avec **/freeborn**.",
 
                     "flags":
                         64,
@@ -6628,63 +7005,33 @@ def interactions():
         # Discord target information
         # ----------------------------------------------------
 
-        resolved = (
-            data[
-                "data"
-            ].get(
-                "resolved",
-                {},
-            )
+        target_member = get_discord_member(
+            guild_id,
+            target_user_id,
+        ) or {}
+
+        target_user = target_member.get(
+            "user",
+            {},
         )
 
-        target_users = (
-            resolved.get(
-                "users",
-                {},
-            )
-        )
-
-        target_members = (
-            resolved.get(
-                "members",
-                {},
-            )
-        )
-
-        target_user = (
-            target_users.get(
-                target_user_id,
-                {},
-            )
-        )
-
-        target_member = (
-            target_members.get(
-                target_user_id,
-                {},
-            )
-        )
+        if target_user.get("bot", False):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        "⛔ **Suppression refusée**\n\n"
+                        "Un bot Discord ne peut pas être sélectionné "
+                        "comme profil Freeborn à supprimer.",
+                    **interaction_response_flags_payload(data),
+                },
+            })
 
         target_display_name = (
-            target_member.get(
-                "nick"
-            )
-
-            or
-
-            target_user.get(
-                "global_name"
-            )
-
-            or
-
-            target_user.get(
-                "username"
-            )
-
-            or
-
-            target_user_id
+            target_member.get("nick")
+            or target_user.get("global_name")
+            or target_user.get("username")
+            or target_user_id
         )
 
         # ----------------------------------------------------
@@ -6882,252 +7229,88 @@ def interactions():
 
     # ========================================================
     # /alt-remove
-    # MEMBER COMMAND
+    # MEMBER COMMAND - CONFIRMATION REQUIRED
     # ========================================================
 
-    if (
-        command_name
-        ==
-        "alt-remove"
-    ):
-
-        options = (
-            data[
-                "data"
-            ].get(
-                "options",
-                [],
-            )
-        )
+    if command_name == "alt-remove":
 
         selected_character_id = None
 
-        for option in options:
-
-            if (
-                option.get("name")
-                ==
-                "personnage"
-            ):
-
-                selected_character_id = (
-                    option.get(
-                        "value"
-                    )
-                )
-
+        for option in data["data"].get("options", []):
+            if option.get("name") == "personnage":
+                selected_character_id = option.get("value")
                 break
 
         if not selected_character_id:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
-                    "content":
-                        "❌ Aucun Alt Character "
-                        "n'a été sélectionné.",
-
+                    "content": "❌ Aucun Alt Character n'a été sélectionné.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
         try:
-
-            alts = (
-                get_member_alts(
-                    discord_user_id
-                )
-            )
-
+            alts = get_member_alts(discord_user_id)
         except Exception as error:
-
-            print(
-                "Alt remove lookup failed:",
-                repr(error),
-            )
-
+            print("Alt remove lookup failed:", repr(error))
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
-                    "content":
-                        "⚠️ Impossible de lire "
-                        "tes Alt Characters.",
-
+                    "content": "⚠️ Impossible de lire tes Alt Characters.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
-        selected_alt = None
-
-        for alt in alts:
-
-            if (
-                str(alt[0])
-                ==
-                str(selected_character_id)
-            ):
-
-                selected_alt = alt
-
-                break
+        selected_alt = next(
+            (alt for alt in alts if str(alt[0]) == str(selected_character_id)),
+            None,
+        )
 
         if not selected_alt:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
                     "content":
-                        "❌ Ce personnage n'est pas "
-                        "un Alt Character enregistré "
-                        "sur ton compte.\n\n"
-                        "Ton Main ne peut jamais être "
-                        "supprimé avec **/alt-remove**.",
-
+                        "❌ Ce personnage n'est pas un Alt Character enregistré "
+                        "sur ton compte. Ton Main ne peut jamais être supprimé "
+                        "avec **/alt-remove**.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
-        try:
-
-            result = (
-                remove_alt_character(
-                    discord_user_id,
-                    selected_character_id,
-                )
-            )
-
-        except ValueError as error:
-
-            print(
-                "Alt remove refused:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "❌ **Suppression refusée**\n\n"
-                        f"{str(error)}",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        except Exception as error:
-
-            print(
-                "Alt remove database error:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "⚠️ **Erreur base de données**\n\n"
-                        "L'Alt n'a pas été supprimé.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        remaining_alts = (
-            result[
-                "remaining_alts"
-            ]
-        )
-
-        if (
-            remaining_alts
-            ==
-            0
-        ):
-
-            role_response = (
-                remove_discord_role(
-                    guild_id,
-                    discord_user_id,
-                    DISCORD_ALT_CHARACTER_ROLE_ID,
-                )
-            )
-
-            role_removed = (
-                role_response.status_code
-                in
-                (200, 204)
-            )
-
-            if role_removed:
-
-                role_text = (
-                    "🔹 Aucun Alt restant : "
-                    "rôle **Alt Character** retiré."
-                )
-
-            else:
-
-                role_text = (
-                    "⚠️ Aucun Alt restant, mais "
-                    "le rôle **Alt Character** "
-                    "n'a pas pu être retiré."
-                )
-
-        else:
-
-            role_text = (
-                f"🔹 Alts restants : "
-                f"**{remaining_alts}** — "
-                "rôle **Alt Character** conservé."
-            )
-
-        current_main = (
-            get_main_character(
-                discord_user_id
-            )
-        )
-
-        current_main_name = (
-            current_main[1]
-
-            if current_main
-
-            else
-
-            "Inconnu"
+        token = create_alt_remove_token(
+            selected_character_id,
+            discord_user_id,
         )
 
         return jsonify({
-            "type":
-                4,
-
+            "type": 4,
             "data": {
                 "content":
-                    "🗑️ **Freeborn Alt Remove**\n\n"
-
-                    f"Alt supprimé : "
-                    f"**{result['character_name']}**\n\n"
-
-                    "✅ Le personnage a été retiré "
-                    "de ton profil Freeborn.\n"
-
-                    f"✅ Ton Main "
-                    f"**{current_main_name}** "
-                    "reste inchangé.\n"
-
-                    f"{role_text}",
-
+                    "⚠️ **Confirmer la suppression de l'Alt ?**\n\n"
+                    f"Personnage : **{selected_alt[1]}**\n"
+                    "Cette action retirera ce personnage de ton profil Freeborn.\n"
+                    "Ton Main restera inchangé.\n\n"
+                    "La confirmation expire dans 5 minutes.",
                 **interaction_response_flags_payload(data),
+                "components": [{
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 2,
+                            "style": 4,
+                            "label": "Confirmer la suppression",
+                            "custom_id": f"ar_yes:{token}",
+                        },
+                        {
+                            "type": 2,
+                            "style": 2,
+                            "label": "Annuler",
+                            "custom_id": f"ar_no:{token}",
+                        },
+                    ],
+                }],
             },
         })
 
@@ -7237,346 +7420,101 @@ def interactions():
 
     # ========================================================
     # /main-change
-    # MEMBER COMMAND
+    # MEMBER COMMAND - CONFIRMATION REQUIRED
     # ========================================================
 
-    if (
-        command_name
-        ==
-        "main-change"
-    ):
+    if command_name == "main-change":
 
-        try:
-
-            current_main = (
-                get_main_character(
-                    discord_user_id
-                )
-            )
-
-        except Exception as error:
-
-            print(
-                "Main change lookup failed:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "⚠️ Impossible de lire "
-                        "ton Main Character.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
+        current_main = get_main_character(discord_user_id)
 
         if not current_main:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
                     "content":
-                        "❌ Aucun Main Character "
-                        "n'est enregistré.\n\n"
-                        "Utilise d'abord **/verify**.",
-
+                        "❌ Aucun Main Character n'est enregistré. "
+                        "Finalise d'abord ton identité EVE avec **/freeborn**.",
                     **interaction_response_flags_payload(data),
                 },
             })
-
-        options = (
-            data[
-                "data"
-            ].get(
-                "options",
-                [],
-            )
-        )
 
         selected_character_id = None
 
-        for option in options:
-
-            if (
-                option.get("name")
-                ==
-                "personnage"
-            ):
-
-                selected_character_id = (
-                    option.get(
-                        "value"
-                    )
-                )
-
+        for option in data["data"].get("options", []):
+            if option.get("name") == "personnage":
+                selected_character_id = option.get("value")
                 break
 
         if not selected_character_id:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
-                    "content":
-                        "❌ Aucun Alt Character "
-                        "n'a été sélectionné.",
-
+                    "content": "❌ Aucun Alt Character n'a été sélectionné.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
         try:
-
-            alts = (
-                get_member_alts(
-                    discord_user_id
-                )
-            )
-
+            alts = get_member_alts(discord_user_id)
         except Exception as error:
-
-            print(
-                "Main change alt lookup failed:",
-                repr(error),
-            )
-
+            print("Main change alt lookup failed:", repr(error))
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
-                    "content":
-                        "⚠️ Impossible de lire "
-                        "tes Alt Characters.",
-
+                    "content": "⚠️ Impossible de lire tes Alt Characters.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
-        selected_alt = None
-
-        for alt in alts:
-
-            if (
-                str(alt[0])
-                ==
-                str(selected_character_id)
-            ):
-
-                selected_alt = alt
-
-                break
+        selected_alt = next(
+            (alt for alt in alts if str(alt[0]) == str(selected_character_id)),
+            None,
+        )
 
         if not selected_alt:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
                     "content":
-                        "❌ Ce personnage n'est pas "
-                        "un Alt Character enregistré "
+                        "❌ Ce personnage n'est pas un Alt Character enregistré "
                         "sur ton compte.",
-
                     **interaction_response_flags_payload(data),
                 },
             })
 
-        (
-            new_main_id,
-            new_main_name,
-            stored_corporation_id,
-            stored_in_corporation,
-        ) = selected_alt
-
-        eve_data = (
-            get_current_eve_character(
-                new_main_id
-            )
-        )
-
-        if eve_data is None:
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "⚠️ **Changement annulé**\n\n"
-                        "EVE ESI n'a pas pu confirmer "
-                        "l'état actuel du personnage.\n\n"
-                        "Aucune donnée n'a été modifiée.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        current_corporation_id = int(
-            eve_data[
-                "corporation_id"
-            ]
-        )
-
-        if (
-            current_corporation_id
-            !=
-            FREEBORN_CORPORATION_ID
-        ):
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "❌ **Changement refusé**\n\n"
-                        f"**{new_main_name}** "
-                        "n'appartient actuellement "
-                        "pas à **Freeborn Legacy**.\n\n"
-                        "Ton Main actuel reste inchangé.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        try:
-
-            result = (
-                change_main_character(
-                    discord_user_id,
-                    new_main_id,
-                    current_corporation_id,
-                )
-            )
-
-        except ValueError as error:
-
-            print(
-                "Main change refused:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "❌ **Changement impossible**\n\n"
-                        f"{str(error)}",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        except Exception as error:
-
-            print(
-                "Main change database error:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "⚠️ **Erreur base de données**\n\n"
-                        "Le changement de Main "
-                        "n'a pas été effectué.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        add_discord_role(
-            guild_id,
+        token = create_main_change_token(
+            selected_character_id,
             discord_user_id,
-            DISCORD_MEMBER_ROLE_ID,
-        )
-
-        add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_EVE_VERIFIED_ROLE_ID,
-        )
-
-        add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_MAIN_CHARACTER_ROLE_ID,
-        )
-
-        add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_ALT_CHARACTER_ROLE_ID,
-        )
-
-        nickname_response = (
-            sync_discord_nickname(
-                guild_id,
-                discord_user_id,
-                result[
-                    "new_main_name"
-                ],
-            )
-        )
-
-        nickname_changed = (
-            nickname_response.status_code
-            in
-            (200, 204)
-        )
-
-        nickname_text = (
-            "✅ Pseudo Discord synchronisé "
-            f"sur **{result['new_main_name']}**."
-
-            if nickname_changed
-
-            else
-
-            "⚠️ Le changement de Main est validé, "
-            "mais le pseudo Discord n'a pas pu "
-            "être modifié."
         )
 
         return jsonify({
-            "type":
-                4,
-
+            "type": 4,
             "data": {
                 "content":
-                    "🔄 **Freeborn Main Change**\n\n"
-
-                    f"Ancien Main : "
-                    f"**{result['old_main_name']}** "
-                    "→ Alt Character\n"
-
-                    f"Nouveau Main : "
-                    f"**{result['new_main_name']}** "
-                    "→ Main Character\n\n"
-
-                    "✅ Changement enregistré "
-                    "dans Freeborn Verify.\n"
-
-                    f"{nickname_text}\n\n"
-
-                    "Aucun personnage EVE "
-                    "n'a été supprimé.",
-
+                    "🔄 **Confirmer le changement de Main ?**\n\n"
+                    f"Main actuel : **{current_main[1]}**\n"
+                    f"Nouveau Main : **{selected_alt[1]}**\n\n"
+                    "L'ancien Main deviendra automatiquement Alt Character. "
+                    "Aucun personnage ne sera supprimé.\n\n"
+                    "La confirmation expire dans 5 minutes.",
                 **interaction_response_flags_payload(data),
+                "components": [{
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 2,
+                            "style": 3,
+                            "label": "Confirmer le changement",
+                            "custom_id": f"mc_yes:{token}",
+                        },
+                        {
+                            "type": 2,
+                            "style": 2,
+                            "label": "Annuler",
+                            "custom_id": f"mc_no:{token}",
+                        },
+                    ],
+                }],
             },
         })
 
@@ -8286,8 +8224,8 @@ def interactions():
                 "data": {
                     "content":
                         "❌ Utilise d'abord "
-                        "**/verify** "
-                        "pour ton Main.",
+                        "**/freeborn** "
+                        "pour enregistrer ton Main EVE.",
 
                     **interaction_response_flags_payload(data),
                 },
@@ -8401,6 +8339,75 @@ def interactions():
 
 
 # ============================================================
+# WEB UI - FREEBORN LEGACY V3
+# ============================================================
+
+def freeborn_web_page(
+    title,
+    message,
+    status="info",
+    character_name=None,
+):
+
+    status_map = {
+        "success": ("✅", "Succès"),
+        "error": ("❌", "Action refusée"),
+        "warning": ("⚠️", "Attention"),
+        "info": ("🛡️", "Freeborn Verify"),
+    }
+
+    icon, badge = status_map.get(status, status_map["info"])
+    safe_title = escape(str(title))
+    safe_message = escape(str(message))
+    safe_character = (
+        escape(str(character_name))
+        if character_name
+        else None
+    )
+
+    character_html = (
+        f'<div class="character">Personnage EVE : <strong>{safe_character}</strong></div>'
+        if safe_character
+        else ""
+    )
+
+    return f"""<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Freeborn Legacy — {safe_title}</title>
+<style>
+:root {{ color-scheme: dark; }}
+* {{ box-sizing: border-box; }}
+body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
+background:radial-gradient(circle at top,#16324c 0,#0d1722 42%,#070b10 100%);
+font-family:Inter,Segoe UI,Arial,sans-serif; color:#eef4fa; }}
+.card {{ width:min(720px,100%); background:rgba(13,23,34,.96); border:1px solid #2d455b;
+border-radius:18px; padding:34px; box-shadow:0 24px 70px rgba(0,0,0,.45); }}
+.brand {{ font-size:14px; letter-spacing:.16em; text-transform:uppercase; color:#8fb8d8; margin-bottom:22px; }}
+.badge {{ display:inline-flex; gap:9px; align-items:center; padding:8px 12px; border-radius:999px;
+background:#172b3d; color:#cfe9ff; font-weight:700; font-size:14px; }}
+h1 {{ margin:18px 0 10px; font-size:clamp(28px,5vw,42px); }}
+p {{ margin:0; color:#c6d3df; font-size:18px; line-height:1.6; }}
+.character {{ margin:22px 0 0; padding:14px 16px; background:#101c28; border-radius:10px; color:#dce8f2; }}
+.footer {{ margin-top:28px; padding-top:20px; border-top:1px solid #263847; color:#8ea3b4; font-size:14px; }}
+</style>
+</head>
+<body>
+<main class="card">
+<div class="brand">Freeborn Legacy · Freeborn Verify V3</div>
+<div class="badge">{icon} {badge}</div>
+<h1>{safe_title}</h1>
+<p>{safe_message}</p>
+{character_html}
+<div class="footer">Tu peux fermer cette fenêtre et retourner sur Discord.</div>
+</main>
+</body>
+</html>"""
+
+
+# ============================================================
 # EVE CALLBACK
 # ============================================================
 
@@ -8421,10 +8428,11 @@ def callback():
         not state
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Authentication failed</h2>
-        """, 400
+        return freeborn_web_page(
+            "Authentification impossible",
+            "La demande EVE est incomplète. Relance la commande depuis Discord.",
+            status="error",
+        ), 400
 
     try:
 
@@ -8437,17 +8445,19 @@ def callback():
 
     except SignatureExpired:
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Verification link expired</h2>
-        """, 400
+        return freeborn_web_page(
+            "Lien expiré",
+            "Le lien de vérification a expiré. Relance la commande depuis Discord.",
+            status="error",
+        ), 400
 
     except BadSignature:
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Invalid verification request</h2>
-        """, 400
+        return freeborn_web_page(
+            "Demande invalide",
+            "La demande de vérification n'est pas valide. Relance la commande depuis Discord.",
+            status="error",
+        ), 400
 
     discord_user_id = (
         state_data[
@@ -8478,10 +8488,11 @@ def callback():
         not guild_config[6]
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Invalid or inactive Discord server</h2>
-        """, 400
+        return freeborn_web_page(
+            "Serveur Discord invalide",
+            "Ce serveur n'est pas configuré ou n'est plus actif dans Freeborn Verify V3.",
+            status="error",
+        ), 400
 
     expected_corporation_id = (
         guild_config[2]
@@ -8489,10 +8500,11 @@ def callback():
 
     if not expected_corporation_id:
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>⚠️ No EVE corporation configured for this server</h2>
-        """, 500
+        return freeborn_web_page(
+            "Configuration EVE incomplète",
+            "Aucune corporation EVE n'est configurée pour ce serveur Discord.",
+            status="warning",
+        ), 500
 
     token_response = requests.post(
         EVE_TOKEN_URL,
@@ -8519,10 +8531,11 @@ def callback():
         200
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Unable to obtain EVE access token</h2>
-        """, 400
+        return freeborn_web_page(
+            "Connexion EVE refusée",
+            "Freeborn Verify n'a pas pu obtenir l'autorisation EVE. Relance l'intégration depuis Discord.",
+            status="error",
+        ), 400
 
     access_token = (
         token_response.json()[
@@ -8546,10 +8559,11 @@ def callback():
             repr(error),
         )
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Unable to validate EVE identity</h2>
-        """, 400
+        return freeborn_web_page(
+            "Identité EVE non validée",
+            "L'identité du personnage EVE n'a pas pu être vérifiée.",
+            status="error",
+        ), 400
 
     character_response = requests.get(
         (
@@ -8565,10 +8579,11 @@ def callback():
         200
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Unable to retrieve character</h2>
-        """, 400
+        return freeborn_web_page(
+            "Personnage EVE indisponible",
+            "Les informations du personnage n'ont pas pu être récupérées auprès d'EVE Online.",
+            status="error",
+        ), 400
 
     character_data = (
         character_response.json()
@@ -8586,21 +8601,12 @@ def callback():
         int(expected_corporation_id)
     ):
 
-        return f"""
-        <h1>Freeborn Verify</h1>
-
-        <p>
-        <strong>Character:</strong>
-        {character_name}
-        </p>
-
-        <h2>❌ REFUSED</h2>
-
-        <p>
-        Ce personnage n'appartient pas à la
-        corporation EVE configurée pour ce serveur Discord.
-        </p>
-        """
+        return freeborn_web_page(
+            "Intégration refusée",
+            "Ce personnage n'appartient pas à la corporation EVE configurée pour ce serveur Discord.",
+            status="error",
+            character_name=character_name,
+        ), 403
 
     # ========================================================
     # FREEBORN FINAL INTEGRATION FLOW
@@ -8627,14 +8633,11 @@ def callback():
             }
         ):
 
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>❌ Discord recruitment status invalid</h2>
-            <p>
-            Le parcours Orientation → Candidat doit être
-            effectué avant /freeborn.
-            </p>
-            """, 400
+            return freeborn_web_page(
+                "Parcours Discord incomplet",
+                "Le parcours Orientation → Candidat doit être effectué avant /freeborn.",
+                status="error",
+            ), 400
 
         policy_state = (
             has_required_policy_acceptances_v3(
@@ -8645,14 +8648,11 @@ def callback():
 
         if not policy_state["complete"]:
 
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>❌ Documents not accepted</h2>
-            <p>
-            Le Règlement Corp et la Charte Freeborn
-            doivent être acceptés avant /freeborn.
-            </p>
-            """, 400
+            return freeborn_web_page(
+                "Documents non acceptés",
+                "Le Règlement Corp et la Charte Freeborn doivent être lus et acceptés avant /freeborn.",
+                status="error",
+            ), 400
 
         try:
 
@@ -8689,11 +8689,18 @@ def callback():
 
         except ValueError as error:
 
-            return f"""
-            <h1>Freeborn Verify</h1>
-            <h2>❌ EVE identity conflict</h2>
-            <p>{str(error)}</p>
-            """, 400
+            error_text = str(error)
+            if "another Discord account" in error_text:
+                error_text = "Ce personnage EVE est déjà lié à un autre compte Discord."
+            elif "already has main character" in error_text:
+                error_text = "Ce compte Discord possède déjà un Main EVE enregistré."
+
+            return freeborn_web_page(
+                "Conflit d'identité EVE",
+                error_text,
+                status="error",
+                character_name=character_name,
+            ), 409
 
         except Exception as error:
 
@@ -8702,10 +8709,12 @@ def callback():
                 repr(error),
             )
 
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ Database error</h2>
-            """, 500
+            return freeborn_web_page(
+                "Erreur de base de données",
+                "L'identité EVE n'a pas pu être enregistrée. Aucune validation n'a été confirmée.",
+                status="warning",
+                character_name=character_name,
+            ), 500
 
         eve_verified_role_id = resolve_guild_role_id(
             guild_id,
@@ -8723,10 +8732,11 @@ def callback():
             not main_character_role_id
         ):
 
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ EVE roles not configured</h2>
-            """, 500
+            return freeborn_web_page(
+                "Rôles Discord non configurés",
+                "Les rôles EVE Verified / Main Character ne sont pas correctement configurés pour ce serveur.",
+                status="warning",
+            ), 500
 
         identity_role_responses = [
             add_discord_role(
@@ -8751,59 +8761,29 @@ def callback():
             in identity_role_responses
         ):
 
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ EVE role assignment error</h2>
-            """, 500
+            return freeborn_web_page(
+                "Attribution des rôles impossible",
+                "L'identité EVE est enregistrée mais les rôles Discord n'ont pas pu être attribués. Contacte un administrateur.",
+                status="warning",
+                character_name=character_name,
+            ), 500
 
-        try:
-
-            role_result = (
-                apply_recruitment_status_role(
-                    guild_id,
-                    discord_user_id,
-                    "member",
-                )
-            )
-
-            if (
-                role_result["add_status_code"]
-                not in
-                (200, 204)
-            ):
-
-                raise RuntimeError(
-                    "Member role assignment failed: "
-                    f"{role_result['add_status_code']}"
-                )
-
-            set_member_status_v3(
-                guild_id,
+        add_audit_event_v3(
+            guild_id,
+            "freeborn_eve_identity_verified",
+            target_discord_user_id=
                 discord_user_id,
-                "member",
+            actor_discord_user_id=
                 discord_user_id,
-            )
+        )
 
-            add_audit_event_v3(
-                guild_id,
-                "freeborn_member_integrated",
-                target_discord_user_id=
-                    discord_user_id,
-                actor_discord_user_id=
-                    discord_user_id,
-            )
-
-        except Exception as error:
-
-            print(
-                "V3 /freeborn promotion failed:",
-                repr(error),
-            )
-
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ Discord member promotion error</h2>
-            """, 500
+        log_v3_event_to_discord(
+            guild_config,
+            "🛡️ **Identité EVE vérifiée**\n"
+            f"Membre : <@{discord_user_id}> (`{discord_user_id}`)\n"
+            f"Main EVE : **{character_name}**\n"
+            "Étape suivante : contrôle staff puis promotion en Membre.",
+        )
 
         nickname_response = sync_discord_nickname(
             guild_id,
@@ -8833,24 +8813,26 @@ def callback():
             "</p>"
         )
 
-        return f"""
-        <h1>Freeborn Verify</h1>
-        <h2>✅ BIENVENUE CHEZ FREEBORN</h2>
+        next_step = (
+            "Ton identité EVE est validée. Le staff peut maintenant contrôler "
+            "ton dossier et finaliser ton passage en Membre."
+            if current_status[0] == "candidate_accepted"
+            else
+            "Ton identité EVE est validée. Le staff peut maintenant contrôler "
+            "ton dossier puis valider ta candidature."
+        )
 
-        <p>
-        <strong>{character_name}</strong> a été vérifié
-        dans la corporation EVE configurée.
-        </p>
-
-        <p>
-        Ton parcours Discord est complet :
-        tu es maintenant <strong>Membre</strong>.
-        </p>
-
-        {nickname_status}
-
-        <p>Tu peux retourner sur Discord.</p>
-        """
+        return freeborn_web_page(
+            "Identité EVE validée",
+            next_step + (
+                " Le pseudo Discord a également été synchronisé."
+                if nickname_changed
+                else
+                " Le pseudo Discord n'a pas pu être modifié automatiquement."
+            ),
+            status="success",
+            character_name=character_name,
+        )
 
     # ========================================================
     # MAIN FLOW
@@ -8894,38 +8876,19 @@ def callback():
                     "Unknown"
                 )
 
-                return f"""
-                <h1>Freeborn Verify</h1>
+                return freeborn_web_page(
+                    "Main déjà enregistré",
+                    f"Ton Main actuel est {existing_main_name}. Utilise /main-change pour changer de Main.",
+                    status="error",
+                    character_name=character_name,
+                ), 400
 
-                <p>
-                <strong>Character:</strong>
-                {character_name}
-                </p>
-
-                <h2>❌ MAIN ALREADY REGISTERED</h2>
-
-                <p>
-                Ton personnage principal actuel est
-                <strong>{existing_main_name}</strong>.
-                </p>
-
-                <p>
-                Utilise la commande
-                <strong>/main-change</strong>
-                pour changer de Main Character.
-                </p>
-                """, 400
-
-            return """
-            <h1>Freeborn Verify</h1>
-
-            <h2>❌ CHARACTER ALREADY LINKED</h2>
-
-            <p>
-            Ce personnage EVE est déjà associé
-            à un autre compte Discord.
-            </p>
-            """, 400
+            return freeborn_web_page(
+                "Personnage déjà lié",
+                "Ce personnage EVE est déjà associé à un autre compte Discord.",
+                status="error",
+                character_name=character_name,
+            ), 409
 
         except Exception as error:
 
@@ -8934,10 +8897,12 @@ def callback():
                 repr(error),
             )
 
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ Database error</h2>
-            """, 500
+            return freeborn_web_page(
+                "Erreur de base de données",
+                "Le Main EVE n'a pas pu être enregistré. Aucune validation n'a été confirmée.",
+                status="warning",
+                character_name=character_name,
+            ), 500
 
         role_responses = [
             add_discord_role(
@@ -8968,10 +8933,12 @@ def callback():
             in role_responses
         ):
 
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ Role assignment error</h2>
-            """, 500
+            return freeborn_web_page(
+                "Attribution des rôles impossible",
+                "Le personnage est enregistré mais les rôles Discord n'ont pas pu être appliqués. Contacte un administrateur.",
+                status="warning",
+                character_name=character_name,
+            ), 500
 
         remove_discord_role(
             guild_id,
@@ -9011,33 +8978,20 @@ def callback():
             "</p>"
         )
 
-        return f"""
-        <h1>Freeborn Verify</h1>
-
-        <p>
-        <strong>Character:</strong>
-        {character_name}
-        </p>
-
-        <p>
-        <strong>Corporation:</strong>
-        Freeborn Legacy
-        </p>
-
-        <h2>✅ VERIFIED</h2>
-
-        <p>
-        <strong>{character_name}</strong>
-        est enregistré comme
-        <strong>Main Character</strong>.
-        </p>
-
-        {nickname_status}
-
-        <p>
-        Tu peux retourner sur Discord.
-        </p>
-        """
+        return freeborn_web_page(
+            "Main EVE vérifié",
+            (
+                f"{character_name} est enregistré comme Main Character. "
+                + (
+                    "Le pseudo Discord a été synchronisé."
+                    if nickname_changed
+                    else
+                    "Le pseudo Discord n'a pas pu être modifié automatiquement."
+                )
+            ),
+            status="success",
+            character_name=character_name,
+        )
 
     # ========================================================
     # ALT FLOW
@@ -9047,16 +9001,11 @@ def callback():
         discord_user_id
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-
-        <h2>❌ MAIN REQUIRED</h2>
-
-        <p>
-        Tu dois d'abord enregistrer
-        ton Main avec /verify.
-        </p>
-        """, 400
+        return freeborn_web_page(
+            "Main EVE requis",
+            "Tu dois d'abord enregistrer ton Main EVE avant d'ajouter un Alt.",
+            status="error",
+        ), 400
 
     try:
 
@@ -9074,27 +9023,19 @@ def callback():
             in str(error)
         ):
 
-            return f"""
-            <h1>Freeborn Verify</h1>
+            return freeborn_web_page(
+                "Ajout d'Alt refusé",
+                "Ce personnage est déjà ton Main Character.",
+                status="error",
+                character_name=character_name,
+            ), 400
 
-            <p>
-            <strong>{character_name}</strong>
-            est déjà ton Main Character.
-            </p>
-
-            <h2>❌ REFUSED</h2>
-            """, 400
-
-        return """
-        <h1>Freeborn Verify</h1>
-
-        <h2>❌ CHARACTER ALREADY LINKED</h2>
-
-        <p>
-        Ce personnage est déjà associé
-        à un autre compte Discord.
-        </p>
-        """, 400
+        return freeborn_web_page(
+            "Personnage déjà lié",
+            "Ce personnage EVE est déjà associé à un autre compte Discord.",
+            status="error",
+            character_name=character_name,
+        ), 409
 
     except Exception as error:
 
@@ -9103,10 +9044,12 @@ def callback():
             repr(error),
         )
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>⚠️ Database error</h2>
-        """, 500
+        return freeborn_web_page(
+            "Erreur de base de données",
+            "L'Alt EVE n'a pas pu être enregistré.",
+            status="warning",
+            character_name=character_name,
+        ), 500
 
     alt_role_response = (
         add_discord_role(
@@ -9122,36 +9065,19 @@ def callback():
         (200, 204)
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>⚠️ Alt role error</h2>
-        """, 500
+        return freeborn_web_page(
+            "Attribution du rôle Alt impossible",
+            "L'Alt est enregistré mais le rôle Discord Alt Character n'a pas pu être attribué.",
+            status="warning",
+            character_name=character_name,
+        ), 500
 
-    return f"""
-    <h1>Freeborn Verify</h1>
-
-    <p>
-    <strong>Character:</strong>
-    {character_name}
-    </p>
-
-    <p>
-    <strong>Corporation:</strong>
-    Freeborn Legacy
-    </p>
-
-    <h2>✅ ALT VERIFIED</h2>
-
-    <p>
-    <strong>{character_name}</strong>
-    a été ajouté comme
-    <strong>Alt Character</strong>.
-    </p>
-
-    <p>
-    Tu peux retourner sur Discord.
-    </p>
-    """
+    return freeborn_web_page(
+        "Alt EVE vérifié",
+        f"{character_name} a été ajouté comme Alt Character.",
+        status="success",
+        character_name=character_name,
+    )
 
 
 # ============================================================
@@ -9447,7 +9373,7 @@ def register_commands():
             "options": [
                 {
                     "type":
-                        6,
+                        3,
 
                     "name":
                         "membre",
@@ -9456,6 +9382,9 @@ def register_commands():
                         "Membre Freeborn à supprimer",
 
                     "required":
+                        True,
+
+                    "autocomplete":
                         True,
                 }
             ],
