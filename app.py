@@ -6767,7 +6767,7 @@ def interactions():
                                     2,
 
                                 "style":
-                                    2,
+                                    1,
 
                                 "label":
                                     "Invité",
@@ -6781,7 +6781,7 @@ def interactions():
                                     2,
 
                                 "style":
-                                    1,
+                                    3,
 
                                 "label":
                                     "Candidat",
