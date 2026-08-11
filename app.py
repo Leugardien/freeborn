@@ -262,6 +262,12 @@ main_change_signer = TimestampSigner(
 )
 
 
+sync_apply_signer = TimestampSigner(
+    FLASK_SECRET_KEY,
+    salt="freeborn-sync-apply",
+)
+
+
 # ============================================================
 # DATABASE INITIALIZATION
 # ============================================================
@@ -3313,6 +3319,21 @@ def read_main_change_token(token):
     return character_id, requester_user_id
 
 
+
+def create_sync_apply_token(requester_user_id):
+
+    payload = str(requester_user_id)
+    return sync_apply_signer.sign(payload.encode()).decode()
+
+
+def read_sync_apply_token(token):
+
+    return sync_apply_signer.unsign(
+        token,
+        max_age=300,
+    ).decode()
+
+
 # ============================================================
 # EVE TOKEN
 # ============================================================
@@ -5489,6 +5510,191 @@ def handle_message_component(
             "components": [],
         }})
 
+    # ========================================================
+    # SYNC APPLY CONFIRMATION
+    # ========================================================
+
+    if custom_id.startswith("sa_yes:") or custom_id.startswith("sa_no:"):
+
+        try:
+
+            actor_user_id = str(
+                data["member"]["user"]["id"]
+            )
+
+            guild_id = str(
+                data["guild_id"]
+            )
+
+            token = custom_id.split(
+                ":",
+                1,
+            )[1]
+
+            requester_user_id = (
+                read_sync_apply_token(
+                    token
+                )
+            )
+
+        except SignatureExpired:
+
+            return jsonify({
+                "type":
+                    7,
+
+                "data": {
+                    "content":
+                        "⌛ **Confirmation expirée**\n\n"
+                        "Aucune synchronisation n'a été appliquée.\n\n"
+                        "Relance **/sync-apply** si nécessaire.",
+
+                    "components":
+                        [],
+                },
+            })
+
+        except (
+            BadSignature,
+            ValueError,
+            KeyError,
+        ):
+
+            return jsonify({
+                "type":
+                    7,
+
+                "data": {
+                    "content":
+                        "⛔ **Confirmation invalide**\n\n"
+                        "Aucune synchronisation n'a été appliquée.",
+
+                    "components":
+                        [],
+                },
+            })
+
+        if actor_user_id != requester_user_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ Cette confirmation ne t'appartient pas.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if not interaction_is_staff(
+            data
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ Tu n'as plus les permissions nécessaires "
+                        "pour appliquer cette synchronisation.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        guild_config = get_guild_config(
+            guild_id
+        )
+
+        expected_channel_id = (
+            str(guild_config[4])
+            if guild_config
+            and guild_config[4]
+            else None
+        )
+
+        if (
+            not expected_channel_id
+            or
+            str(data.get("channel_id", ""))
+            != expected_channel_id
+        ):
+
+            return dedicated_channel_error(
+                expected_channel_id,
+                "commandes-bot",
+            )
+
+        if custom_id.startswith("sa_no:"):
+
+            return jsonify({
+                "type":
+                    7,
+
+                "data": {
+                    "content":
+                        "🛡️ **Synchronisation annulée**\n\n"
+                        "Aucune donnée Neon et aucun rôle Discord "
+                        "n'ont été modifiés.",
+
+                    "components":
+                        [],
+                },
+            })
+
+        try:
+
+            (
+                sync_results,
+                actions,
+            ) = run_sync(
+                apply_changes=True
+            )
+
+        except Exception as error:
+
+            print(
+                "Sync apply confirmation failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    7,
+
+                "data": {
+                    "content":
+                        "⚠️ **Synchronisation impossible**\n\n"
+                        "La vérification ESI ou l'application des "
+                        "changements a rencontré une erreur.",
+
+                    "components":
+                        [],
+                },
+            })
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    build_sync_message(
+                        sync_results,
+                        actions=actions,
+                        applied=True,
+                    ),
+
+                "components":
+                    [],
+            },
+        })
+
     # --------------------------------------------------------
     # Ignore unknown components
     # --------------------------------------------------------
@@ -5505,6 +5711,8 @@ def handle_message_component(
         or custom_id.startswith("ar_no:")
         or custom_id.startswith("mc_yes:")
         or custom_id.startswith("mc_no:")
+        or custom_id.startswith("sa_yes:")
+        or custom_id.startswith("sa_no:")
     ):
 
         return jsonify({
@@ -7863,13 +8071,13 @@ def interactions():
                 sync_results,
                 actions,
             ) = run_sync(
-                apply_changes=True
+                apply_changes=False
             )
 
         except Exception as error:
 
             print(
-                "Sync apply failed:",
+                "Sync apply preview failed:",
                 repr(error),
             )
 
@@ -7879,12 +8087,31 @@ def interactions():
 
                 "data": {
                     "content":
-                        "⚠️ La synchronisation "
-                        "a rencontré une erreur.",
+                        "⚠️ Le contrôle préalable "
+                        "à la synchronisation a rencontré une erreur.",
 
                     **interaction_response_flags_payload(data),
                 },
             })
+
+        confirmation_token = (
+            create_sync_apply_token(
+                discord_user_id
+            )
+        )
+
+        preview_message = (
+            build_sync_message(
+                sync_results,
+                applied=False,
+            )
+            +
+            "\n\n⚠️ **Confirmation requise**\n"
+            "Aucun changement n'a encore été appliqué.\n"
+            "En confirmant, Freeborn Verify relancera un contrôle ESI "
+            "à jour avant toute modification.\n\n"
+            "Cette confirmation expire après **5 minutes**."
+        )
 
         return jsonify({
             "type":
@@ -7892,11 +8119,44 @@ def interactions():
 
             "data": {
                 "content":
-                    build_sync_message(
-                        sync_results,
-                        actions=actions,
-                        applied=True,
-                    ),
+                    preview_message,
+
+                "components": [
+                    {
+                        "type":
+                            1,
+
+                        "components": [
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    4,
+
+                                "label":
+                                    "Confirmer la synchronisation",
+
+                                "custom_id":
+                                    f"sa_yes:{confirmation_token}",
+                            },
+
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    2,
+
+                                "label":
+                                    "Annuler",
+
+                                "custom_id":
+                                    f"sa_no:{confirmation_token}",
+                            },
+                        ],
+                    }
+                ],
 
                 **interaction_response_flags_payload(data),
             },
