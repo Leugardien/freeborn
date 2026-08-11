@@ -6353,6 +6353,7 @@ def interactions():
     # ========================================================
 
     STAFF_ONLY_COMMANDS = {
+        "bienvenue-panneau",
         "orientation-panneau",
         "reglement-discord-panneau",
         "reglement-corp-panneau",
@@ -6568,6 +6569,95 @@ def interactions():
                             "text":
                                 "Freeborn Legacy • Règlement Discord • "
                                 "Communauté, respect, organisation"
+                        },
+                    }
+                ],
+            },
+        })
+
+
+    # ========================================================
+    # /bienvenue-panneau
+    # V3 STAFF SETUP — visual onboarding panel
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "bienvenue-panneau"
+    ):
+
+        welcome_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/bienvenue.png"
+        )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "embeds": [
+                    {
+                        "title":
+                            "🛡️ BIENVENUE CHEZ FREEBORN LEGACY",
+
+                        "description":
+                            "Tu viens de rejoindre le serveur officiel "
+                            "de **Freeborn Legacy**.\n\n"
+                            "🧭 **Prochaine étape : ton orientation**\n"
+                            "Rends-toi dans le salon **Orientation** "
+                            "pour choisir le parcours qui te correspond.",
+
+                        "color":
+                            0x2F81F7,
+
+                        "image": {
+                            "url":
+                                welcome_image_url
+                        },
+
+                        "fields": [
+                            {
+                                "name":
+                                    "🔵 Invité",
+
+                                "value":
+                                    "Accès aux espaces diplomatiques et "
+                                    "communautaires prévus pour les visiteurs.",
+
+                                "inline":
+                                    True,
+                            },
+                            {
+                                "name":
+                                    "🟢 Candidat",
+
+                                "value":
+                                    "Accès au parcours de recrutement "
+                                    "Freeborn Legacy.",
+
+                                "inline":
+                                    True,
+                            },
+                            {
+                                "name":
+                                    "📌 À retenir",
+
+                                "value":
+                                    "Suis les étapes dans l'ordre : "
+                                    "**Freeborn Verify s'occupe automatiquement "
+                                    "de la suite.**",
+
+                                "inline":
+                                    False,
+                            },
+                        ],
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Bienvenue • "
+                                "Orientation → Invité ou Candidat"
                         },
                     }
                 ],
@@ -9660,6 +9750,20 @@ def register_commands():
 
         {
             "name":
+                "bienvenue-panneau",
+
+            "description":
+                "Publier le panneau officiel de bienvenue Freeborn Legacy",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
                 "orientation-panneau",
 
             "description":
@@ -9916,6 +10020,7 @@ def register_commands():
                 "/membre-promouvoir, /membre-supprimer, "
                 "/candidat-accepter, "
                 "/reglement-discord-panneau, "
+                "/bienvenue-panneau, "
                 "/orientation-panneau, "
                 "/reglement-corp-panneau, /charte-panneau, "
                 "/base-statut, /synchro-statut, "
