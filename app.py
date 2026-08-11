@@ -5568,6 +5568,31 @@ def interactions():
             },
         })
 
+    # Load the V3 guild configuration once for all command handlers
+    # that need dedicated channels / per-guild settings.
+    guild_config = get_guild_config(
+        guild_id
+    )
+
+    if (
+        not guild_config
+        or
+        not guild_config[6]
+    ):
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "⛔ Ce serveur n'est pas "
+                    "configuré pour Freeborn Verify V3.",
+
+                **interaction_response_flags_payload(data),
+            },
+        })
+
     # ========================================================
     # STAFF-ONLY COMMANDS
     # ========================================================
