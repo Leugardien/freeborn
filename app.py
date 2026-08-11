@@ -998,6 +998,183 @@ def set_guild_role_id(
         conn.commit()
 
 
+def resolve_guild_role_id(
+    guild_id,
+    role_type,
+):
+    """
+    Resolve a V3 role for one guild.
+
+    Priority:
+    1. guild_roles table (true multi-guild configuration)
+    2. current Freeborn environment variables as bootstrap fallback
+    """
+
+    role_id = get_guild_role_id(
+        guild_id,
+        role_type,
+    )
+
+    if role_id:
+
+        return str(role_id)
+
+    if str(guild_id) != str(DISCORD_GUILD_ID):
+
+        return None
+
+    bootstrap_roles = {
+        "guest":
+            DISCORD_GUEST_ROLE_ID,
+
+        "candidate":
+            DISCORD_CANDIDATE_ROLE_ID,
+
+        "candidate_accepted":
+            DISCORD_CANDIDATE_ACCEPTED_ROLE_ID,
+
+        "member":
+            DISCORD_MEMBER_ROLE_ID,
+
+        "ceo":
+            DISCORD_CEO_ROLE_ID,
+
+        "high_council":
+            DISCORD_HIGH_COUNCIL_ROLE_ID,
+
+        "direction":
+            DISCORD_DIRECTION_ROLE_ID,
+
+        "hr":
+            DISCORD_HR_ROLE_ID,
+
+        "officer":
+            DISCORD_OFFICER_ROLE_ID,
+
+        "fleet_commander":
+            DISCORD_FLEET_COMMANDER_ROLE_ID,
+
+        "veteran":
+            DISCORD_VETERAN_ROLE_ID,
+    }
+
+    role_id = bootstrap_roles.get(
+        str(role_type)
+    )
+
+    return (
+        str(role_id)
+        if role_id
+        else None
+    )
+
+
+def interaction_member_role_ids(data):
+
+    try:
+
+        return {
+            str(role_id)
+            for role_id
+            in data["member"]["roles"]
+        }
+
+    except (
+        KeyError,
+        TypeError,
+    ):
+
+        return set()
+
+
+def apply_recruitment_status_role(
+    guild_id,
+    discord_user_id,
+    new_status,
+):
+    """
+    Apply only the recruitment/status roles involved in a V3 transition.
+
+    This helper deliberately does not touch EVE identity roles
+    (EVE Verified / Main / Alt).
+    """
+
+    if new_status not in VALID_MEMBER_STATUSES:
+
+        raise ValueError(
+            f"Invalid V3 member status: {new_status}"
+        )
+
+    target_role_id = resolve_guild_role_id(
+        guild_id,
+        new_status,
+    )
+
+    if not target_role_id:
+
+        raise ValueError(
+            f"Discord role not configured for status: {new_status}"
+        )
+
+    transition_role_types = (
+        "guest",
+        "candidate",
+        "candidate_accepted",
+        "member",
+    )
+
+    removal_results = []
+
+    for role_type in transition_role_types:
+
+        role_id = resolve_guild_role_id(
+            guild_id,
+            role_type,
+        )
+
+        if (
+            not role_id
+            or
+            role_id == target_role_id
+        ):
+
+            continue
+
+        response = remove_discord_role(
+            guild_id,
+            discord_user_id,
+            role_id,
+        )
+
+        removal_results.append({
+            "role_type":
+                role_type,
+
+            "role_id":
+                role_id,
+
+            "status_code":
+                response.status_code,
+        })
+
+    add_response = add_discord_role(
+        guild_id,
+        discord_user_id,
+        target_role_id,
+    )
+
+    return {
+        "target_role_id":
+            target_role_id,
+
+        "add_status_code":
+            add_response.status_code,
+
+        "removals":
+            removal_results,
+    }
+
+
 def get_member_status_v3(
     guild_id,
     discord_user_id,
@@ -3698,6 +3875,223 @@ def handle_message_component(
         )
     )
 
+    # ========================================================
+    # V3 ORIENTATION
+    # ========================================================
+
+    if custom_id in {
+        "v3_orientation_guest",
+        "v3_orientation_candidate",
+    }:
+
+        try:
+
+            actor_user_id = str(
+                data[
+                    "member"
+                ][
+                    "user"
+                ][
+                    "id"
+                ]
+            )
+
+            guild_id = str(
+                data[
+                    "guild_id"
+                ]
+            )
+
+        except Exception:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Impossible d'identifier "
+                        "ton compte ou le serveur Discord.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        guild_config = get_guild_config(
+            guild_id
+        )
+
+        if (
+            not guild_config
+            or
+            not guild_config[6]
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ Ce serveur n'est pas "
+                        "configuré pour Freeborn Verify V3.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        member_roles = (
+            interaction_member_role_ids(
+                data
+            )
+        )
+
+        protected_role_ids = {
+            role_id
+            for role_id
+            in {
+                resolve_guild_role_id(
+                    guild_id,
+                    "candidate_accepted",
+                ),
+                resolve_guild_role_id(
+                    guild_id,
+                    "member",
+                ),
+            }
+            if role_id
+        }
+
+        if (
+            member_roles
+            &
+            protected_role_ids
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "ℹ️ Ton statut est déjà "
+                        "plus avancé que l'Orientation. "
+                        "Aucune modification effectuée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        new_status = (
+            "guest"
+
+            if custom_id
+            ==
+            "v3_orientation_guest"
+
+            else
+
+            "candidate"
+        )
+
+        try:
+
+            role_result = (
+                apply_recruitment_status_role(
+                    guild_id,
+                    actor_user_id,
+                    new_status,
+                )
+            )
+
+            if (
+                role_result[
+                    "add_status_code"
+                ]
+                not in
+                (200, 204)
+            ):
+
+                raise RuntimeError(
+                    "Discord role assignment failed: "
+                    f"{role_result['add_status_code']}"
+                )
+
+            set_member_status_v3(
+                guild_id,
+                actor_user_id,
+                new_status,
+                actor_user_id,
+            )
+
+            add_audit_event_v3(
+                guild_id,
+                (
+                    "orientation_guest"
+                    if new_status == "guest"
+                    else
+                    "orientation_candidate"
+                ),
+                target_discord_user_id=
+                    actor_user_id,
+                actor_discord_user_id=
+                    actor_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "V3 orientation failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ L'Orientation n'a pas pu "
+                        "être enregistrée. "
+                        "Un administrateur peut vérifier "
+                        "la configuration du bot.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if new_status == "guest":
+
+            confirmation = (
+                "✅ **Orientation enregistrée : Invité**\n\n"
+                "Le rôle **Invité** t'a été attribué."
+            )
+
+        else:
+
+            confirmation = (
+                "✅ **Orientation enregistrée : Candidat**\n\n"
+                "Le rôle **Candidat** t'a été attribué. "
+                "Tu peux maintenant poursuivre le recrutement."
+            )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    confirmation,
+
+                "flags":
+                    64,
+            },
+        })
+
     # --------------------------------------------------------
     # Ignore unknown components
     # --------------------------------------------------------
@@ -4315,6 +4709,7 @@ def interactions():
     # ========================================================
 
     STAFF_ONLY_COMMANDS = {
+        "orientation-panel",
         "member-remove",
         "member-list",
         "db-health",
@@ -4340,7 +4735,13 @@ def interactions():
 
     if (
         command_name
-        in STAFF_ONLY_COMMANDS
+        in (
+            STAFF_ONLY_COMMANDS
+            -
+            {
+                "orientation-panel",
+            }
+        )
 
         and
 
@@ -4361,6 +4762,108 @@ def interactions():
                     "(**character-management**).",
 
                 **interaction_response_flags_payload(data),
+            },
+        })
+
+    # ========================================================
+    # /orientation-panel
+    # V3 STAFF SETUP
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "orientation-panel"
+    ):
+
+        guest_role_id = (
+            resolve_guild_role_id(
+                guild_id,
+                "guest",
+            )
+        )
+
+        candidate_role_id = (
+            resolve_guild_role_id(
+                guild_id,
+                "candidate",
+            )
+        )
+
+        if (
+            not guest_role_id
+            or
+            not candidate_role_id
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ **Orientation non configurée**\n\n"
+                        "Les rôles **Invité** et **Candidat** "
+                        "doivent être configurés avant de "
+                        "publier le panneau.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "## 🧭 Orientation Freeborn\n\n"
+                    "Choisis la raison de ta présence "
+                    "sur le serveur.\n\n"
+                    "🌐 **Invité** — accès diplomatique / "
+                    "visiteur.\n"
+                    "📝 **Candidat** — commencer le parcours "
+                    "de recrutement.\n\n"
+                    "Ton choix est enregistré par "
+                    "Freeborn Verify.",
+
+                "components": [
+                    {
+                        "type":
+                            1,
+
+                        "components": [
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    2,
+
+                                "label":
+                                    "Invité",
+
+                                "custom_id":
+                                    "v3_orientation_guest",
+                            },
+
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    1,
+
+                                "label":
+                                    "Candidat",
+
+                                "custom_id":
+                                    "v3_orientation_candidate",
+                            },
+                        ],
+                    }
+                ],
             },
         })
 
@@ -6574,6 +7077,20 @@ def register_commands():
 
         {
             "name":
+                "orientation-panel",
+
+            "description":
+                "Publier le panneau Orientation V3",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
                 "member-remove",
 
             "description":
@@ -6719,6 +7236,7 @@ def register_commands():
 
             print(
                 "Discord commands registered: "
+                "/orientation-panel, "
                 "/verify, /alt, /alt-remove, "
                 "/main-change, /member-info, "
                 "/member-remove, /member-list, "
