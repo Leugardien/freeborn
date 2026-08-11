@@ -5,7 +5,7 @@ from urllib.parse import urlencode
 import psycopg
 import requests
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
@@ -22,6 +22,18 @@ from jose import jwt
 app = Flask(__name__)
 
 
+@app.get("/assets/<path:filename>")
+def freeborn_assets(filename):
+
+    return send_from_directory(
+        os.path.join(
+            os.path.dirname(__file__),
+            "assets",
+        ),
+        filename,
+    )
+
+
 # ============================================================
 # ENVIRONMENT VARIABLES
 # ============================================================
@@ -29,6 +41,11 @@ app = Flask(__name__)
 EVE_CLIENT_ID = os.environ["EVE_CLIENT_ID"]
 EVE_CLIENT_SECRET = os.environ["EVE_CLIENT_SECRET"]
 EVE_CALLBACK_URL = os.environ["EVE_CALLBACK_URL"]
+
+PUBLIC_BASE_URL = EVE_CALLBACK_URL.rsplit(
+    "/callback",
+    1,
+)[0].rstrip("/")
 
 FREEBORN_CORPORATION_ID = int(
     os.environ["FREEBORN_CORPORATION_ID"]
@@ -6500,124 +6517,63 @@ def interactions():
         "reglement-discord-panneau"
     ):
 
+        rules_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/reglement-discord.png"
+        )
+
         return jsonify({
             "type":
                 4,
 
             "data": {
-                "content":
-                    "📘 **Panneau officiel du Règlement Discord**\n"
-                    "Ce message complète le règlement natif de Discord "
-                    "sans remplacer son système d'acceptation.",
-
                 "embeds": [
                     {
                         "title":
                             "🛡️ RÈGLEMENT DISCORD — FREEBORN LEGACY",
 
                         "description":
-                            "Bienvenue sur le serveur Discord officiel de "
-                            "**Freeborn Legacy**.\n\n"
-                            "Ce serveur est un espace communautaire destiné "
-                            "aux membres, candidats, invités et partenaires "
-                            "de la corporation.\n\n"
-                            "📜 **Le règlement officiel est celui présenté "
-                            "et accepté via le système natif de Discord lors "
-                            "de ton arrivée.**\n"
-                            "Son respect reste obligatoire pendant toute ta "
-                            "présence sur le serveur.",
+                            "Le règlement présenté ci-dessous complète "
+                            "le **règlement natif de Discord**, qui reste "
+                            "le système officiel d'acceptation lors de "
+                            "l'arrivée sur le serveur.\n\n"
+                            "📜 **Son respect est obligatoire pendant "
+                            "toute ta présence sur Freeborn Legacy.**",
 
                         "color":
                             0x2F81F7,
 
+                        "image": {
+                            "url":
+                                rules_image_url
+                        },
+
                         "fields": [
                             {
-                                "name": "1️⃣ 🤝 Respect et courtoisie",
+                                "name":
+                                    "📌 Informations",
+
                                 "value":
-                                    "Respecte les autres membres. Les insultes, "
-                                    "provocations, discriminations, harcèlement "
-                                    "ou comportements toxiques ne sont pas tolérés.",
-                                "inline": False,
-                            },
-                            {
-                                "name": "2️⃣ 🚫 Pas de spam ni de flood",
-                                "value":
-                                    "Évite les messages répétitifs, mentions "
-                                    "abusives, chaînes, publicités ou contenus "
-                                    "sans rapport avec les discussions.",
-                                "inline": False,
-                            },
-                            {
-                                "name": "3️⃣ #️⃣ Utilise les bons salons",
-                                "value":
-                                    "Respecte la fonction de chaque salon et "
-                                    "privilégie les espaces prévus pour tes "
-                                    "discussions, médias et activités.",
-                                "inline": False,
-                            },
-                            {
-                                "name": "4️⃣ ⚠️ Contenus appropriés",
-                                "value":
-                                    "Les contenus illégaux, choquants, "
-                                    "pornographiques, haineux ou volontairement "
-                                    "offensants sont interdits.",
-                                "inline": False,
-                            },
-                            {
-                                "name": "5️⃣ 🔒 Respect de la vie privée",
-                                "value":
-                                    "Ne partage aucune information personnelle, "
-                                    "conversation privée, capture ou donnée "
-                                    "concernant une autre personne sans son accord.",
-                                "inline": False,
-                            },
-                            {
-                                "name": "6️⃣ 👤 Pseudonyme et identité",
-                                "value":
-                                    "N'usurpe pas l'identité d'un membre, d'un "
-                                    "responsable ou d'un représentant de Freeborn "
-                                    "Legacy. Les pseudonymes doivent rester appropriés.",
-                                "inline": False,
-                            },
-                            {
-                                "name": "7️⃣ 📢 Publicité et recrutement externe",
-                                "value":
-                                    "La publicité, le démarchage et le recrutement "
-                                    "pour d'autres communautés ou corporations "
-                                    "nécessitent l'accord préalable de la Direction.",
-                                "inline": False,
-                            },
-                            {
-                                "name": "8️⃣ ⚖️ Modération et bon sens",
-                                "value":
-                                    "Respecte les décisions de l'équipe de "
-                                    "modération. En cas de problème ou de désaccord, "
-                                    "contacte un responsable plutôt que d'alimenter "
-                                    "un conflit public.",
-                                "inline": False,
-                            },
-                            {
-                                "name": "🛡️ Application du règlement",
-                                "value":
-                                    "Le non-respect du règlement peut entraîner "
-                                    "des mesures allant de l'avertissement au "
-                                    "bannissement définitif, selon la gravité des "
-                                    "faits.\n\n"
-                                    "**Ensemble, faisons de Freeborn Legacy une "
-                                    "communauté accueillante, organisée et respectueuse.**",
-                                "inline": False,
+                                    "• Acceptation : **système natif Discord**\n"
+                                    "• Version : **11 août 2026**\n"
+                                    "• Application : membres, candidats, "
+                                    "invités et partenaires",
+
+                                "inline":
+                                    False,
                             },
                         ],
 
                         "footer": {
                             "text":
                                 "Freeborn Legacy • Règlement Discord • "
-                                "Acceptation gérée nativement par Discord"
+                                "Communauté, respect, organisation"
                         },
                     }
                 ],
             },
         })
+
 
     # ========================================================
     # /orientation-panneau
@@ -9693,7 +9649,7 @@ def register_commands():
                 "reglement-discord-panneau",
 
             "description":
-                "Publier le panneau officiel du Règlement Discord",
+                "Publier le règlement Discord officiel Freeborn Legacy",
 
             "type":
                 1,
