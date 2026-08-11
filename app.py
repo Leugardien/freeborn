@@ -41,18 +41,6 @@ DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
 # ============================================================
 # DISCORD V3 CONFIGURATION
 # ============================================================
-#
-# V3 rule:
-# - Discord's native Membership Screening handles the Discord rules.
-# - There is no "Accès Discord" role.
-# - Recruitment status roles are Invité / Candidat /
-#   Candidat Accepté / Membre.
-# - IDs belonging to the Discord architecture must come from
-#   environment variables rather than being hard-coded here.
-#
-# During the V3 migration, compatibility fallbacks keep the current
-# V2 configuration usable on this development branch. They will be
-# removed after the new Discord IDs have been configured in Render.
 
 DISCORD_RECRUITMENT_CHANNEL_ID = os.environ.get(
     "DISCORD_RECRUITMENT_CHANNEL_ID",
@@ -64,8 +52,10 @@ DISCORD_BOT_MANAGEMENT_CHANNEL_ID = os.environ.get(
     "1535497895929708648",
 )
 
-# Compatibility aliases used by the existing V2 command code.
-# They intentionally point to the V3 configuration above.
+DISCORD_LOGS_CHANNEL_ID = os.environ.get(
+    "DISCORD_LOGS_CHANNEL_ID"
+)
+
 DISCORD_EVE_VERIFICATION_CHANNEL_ID = (
     DISCORD_RECRUITMENT_CHANNEL_ID
 )
@@ -74,8 +64,6 @@ DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID = (
     DISCORD_BOT_MANAGEMENT_CHANNEL_ID
 )
 
-
-# Core membership / EVE roles already used by V2.
 DISCORD_MEMBER_ROLE_ID = os.environ[
     "DISCORD_MEMBER_ROLE_ID"
 ]
@@ -92,10 +80,6 @@ DISCORD_ALT_CHARACTER_ROLE_ID = os.environ[
     "DISCORD_ALT_CHARACTER_ROLE_ID"
 ]
 
-
-# Recruitment V3 roles.
-# The Candidat role temporarily accepts the former V2
-# DISCORD_RECRUIT_ROLE_ID as a migration fallback.
 DISCORD_GUEST_ROLE_ID = os.environ.get(
     "DISCORD_GUEST_ROLE_ID"
 )
@@ -110,13 +94,10 @@ DISCORD_CANDIDATE_ACCEPTED_ROLE_ID = os.environ.get(
     "DISCORD_CANDIDATE_ACCEPTED_ROLE_ID"
 )
 
-# Compatibility alias for the existing V2 callback.
 DISCORD_RECRUIT_ROLE_ID = (
     DISCORD_CANDIDATE_ROLE_ID
 )
 
-
-# New Freeborn Legacy hierarchy.
 DISCORD_CEO_ROLE_ID = os.environ[
     "DISCORD_CEO_ROLE_ID"
 ]
@@ -147,11 +128,9 @@ DISCORD_VETERAN_ROLE_ID = os.environ.get(
     "DISCORD_VETERAN_ROLE_ID"
 )
 
-# Compatibility alias for the existing V2 code.
 DISCORD_DIRECTOR_ROLE_ID = (
     DISCORD_DIRECTION_ROLE_ID
 )
-
 
 FLASK_SECRET_KEY = os.environ["FLASK_SECRET_KEY"]
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -162,14 +141,6 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 # ============================================================
 
 def configured_role_ids(*role_ids):
-    """
-    Return only configured Discord role IDs.
-
-    Optional V3 roles are deliberately ignored until their IDs are
-    added to the environment. This lets us prepare the V3 code before
-    changing the live Render configuration.
-    """
-
     return {
         str(role_id)
         for role_id in role_ids
@@ -205,9 +176,6 @@ AUDIT_VIEWER_ROLE_IDS = configured_role_ids(
     DISCORD_HR_ROLE_ID,
 )
 
-# Compatibility name used by the existing V2 staff commands.
-# For now, those sensitive commands remain limited to the
-# administrative group and are not broadened to RH/Officier.
 STAFF_ROLE_IDS = SYSTEM_ADMIN_ROLE_IDS
 
 
@@ -334,6 +302,286 @@ def init_database():
                     idx_eve_characters_discord_user_id
                     ON eve_characters (discord_user_id);
                     """
+                )
+
+
+                # ====================================================
+                # V3 MULTI-GUILD / RECRUITMENT FOUNDATION
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS discord_guilds (
+                        guild_id TEXT PRIMARY KEY,
+                        guild_name TEXT,
+                        corporation_id BIGINT,
+                        recruitment_channel_id TEXT,
+                        bot_management_channel_id TEXT,
+                        logs_channel_id TEXT,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS guild_roles (
+                        guild_id TEXT NOT NULL,
+                        role_type TEXT NOT NULL,
+                        role_id TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (guild_id, role_type),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS member_statuses (
+                        guild_id TEXT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (
+                            status IN (
+                                'guest',
+                                'candidate',
+                                'candidate_accepted',
+                                'member'
+                            )
+                        ),
+                        changed_by_discord_user_id TEXT,
+                        changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (guild_id, discord_user_id),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS policy_documents (
+                        guild_id TEXT NOT NULL,
+                        document_type TEXT NOT NULL,
+                        document_version TEXT NOT NULL,
+                        message_id TEXT,
+                        channel_id TEXT,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (
+                            guild_id,
+                            document_type,
+                            document_version
+                        ),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS policy_acceptances (
+                        guild_id TEXT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        document_type TEXT NOT NULL,
+                        document_version TEXT NOT NULL,
+                        accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        message_id TEXT,
+                        channel_id TEXT,
+                        PRIMARY KEY (
+                            guild_id,
+                            discord_user_id,
+                            document_type,
+                            document_version
+                        ),
+                        FOREIGN KEY (
+                            guild_id,
+                            document_type,
+                            document_version
+                        )
+                            REFERENCES policy_documents (
+                                guild_id,
+                                document_type,
+                                document_version
+                            )
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        event_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        target_discord_user_id TEXT,
+                        actor_discord_user_id TEXT,
+                        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS guild_eve_characters (
+                        guild_id TEXT NOT NULL,
+                        character_id BIGINT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        character_name TEXT NOT NULL,
+                        character_type TEXT NOT NULL CHECK (
+                            character_type IN ('main', 'alt')
+                        ),
+                        corporation_id BIGINT NOT NULL,
+                        in_corporation BOOLEAN NOT NULL DEFAULT TRUE,
+                        verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        last_checked_at TIMESTAMPTZ,
+                        left_corporation_at TIMESTAMPTZ,
+                        PRIMARY KEY (guild_id, character_id),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                    uq_guild_eve_one_main_per_discord
+                    ON guild_eve_characters (
+                        guild_id,
+                        discord_user_id
+                    )
+                    WHERE character_type = 'main';
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_guild_eve_discord_user
+                    ON guild_eve_characters (
+                        guild_id,
+                        discord_user_id
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_member_statuses_status
+                    ON member_statuses (guild_id, status);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_policy_acceptances_user
+                    ON policy_acceptances (
+                        guild_id,
+                        discord_user_id,
+                        accepted_at
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_audit_log_guild_created_at
+                    ON audit_log (guild_id, created_at DESC);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO discord_guilds (
+                        guild_id,
+                        corporation_id,
+                        recruitment_channel_id,
+                        bot_management_channel_id,
+                        logs_channel_id,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (guild_id)
+                    DO UPDATE SET
+                        corporation_id = EXCLUDED.corporation_id,
+                        recruitment_channel_id =
+                            EXCLUDED.recruitment_channel_id,
+                        bot_management_channel_id =
+                            EXCLUDED.bot_management_channel_id,
+                        logs_channel_id = COALESCE(
+                            EXCLUDED.logs_channel_id,
+                            discord_guilds.logs_channel_id
+                        ),
+                        updated_at = NOW();
+                    """,
+                    (
+                        str(DISCORD_GUILD_ID),
+                        int(FREEBORN_CORPORATION_ID),
+                        str(DISCORD_RECRUITMENT_CHANNEL_ID),
+                        str(DISCORD_BOT_MANAGEMENT_CHANNEL_ID),
+                        (
+                            str(DISCORD_LOGS_CHANNEL_ID)
+                            if DISCORD_LOGS_CHANNEL_ID
+                            else None
+                        ),
+                    ),
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO guild_eve_characters (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        character_name,
+                        character_type,
+                        corporation_id,
+                        in_corporation,
+                        verified_at,
+                        updated_at,
+                        last_checked_at,
+                        left_corporation_at
+                    )
+                    SELECT
+                        %s,
+                        character_id,
+                        discord_user_id,
+                        character_name,
+                        character_type,
+                        corporation_id,
+                        in_corporation,
+                        verified_at,
+                        updated_at,
+                        last_checked_at,
+                        left_corporation_at
+                    FROM eve_characters
+                    ON CONFLICT (guild_id, character_id)
+                    DO NOTHING;
+                    """,
+                    (
+                        str(DISCORD_GUILD_ID),
+                    ),
                 )
 
             conn.commit()
@@ -646,6 +894,334 @@ def get_database_stats():
         "latest_check":
             latest_check,
     }
+
+
+# ============================================================
+# V3 MULTI-GUILD HELPERS
+# ============================================================
+
+VALID_MEMBER_STATUSES = {
+    "guest",
+    "candidate",
+    "candidate_accepted",
+    "member",
+}
+
+
+def get_guild_config(guild_id):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    guild_id,
+                    guild_name,
+                    corporation_id,
+                    recruitment_channel_id,
+                    bot_management_channel_id,
+                    logs_channel_id,
+                    is_active
+                FROM discord_guilds
+                WHERE guild_id = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                ),
+            )
+
+            return cur.fetchone()
+
+
+def get_guild_role_id(
+    guild_id,
+    role_type,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT role_id
+                FROM guild_roles
+                WHERE guild_id = %s
+                AND role_type = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(role_type),
+                ),
+            )
+
+            row = cur.fetchone()
+
+            return row[0] if row else None
+
+
+def set_guild_role_id(
+    guild_id,
+    role_type,
+    role_id,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO guild_roles (
+                    guild_id,
+                    role_type,
+                    role_id,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (guild_id, role_type)
+                DO UPDATE SET
+                    role_id = EXCLUDED.role_id,
+                    updated_at = NOW();
+                """,
+                (
+                    str(guild_id),
+                    str(role_type),
+                    str(role_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def get_member_status_v3(
+    guild_id,
+    discord_user_id,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    status,
+                    changed_by_discord_user_id,
+                    changed_at,
+                    updated_at
+                FROM member_statuses
+                WHERE guild_id = %s
+                AND discord_user_id = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                ),
+            )
+
+            return cur.fetchone()
+
+
+def set_member_status_v3(
+    guild_id,
+    discord_user_id,
+    status,
+    changed_by_discord_user_id=None,
+):
+
+    if status not in VALID_MEMBER_STATUSES:
+
+        raise ValueError(
+            f"Invalid V3 member status: {status}"
+        )
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO member_statuses (
+                    guild_id,
+                    discord_user_id,
+                    status,
+                    changed_by_discord_user_id,
+                    changed_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (
+                    guild_id,
+                    discord_user_id
+                )
+                DO UPDATE SET
+                    status = EXCLUDED.status,
+                    changed_by_discord_user_id =
+                        EXCLUDED.changed_by_discord_user_id,
+                    changed_at = NOW(),
+                    updated_at = NOW();
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                    str(status),
+                    (
+                        str(changed_by_discord_user_id)
+                        if changed_by_discord_user_id
+                        else None
+                    ),
+                ),
+            )
+
+        conn.commit()
+
+
+def add_audit_event_v3(
+    guild_id,
+    event_type,
+    target_discord_user_id=None,
+    actor_discord_user_id=None,
+    metadata_json="{}",
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO audit_log (
+                    guild_id,
+                    event_type,
+                    target_discord_user_id,
+                    actor_discord_user_id,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb);
+                """,
+                (
+                    str(guild_id),
+                    str(event_type),
+                    (
+                        str(target_discord_user_id)
+                        if target_discord_user_id
+                        else None
+                    ),
+                    (
+                        str(actor_discord_user_id)
+                        if actor_discord_user_id
+                        else None
+                    ),
+                    str(metadata_json),
+                ),
+            )
+
+        conn.commit()
+
+
+def save_policy_acceptance_v3(
+    guild_id,
+    discord_user_id,
+    document_type,
+    document_version,
+    message_id=None,
+    channel_id=None,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO policy_documents (
+                    guild_id,
+                    document_type,
+                    document_version,
+                    message_id,
+                    channel_id,
+                    is_active,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, TRUE, NOW())
+                ON CONFLICT (
+                    guild_id,
+                    document_type,
+                    document_version
+                )
+                DO UPDATE SET
+                    message_id = COALESCE(
+                        EXCLUDED.message_id,
+                        policy_documents.message_id
+                    ),
+                    channel_id = COALESCE(
+                        EXCLUDED.channel_id,
+                        policy_documents.channel_id
+                    ),
+                    updated_at = NOW();
+                """,
+                (
+                    str(guild_id),
+                    str(document_type),
+                    str(document_version),
+                    (
+                        str(message_id)
+                        if message_id
+                        else None
+                    ),
+                    (
+                        str(channel_id)
+                        if channel_id
+                        else None
+                    ),
+                ),
+            )
+
+            cur.execute(
+                """
+                INSERT INTO policy_acceptances (
+                    guild_id,
+                    discord_user_id,
+                    document_type,
+                    document_version,
+                    accepted_at,
+                    message_id,
+                    channel_id
+                )
+                VALUES (%s, %s, %s, %s, NOW(), %s, %s)
+                ON CONFLICT (
+                    guild_id,
+                    discord_user_id,
+                    document_type,
+                    document_version
+                )
+                DO NOTHING;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                    str(document_type),
+                    str(document_version),
+                    (
+                        str(message_id)
+                        if message_id
+                        else None
+                    ),
+                    (
+                        str(channel_id)
+                        if channel_id
+                        else None
+                    ),
+                ),
+            )
+
+        conn.commit()
 
 
 # ============================================================
@@ -6008,7 +6584,7 @@ def register_commands():
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
 
@@ -6041,7 +6617,7 @@ def register_commands():
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
@@ -6058,7 +6634,7 @@ def register_commands():
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
@@ -6075,7 +6651,7 @@ def register_commands():
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
@@ -6092,7 +6668,7 @@ def register_commands():
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
@@ -6109,7 +6685,7 @@ def register_commands():
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
