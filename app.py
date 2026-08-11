@@ -2208,8 +2208,8 @@ def remove_alt_character(
                 ):
 
                     raise ValueError(
-                        "Main Character cannot "
-                        "be removed with /alt-ajouter-supprimer"
+                        "Le personnage principal ne peut pas "
+                        "être supprimé avec /alt-supprimer"
                     )
 
                 character_name = (
@@ -6337,6 +6337,7 @@ def interactions():
 
     STAFF_ONLY_COMMANDS = {
         "orientation-panneau",
+        "reglement-discord-panneau",
         "reglement-corp-panneau",
         "charte-panneau",
         "membre-supprimer",
@@ -6486,6 +6487,137 @@ def interactions():
                     **interaction_response_flags_payload(data),
                 },
             })
+
+    # ========================================================
+    # /reglement-discord-panneau
+    # V3 STAFF SETUP — informational panel only
+    # The official acceptance remains managed natively by Discord.
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "reglement-discord-panneau"
+    ):
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "📘 **Panneau officiel du Règlement Discord**\n"
+                    "Ce message complète le règlement natif de Discord "
+                    "sans remplacer son système d'acceptation.",
+
+                "embeds": [
+                    {
+                        "title":
+                            "🛡️ RÈGLEMENT DISCORD — FREEBORN LEGACY",
+
+                        "description":
+                            "Bienvenue sur le serveur Discord officiel de "
+                            "**Freeborn Legacy**.\n\n"
+                            "Ce serveur est un espace communautaire destiné "
+                            "aux membres, candidats, invités et partenaires "
+                            "de la corporation.\n\n"
+                            "📜 **Le règlement officiel est celui présenté "
+                            "et accepté via le système natif de Discord lors "
+                            "de ton arrivée.**\n"
+                            "Son respect reste obligatoire pendant toute ta "
+                            "présence sur le serveur.",
+
+                        "color":
+                            0x2F81F7,
+
+                        "fields": [
+                            {
+                                "name": "1️⃣ 🤝 Respect et courtoisie",
+                                "value":
+                                    "Respecte les autres membres. Les insultes, "
+                                    "provocations, discriminations, harcèlement "
+                                    "ou comportements toxiques ne sont pas tolérés.",
+                                "inline": False,
+                            },
+                            {
+                                "name": "2️⃣ 🚫 Pas de spam ni de flood",
+                                "value":
+                                    "Évite les messages répétitifs, mentions "
+                                    "abusives, chaînes, publicités ou contenus "
+                                    "sans rapport avec les discussions.",
+                                "inline": False,
+                            },
+                            {
+                                "name": "3️⃣ #️⃣ Utilise les bons salons",
+                                "value":
+                                    "Respecte la fonction de chaque salon et "
+                                    "privilégie les espaces prévus pour tes "
+                                    "discussions, médias et activités.",
+                                "inline": False,
+                            },
+                            {
+                                "name": "4️⃣ ⚠️ Contenus appropriés",
+                                "value":
+                                    "Les contenus illégaux, choquants, "
+                                    "pornographiques, haineux ou volontairement "
+                                    "offensants sont interdits.",
+                                "inline": False,
+                            },
+                            {
+                                "name": "5️⃣ 🔒 Respect de la vie privée",
+                                "value":
+                                    "Ne partage aucune information personnelle, "
+                                    "conversation privée, capture ou donnée "
+                                    "concernant une autre personne sans son accord.",
+                                "inline": False,
+                            },
+                            {
+                                "name": "6️⃣ 👤 Pseudonyme et identité",
+                                "value":
+                                    "N'usurpe pas l'identité d'un membre, d'un "
+                                    "responsable ou d'un représentant de Freeborn "
+                                    "Legacy. Les pseudonymes doivent rester appropriés.",
+                                "inline": False,
+                            },
+                            {
+                                "name": "7️⃣ 📢 Publicité et recrutement externe",
+                                "value":
+                                    "La publicité, le démarchage et le recrutement "
+                                    "pour d'autres communautés ou corporations "
+                                    "nécessitent l'accord préalable de la Direction.",
+                                "inline": False,
+                            },
+                            {
+                                "name": "8️⃣ ⚖️ Modération et bon sens",
+                                "value":
+                                    "Respecte les décisions de l'équipe de "
+                                    "modération. En cas de problème ou de désaccord, "
+                                    "contacte un responsable plutôt que d'alimenter "
+                                    "un conflit public.",
+                                "inline": False,
+                            },
+                            {
+                                "name": "🛡️ Application du règlement",
+                                "value":
+                                    "Le non-respect du règlement peut entraîner "
+                                    "des mesures allant de l'avertissement au "
+                                    "bannissement définitif, selon la gravité des "
+                                    "faits.\n\n"
+                                    "**Ensemble, faisons de Freeborn Legacy une "
+                                    "communauté accueillante, organisée et respectueuse.**",
+                                "inline": False,
+                            },
+                        ],
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Règlement Discord • "
+                                "Acceptation gérée nativement par Discord"
+                        },
+                    }
+                ],
+            },
+        })
 
     # ========================================================
     # /orientation-panneau
@@ -7436,7 +7568,7 @@ def interactions():
         })
 
     # ========================================================
-    # /alt-ajouter-supprimer
+    # /alt-supprimer
     # MEMBER COMMAND - CONFIRMATION REQUIRED
     # ========================================================
 
@@ -7482,7 +7614,7 @@ def interactions():
                     "content":
                         "❌ Ce personnage n'est pas un personnage secondaire enregistré "
                         "sur ton compte. Ton Main ne peut jamais être supprimé "
-                        "avec **/alt-ajouter-supprimer**.",
+                        "avec **/alt-supprimer**.",
                     **interaction_response_flags_payload(data),
                 },
             })
@@ -9558,6 +9690,20 @@ def register_commands():
 
         {
             "name":
+                "reglement-discord-panneau",
+
+            "description":
+                "Publier le panneau officiel du Règlement Discord",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
                 "orientation-panneau",
 
             "description":
@@ -9808,13 +9954,16 @@ def register_commands():
 
             print(
                 "Commandes Discord enregistrées : "
+                "/freeborn, /verification, "
+                "/alt-ajouter, /alt-supprimer, /main-changer, "
+                "/membre-info, /membre-liste, "
+                "/membre-promouvoir, /membre-supprimer, "
+                "/candidat-accepter, "
+                "/reglement-discord-panneau, "
                 "/orientation-panneau, "
-                "/freeborn, /verification, /alt-ajouter, /alt-ajouter-supprimer, "
-                "/main-changer, /membre-info, "
-                "/membre-supprimer, /membre-liste, "
+                "/reglement-corp-panneau, /charte-panneau, "
                 "/base-statut, /synchro-statut, "
-                "/synchro-verifier, "
-                "/synchro-appliquer."
+                "/synchro-verifier, /synchro-appliquer."
             )
 
         else:
