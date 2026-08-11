@@ -4319,6 +4319,8 @@ def handle_autocomplete(
         not in {
             "main-change",
             "alt-remove",
+            "verify",
+            "candidate-accept",
         }
     ):
 
@@ -4329,6 +4331,195 @@ def handle_autocomplete(
             "data": {
                 "choices":
                     []
+            },
+        })
+
+    # Staff recruitment commands use a controlled autocomplete list
+    # sourced from the V3 member_statuses table. This avoids Discord's
+    # generic USER picker proposing bots while hiding valid candidates.
+    if (
+        command_name
+        in {
+            "verify",
+            "candidate-accept",
+        }
+    ):
+
+        guild_id = str(
+            data.get(
+                "guild_id",
+                "",
+            )
+        )
+
+        search_text = ""
+
+        for option in (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        ):
+
+            if (
+                option.get("name")
+                ==
+                "membre"
+            ):
+
+                search_text = str(
+                    option.get(
+                        "value",
+                        "",
+                    )
+                ).lower()
+
+                break
+
+        try:
+
+            with psycopg.connect(
+                DATABASE_URL
+            ) as conn:
+
+                with conn.cursor() as cur:
+
+                    cur.execute(
+                        """
+                        SELECT
+                            discord_user_id,
+                            status
+                        FROM member_statuses
+                        WHERE guild_id = %s
+                        AND status = %s
+                        ORDER BY updated_at DESC;
+                        """,
+                        (
+                            guild_id,
+                            "candidate",
+                        ),
+                    )
+
+                    candidate_rows = (
+                        cur.fetchall()
+                    )
+
+        except Exception as error:
+
+            print(
+                "Recruitment autocomplete "
+                "database error:",
+                repr(error),
+            )
+
+            candidate_rows = []
+
+        choices = []
+
+        for (
+            candidate_user_id,
+            candidate_status,
+        ) in candidate_rows:
+
+            candidate_user_id = str(
+                candidate_user_id
+            )
+
+            try:
+
+                member_response = (
+                    requests.get(
+                        f"{DISCORD_API}/guilds/"
+                        f"{guild_id}/members/"
+                        f"{candidate_user_id}",
+                        headers=discord_headers(),
+                        timeout=10,
+                    )
+                )
+
+                if (
+                    member_response.status_code
+                    !=
+                    200
+                ):
+
+                    continue
+
+                member_payload = (
+                    member_response.json()
+                )
+
+                user_payload = (
+                    member_payload.get(
+                        "user",
+                        {},
+                    )
+                )
+
+                if user_payload.get(
+                    "bot",
+                    False,
+                ):
+
+                    continue
+
+                display_name = (
+                    member_payload.get(
+                        "nick"
+                    )
+                    or
+                    user_payload.get(
+                        "global_name"
+                    )
+                    or
+                    user_payload.get(
+                        "username"
+                    )
+                    or
+                    candidate_user_id
+                )
+
+            except Exception as error:
+
+                print(
+                    "Recruitment autocomplete "
+                    "Discord error:",
+                    repr(error),
+                )
+
+                continue
+
+            if (
+                search_text
+                and
+                search_text
+                not in
+                display_name.lower()
+            ):
+
+                continue
+
+            choices.append({
+                "name":
+                    display_name,
+
+                "value":
+                    candidate_user_id,
+            })
+
+            if len(choices) >= 25:
+
+                break
+
+        return jsonify({
+            "type":
+                8,
+
+            "data": {
+                "choices":
+                    choices,
             },
         })
 
@@ -9005,7 +9196,7 @@ def register_commands():
             "options": [
                 {
                     "type":
-                        6,
+                        3,
 
                     "name":
                         "membre",
@@ -9014,6 +9205,9 @@ def register_commands():
                         "Candidat à contrôler",
 
                     "required":
+                        True,
+
+                    "autocomplete":
                         True,
                 }
             ],
@@ -9184,7 +9378,7 @@ def register_commands():
             "options": [
                 {
                     "type":
-                        6,
+                        3,
 
                     "name":
                         "membre",
@@ -9193,6 +9387,9 @@ def register_commands():
                         "Candidat à valider",
 
                     "required":
+                        True,
+
+                    "autocomplete":
                         True,
                 }
             ],
