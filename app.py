@@ -1766,7 +1766,7 @@ def has_verified_main_v3(
     Read the guild-scoped V3 table first.
 
     During the Freeborn migration, fall back to the legacy
-    eve_characters table for the bootstrap guild because /verify
+    eve_characters table for the bootstrap guild because /verification
     still writes there until its dedicated V3 conversion step.
     """
 
@@ -2209,7 +2209,7 @@ def remove_alt_character(
 
                     raise ValueError(
                         "Main Character cannot "
-                        "be removed with /alt-remove"
+                        "be removed with /alt-ajouter-supprimer"
                     )
 
                 character_name = (
@@ -2605,7 +2605,7 @@ def build_member_info(
     if not characters:
 
         return (
-            "👤 **Freeborn Member Info**\n\n"
+            "👤 **Profil membre Freeborn**\n\n"
 
             f"Discord : "
             f"**{discord_display_name}**\n"
@@ -2630,7 +2630,7 @@ def build_member_info(
     ]
 
     lines = [
-        "👤 **Freeborn Member Info**",
+        "👤 **Profil membre Freeborn**",
         "",
         f"Discord : **{discord_display_name}**",
         f"Discord ID : `{discord_user_id}`",
@@ -2662,7 +2662,7 @@ def build_member_info(
         )
 
         lines.extend([
-            "### 🔗 Main Character",
+            "### 🔗 Personnage principal",
             f"**{main_name}**",
             f"Character ID : `{main_id}`",
             f"Statut : {main_status}",
@@ -2676,20 +2676,20 @@ def build_member_info(
     else:
 
         lines.extend([
-            "### 🔗 Main Character",
+            "### 🔗 Personnage principal",
             "❌ Aucun Main enregistré",
             "",
         ])
 
     lines.append(
-        f"### 🔹 Alt Characters "
+        f"### 🔹 Personnages secondaires "
         f"({len(alt_rows)})"
     )
 
     if not alt_rows:
 
         lines.append(
-            "Aucun Alt Character enregistré."
+            "Aucun personnage secondaire enregistré."
         )
 
     else:
@@ -2755,7 +2755,7 @@ def build_member_list_message():
     if not characters:
 
         return (
-            "👥 **Freeborn Member List**\n\n"
+            "👥 **Liste des membres Freeborn**\n\n"
             "ℹ️ Aucun compte EVE n'est actuellement "
             "enregistré dans Freeborn Verify.\n\n"
             "🛡️ **Mode lecture seule**\n"
@@ -2820,7 +2820,7 @@ def build_member_list_message():
     )
 
     header = [
-        "👥 **Freeborn Member List**",
+        "👥 **Liste des membres Freeborn**",
         "",
         (
             "Comptes enregistrés : "
@@ -2834,8 +2834,8 @@ def build_member_list_message():
         "### 📊 Résumé",
         f"👥 Comptes Discord : **{stats['members']}**",
         f"🎮 Personnages : **{stats['characters']}**",
-        f"🔗 Main Characters : **{stats['mains']}**",
-        f"🔹 Alt Characters : **{stats['alts']}**",
+        f"🔗 Personnages principaux : **{stats['mains']}**",
+        f"🔹 Personnages secondaires : **{stats['alts']}**",
         (
             "🚪 Hors corporation : "
             f"**{stats['outside_corporation']}**"
@@ -4203,7 +4203,7 @@ def build_sync_message(
     if applied:
 
         title = (
-            "⚙️ **Freeborn Sync APPLY**"
+            "⚙️ **Application de la synchronisation Freeborn**"
         )
 
         footer = (
@@ -4216,7 +4216,7 @@ def build_sync_message(
     else:
 
         title = (
-            "🔎 **Freeborn Sync Check**"
+            "🔎 **Contrôle de synchronisation Freeborn**"
         )
 
         footer = (
@@ -4389,15 +4389,15 @@ def build_sync_status_message():
         )
 
     lines = [
-        "📡 **Freeborn Sync Status**",
+        "📡 **État de la synchronisation Freeborn**",
         "",
         f"État général : {overall_status}",
         "",
         "### 🗄️ Base Freeborn",
         f"👥 Comptes suivis : **{stats['members']}**",
         f"🎮 Personnages : **{stats['characters']}**",
-        f"🔗 Main Characters : **{stats['mains']}**",
-        f"🔹 Alt Characters : **{stats['alts']}**",
+        f"🔗 Personnages principaux : **{stats['mains']}**",
+        f"🔹 Personnages secondaires : **{stats['alts']}**",
         (
             "🕒 Dernière synchro enregistrée : "
             f"**{format_datetime(stats['latest_check'])}**"
@@ -4466,11 +4466,11 @@ def handle_autocomplete(
     if (
         command_name
         not in {
-            "main-change",
-            "alt-remove",
-            "verify",
-            "candidate-accept",
-            "member-remove",
+            "main-changer",
+            "alt-supprimer",
+            "verification",
+            "candidat-accepter",
+            "membre-supprimer",
         }
     ):
 
@@ -4484,9 +4484,9 @@ def handle_autocomplete(
             },
         })
 
-    # /member-remove lists only human Discord accounts that actually
+    # /membre-supprimer lists only human Discord accounts that actually
     # own at least one EVE profile in Freeborn Verify.
-    if command_name == "member-remove":
+    if command_name == "membre-supprimer":
 
         guild_id = str(data.get("guild_id", ""))
         search_text = ""
@@ -4554,8 +4554,8 @@ def handle_autocomplete(
     if (
         command_name
         in {
-            "verify",
-            "candidate-accept",
+            "verification",
+            "candidat-accepter",
         }
     ):
 
@@ -4833,7 +4833,7 @@ def handle_autocomplete(
         if (
             command_name
             ==
-            "main-change"
+            "main-changer"
         ):
 
             status_text = (
@@ -5421,7 +5421,7 @@ def handle_message_component(
 
         return jsonify({"type": 7, "data": {
             "content":
-                "🗑️ **Freeborn Alt Remove**\n\n"
+                "🗑️ **Suppression du personnage secondaire**\n\n"
                 f"Alt supprimé : **{result['character_name']}**\n\n"
                 "✅ Le personnage a été retiré de ton profil Freeborn.\n"
                 f"✅ Ton Main **{current_main_name}** reste inchangé.\n"
@@ -5501,9 +5501,9 @@ def handle_message_component(
 
         return jsonify({"type": 7, "data": {
             "content":
-                "🔄 **Freeborn Main Change**\n\n"
-                f"Ancien Main : **{result['old_main_name']}** → Alt Character\n"
-                f"Nouveau Main : **{result['new_main_name']}** → Main Character\n\n"
+                "🔄 **Changement de personnage principal**\n\n"
+                f"Ancien Main : **{result['old_main_name']}** → Personnage secondaire\n"
+                f"Nouveau personnage principal : **{result['new_main_name']}** → Personnage principal\n\n"
                 "✅ Changement enregistré dans Freeborn Verify.\n"
                 f"{nickname_text}\n\n"
                 "Aucun personnage EVE n'a été supprimé.",
@@ -5547,7 +5547,7 @@ def handle_message_component(
                     "content":
                         "⌛ **Confirmation expirée**\n\n"
                         "Aucune synchronisation n'a été appliquée.\n\n"
-                        "Relance **/sync-apply** si nécessaire.",
+                        "Relance **/synchro-appliquer** si nécessaire.",
 
                     "components":
                         [],
@@ -5782,7 +5782,7 @@ def handle_message_component(
                 "content":
                     "⌛ **Confirmation expirée**\n\n"
                     "La suppression n'a pas été effectuée.\n\n"
-                    "Relance **/member-remove** "
+                    "Relance **/membre-supprimer** "
                     "si nécessaire.",
 
                 "components":
@@ -5899,7 +5899,7 @@ def handle_message_component(
                     "⛔ **Suppression refusée**\n\n"
                     "Un membre du staff ne peut pas "
                     "supprimer son propre profil avec "
-                    "**/member-remove**.",
+                    "**/membre-supprimer**.",
 
                 "components":
                     [],
@@ -6022,7 +6022,7 @@ def handle_message_component(
     ]
 
     lines = [
-        "🗑️ **Freeborn Member Remove**",
+        "🗑️ **Suppression du profil membre Freeborn**",
         "",
         f"Compte Discord : `{target_user_id}`",
         "",
@@ -6113,7 +6113,7 @@ def health():
     }
 
 
-@app.route("/db-health")
+@app.route("/base-statut")
 def db_health():
 
     try:
@@ -6336,36 +6336,36 @@ def interactions():
     # ========================================================
 
     STAFF_ONLY_COMMANDS = {
-        "orientation-panel",
-        "corp-rules-panel",
-        "charter-panel",
-        "member-remove",
-        "sync-apply",
+        "orientation-panneau",
+        "reglement-corp-panneau",
+        "charte-panneau",
+        "membre-supprimer",
+        "synchro-appliquer",
     }
 
     AUDIT_VIEWER_COMMANDS = {
-        "member-list",
-        "db-health",
-        "sync-status",
-        "sync-check",
+        "membre-liste",
+        "base-statut",
+        "synchro-statut",
+        "synchro-verifier",
     }
 
     TECHNICAL_CHANNEL_COMMANDS = {
-        "member-remove",
-        "member-list",
-        "db-health",
-        "sync-status",
-        "sync-check",
-        "sync-apply",
+        "membre-supprimer",
+        "membre-liste",
+        "base-statut",
+        "synchro-statut",
+        "synchro-verifier",
+        "synchro-appliquer",
     }
 
     RECRUITMENT_MANAGER_COMMANDS = {
-        "candidate-accept",
-        "member-promote",
+        "candidat-accepter",
+        "membre-promouvoir",
     }
 
     RECRUITMENT_REVIEWER_COMMANDS = {
-        "verify",
+        "verification",
     }
 
     if (
@@ -6440,7 +6440,7 @@ def interactions():
             "data": {
                 "content":
                     "⛔ **Accès refusé**\n\n"
-                    "La commande **/verify** est réservée aux rôles "
+                    "La commande **/verification** est réservée aux rôles "
                     "**CEO**, **Haut Conseil**, **Direction** et "
                     "**Ressources Humaines**.",
 
@@ -6488,14 +6488,14 @@ def interactions():
             })
 
     # ========================================================
-    # /orientation-panel
+    # /orientation-panneau
     # V3 STAFF SETUP
     # ========================================================
 
     if (
         command_name
         ==
-        "orientation-panel"
+        "orientation-panneau"
     ):
 
         orientation_channel_id = (
@@ -6610,14 +6610,14 @@ def interactions():
         })
 
     # ========================================================
-    # /corp-rules-panel
+    # /reglement-corp-panneau
     # V3 STAFF SETUP
     # ========================================================
 
     if (
         command_name
         ==
-        "corp-rules-panel"
+        "reglement-corp-panneau"
     ):
 
         corp_rules_channel_id = (
@@ -6678,14 +6678,14 @@ def interactions():
         })
 
     # ========================================================
-    # /charter-panel
+    # /charte-panneau
     # V3 STAFF SETUP
     # ========================================================
 
     if (
         command_name
         ==
-        "charter-panel"
+        "charte-panneau"
     ):
 
         charter_channel_id = (
@@ -6746,14 +6746,14 @@ def interactions():
         })
 
     # ========================================================
-    # /candidate-accept
+    # /candidat-accepter
     # V3 RECRUITMENT MANAGEMENT
     # ========================================================
 
     if (
         command_name
         ==
-        "candidate-accept"
+        "candidat-accepter"
     ):
 
         options = (
@@ -6936,14 +6936,14 @@ def interactions():
         })
 
     # ========================================================
-    # /member-promote
+    # /membre-promouvoir
     # V3 RECRUITMENT MANAGEMENT
     # ========================================================
 
     if (
         command_name
         ==
-        "member-promote"
+        "membre-promouvoir"
     ):
 
         options = (
@@ -7133,14 +7133,14 @@ def interactions():
         })
 
     # ========================================================
-    # /member-remove
+    # /membre-supprimer
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "member-remove"
+        "membre-supprimer"
     ):
 
         options = (
@@ -7203,7 +7203,7 @@ def interactions():
                         "⛔ **Suppression refusée**\n\n"
                         "Tu ne peux pas supprimer "
                         "ton propre profil avec "
-                        "**/member-remove**.",
+                        "**/membre-supprimer**.",
 
                     **interaction_response_flags_payload(data),
                 },
@@ -7305,7 +7305,7 @@ def interactions():
         ]
 
         preview_lines = [
-            "⚠️ **CONFIRMATION — MEMBER REMOVE**",
+            "⚠️ **CONFIRMATION — SUPPRESSION DU PROFIL**",
             "",
             f"Membre : **{target_display_name}**",
             f"Discord ID : `{target_user_id}`",
@@ -7436,11 +7436,11 @@ def interactions():
         })
 
     # ========================================================
-    # /alt-remove
+    # /alt-ajouter-supprimer
     # MEMBER COMMAND - CONFIRMATION REQUIRED
     # ========================================================
 
-    if command_name == "alt-remove":
+    if command_name == "alt-supprimer":
 
         selected_character_id = None
 
@@ -7453,7 +7453,7 @@ def interactions():
             return jsonify({
                 "type": 4,
                 "data": {
-                    "content": "❌ Aucun Alt Character n'a été sélectionné.",
+                    "content": "❌ Aucun personnage secondaire n'a été sélectionné.",
                     **interaction_response_flags_payload(data),
                 },
             })
@@ -7465,7 +7465,7 @@ def interactions():
             return jsonify({
                 "type": 4,
                 "data": {
-                    "content": "⚠️ Impossible de lire tes Alt Characters.",
+                    "content": "⚠️ Impossible de lire tes personnages secondaires.",
                     **interaction_response_flags_payload(data),
                 },
             })
@@ -7480,9 +7480,9 @@ def interactions():
                 "type": 4,
                 "data": {
                     "content":
-                        "❌ Ce personnage n'est pas un Alt Character enregistré "
+                        "❌ Ce personnage n'est pas un personnage secondaire enregistré "
                         "sur ton compte. Ton Main ne peut jamais être supprimé "
-                        "avec **/alt-remove**.",
+                        "avec **/alt-ajouter-supprimer**.",
                     **interaction_response_flags_payload(data),
                 },
             })
@@ -7523,14 +7523,14 @@ def interactions():
         })
 
     # ========================================================
-    # /member-list
+    # /membre-liste
     # STAFF ONLY - READ ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "member-list"
+        "membre-liste"
     ):
 
         try:
@@ -7552,7 +7552,7 @@ def interactions():
 
                 "data": {
                     "content":
-                        "👥 **Freeborn Member List**\n\n"
+                        "👥 **Liste des membres Freeborn**\n\n"
                         "⚠️ Impossible de lire "
                         "la liste des membres actuellement.\n\n"
                         "Aucune modification "
@@ -7575,14 +7575,14 @@ def interactions():
         })
 
     # ========================================================
-    # /sync-status
+    # /synchro-statut
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "sync-status"
+        "synchro-statut"
     ):
 
         try:
@@ -7604,7 +7604,7 @@ def interactions():
 
                 "data": {
                     "content":
-                        "📡 **Freeborn Sync Status**\n\n"
+                        "📡 **État de la synchronisation Freeborn**\n\n"
                         "⚠️ Impossible de générer "
                         "l'état global actuellement.\n\n"
                         "Aucune modification "
@@ -7627,11 +7627,11 @@ def interactions():
         })
 
     # ========================================================
-    # /main-change
+    # /main-changer
     # MEMBER COMMAND - CONFIRMATION REQUIRED
     # ========================================================
 
-    if command_name == "main-change":
+    if command_name == "main-changer":
 
         current_main = get_main_character(discord_user_id)
 
@@ -7640,7 +7640,7 @@ def interactions():
                 "type": 4,
                 "data": {
                     "content":
-                        "❌ Aucun Main Character n'est enregistré. "
+                        "❌ Aucun personnage principal n'est enregistré. "
                         "Finalise d'abord ton identité EVE avec **/freeborn**.",
                     **interaction_response_flags_payload(data),
                 },
@@ -7657,7 +7657,7 @@ def interactions():
             return jsonify({
                 "type": 4,
                 "data": {
-                    "content": "❌ Aucun Alt Character n'a été sélectionné.",
+                    "content": "❌ Aucun personnage secondaire n'a été sélectionné.",
                     **interaction_response_flags_payload(data),
                 },
             })
@@ -7669,7 +7669,7 @@ def interactions():
             return jsonify({
                 "type": 4,
                 "data": {
-                    "content": "⚠️ Impossible de lire tes Alt Characters.",
+                    "content": "⚠️ Impossible de lire tes personnages secondaires.",
                     **interaction_response_flags_payload(data),
                 },
             })
@@ -7684,7 +7684,7 @@ def interactions():
                 "type": 4,
                 "data": {
                     "content":
-                        "❌ Ce personnage n'est pas un Alt Character enregistré "
+                        "❌ Ce personnage n'est pas un personnage secondaire enregistré "
                         "sur ton compte.",
                     **interaction_response_flags_payload(data),
                 },
@@ -7700,9 +7700,9 @@ def interactions():
             "data": {
                 "content":
                     "🔄 **Confirmer le changement de Main ?**\n\n"
-                    f"Main actuel : **{current_main[1]}**\n"
-                    f"Nouveau Main : **{selected_alt[1]}**\n\n"
-                    "L'ancien Main deviendra automatiquement Alt Character. "
+                    f"Personnage principal actuel : **{current_main[1]}**\n"
+                    f"Nouveau personnage principal : **{selected_alt[1]}**\n\n"
+                    "L'ancien personnage principal deviendra automatiquement un personnage secondaire. "
                     "Aucun personnage ne sera supprimé.\n\n"
                     "La confirmation expire dans 5 minutes.",
                 **interaction_response_flags_payload(data),
@@ -7727,13 +7727,13 @@ def interactions():
         })
 
     # ========================================================
-    # /member-info
+    # /membre-info
     # ========================================================
 
     if (
         command_name
         ==
-        "member-info"
+        "membre-info"
     ):
 
         caller_user = (
@@ -7908,7 +7908,7 @@ def interactions():
 
                 "data": {
                     "content":
-                        "👤 **Freeborn Member Info**\n\n"
+                        "👤 **Profil membre Freeborn**\n\n"
                         "⚠️ Impossible de lire "
                         "ce profil actuellement.",
 
@@ -7929,14 +7929,14 @@ def interactions():
         })
 
     # ========================================================
-    # /db-health
+    # /base-statut
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "db-health"
+        "base-statut"
     ):
 
         try:
@@ -7958,7 +7958,7 @@ def interactions():
 
                 "data": {
                     "content":
-                        "🗄️ **Freeborn Database**\n\n"
+                        "🗄️ **Base de données Freeborn**\n\n"
                         "❌ Base de données "
                         "indisponible.",
 
@@ -7967,7 +7967,7 @@ def interactions():
             })
 
         message = (
-            "🗄️ **Freeborn Database Health**\n\n"
+            "🗄️ **État de la base de données Freeborn**\n\n"
 
             "✅ Statut : **Connectée**\n"
 
@@ -7977,10 +7977,10 @@ def interactions():
             f"👥 Personnages : "
             f"**{stats['characters']}**\n"
 
-            f"🔗 Main Characters : "
+            f"🔗 Personnages principaux : "
             f"**{stats['mains']}**\n"
 
-            f"🔹 Alt Characters : "
+            f"🔹 Personnages secondaires : "
             f"**{stats['alts']}**\n"
 
             f"🚪 Hors corporation : "
@@ -8000,14 +8000,14 @@ def interactions():
         })
 
     # ========================================================
-    # /sync-check
+    # /synchro-verifier
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "sync-check"
+        "synchro-verifier"
     ):
 
         try:
@@ -8055,14 +8055,14 @@ def interactions():
         })
 
     # ========================================================
-    # /sync-apply
+    # /synchro-appliquer
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "sync-apply"
+        "synchro-appliquer"
     ):
 
         try:
@@ -8163,14 +8163,14 @@ def interactions():
         })
 
     # ========================================================
-    # /verify
+    # /verification
     # MEMBER COMMAND
     # ========================================================
 
     if (
         command_name
         ==
-        "verify"
+        "verification"
     ):
 
         options = (
@@ -8433,14 +8433,14 @@ def interactions():
         )
 
     # ========================================================
-    # /alt
+    # /alt-ajouter
     # MEMBER COMMAND
     # ========================================================
 
     elif (
         command_name
         ==
-        "alt"
+        "alt-ajouter"
     ):
 
         verification_type = (
@@ -8469,7 +8469,7 @@ def interactions():
                 "data": {
                     "content":
                         "⚠️ Impossible de lire "
-                        "ton Main Character.",
+                        "ton personnage principal.",
 
                     **interaction_response_flags_payload(data),
                 },
@@ -8576,7 +8576,7 @@ def interactions():
     else:
 
         message = (
-            "🔗 **Freeborn Alt Verify**\n\n"
+            "🔗 **Vérification du personnage secondaire**\n\n"
 
             "Sélectionne le personnage "
             "à enregistrer comme Alt :\n\n"
@@ -9138,7 +9138,7 @@ def callback():
 
                 return freeborn_web_page(
                     "Main déjà enregistré",
-                    f"Ton Main actuel est {existing_main_name}. Utilise /main-change pour changer de Main.",
+                    f"Ton Main actuel est {existing_main_name}. Utilise /main-changer pour changer de Main.",
                     status="error",
                     character_name=character_name,
                 ), 400
@@ -9241,7 +9241,7 @@ def callback():
         return freeborn_web_page(
             "Main EVE vérifié",
             (
-                f"{character_name} est enregistré comme Main Character. "
+                f"{character_name} est enregistré comme personnage principal. "
                 + (
                     "Le pseudo Discord a été synchronisé."
                     if nickname_changed
@@ -9285,7 +9285,7 @@ def callback():
 
             return freeborn_web_page(
                 "Ajout d'Alt refusé",
-                "Ce personnage est déjà ton Main Character.",
+                "Ce personnage est déjà ton personnage principal.",
                 status="error",
                 character_name=character_name,
             ), 400
@@ -9334,7 +9334,7 @@ def callback():
 
     return freeborn_web_page(
         "Alt EVE vérifié",
-        f"{character_name} a été ajouté comme Alt Character.",
+        f"{character_name} a été ajouté comme personnage secondaire.",
         status="success",
         character_name=character_name,
     )
@@ -9371,7 +9371,7 @@ def register_commands():
 
         {
             "name":
-                "verify",
+                "verification",
 
             "description":
                 "Contrôler le dossier d'un candidat",
@@ -9404,11 +9404,11 @@ def register_commands():
 
         {
             "name":
-                "alt",
+                "alt-ajouter",
 
             "description":
-                "Ajouter un Alt EVE "
-                "à ton compte Freeborn",
+                "Ajouter un personnage secondaire EVE "
+                "à ton profil Freeborn",
 
             "type":
                 1,
@@ -9416,7 +9416,7 @@ def register_commands():
 
         {
             "name":
-                "alt-remove",
+                "alt-supprimer",
 
             "description":
                 "Supprimer un Alt "
@@ -9434,7 +9434,7 @@ def register_commands():
                         "personnage",
 
                     "description":
-                        "Alt Character à supprimer",
+                        "Personnage secondaire à supprimer",
 
                     "required":
                         True,
@@ -9447,11 +9447,11 @@ def register_commands():
 
         {
             "name":
-                "main-change",
+                "main-changer",
 
             "description":
-                "Choisir un de tes Alts "
-                "comme nouveau Main",
+                "Choisir un personnage secondaire "
+                "comme nouveau personnage principal",
 
             "type":
                 1,
@@ -9465,8 +9465,8 @@ def register_commands():
                         "personnage",
 
                     "description":
-                        "Alt Character "
-                        "qui deviendra ton Main",
+                        "Personnage secondaire qui deviendra "
+                        "ton personnage principal",
 
                     "required":
                         True,
@@ -9479,10 +9479,10 @@ def register_commands():
 
         {
             "name":
-                "member-info",
+                "membre-info",
 
             "description":
-                "Afficher un profil EVE Freeborn",
+                "Afficher le profil EVE d'un membre Freeborn",
 
             "type":
                 1,
@@ -9511,10 +9511,10 @@ def register_commands():
 
         {
             "name":
-                "orientation-panel",
+                "orientation-panneau",
 
             "description":
-                "Publier le panneau Orientation V3",
+                "Publier le panneau d'orientation V3",
 
             "type":
                 1,
@@ -9525,7 +9525,7 @@ def register_commands():
 
         {
             "name":
-                "corp-rules-panel",
+                "reglement-corp-panneau",
 
             "description":
                 "Publier le bouton d'acceptation du Règlement Corp",
@@ -9539,7 +9539,7 @@ def register_commands():
 
         {
             "name":
-                "charter-panel",
+                "charte-panneau",
 
             "description":
                 "Publier le bouton d'acceptation de la Charte Freeborn",
@@ -9553,10 +9553,10 @@ def register_commands():
 
         {
             "name":
-                "candidate-accept",
+                "candidat-accepter",
 
             "description":
-                "Valider un Candidat en Candidat Accepté",
+                "Valider un candidat en Candidat Accepté",
 
             "type":
                 1,
@@ -9586,7 +9586,7 @@ def register_commands():
 
         {
             "name":
-                "member-promote",
+                "membre-promouvoir",
 
             "description":
                 "Promouvoir un Candidat Accepté en Membre",
@@ -9616,7 +9616,7 @@ def register_commands():
 
         {
             "name":
-                "member-remove",
+                "membre-supprimer",
 
             "description":
                 "Supprimer complètement "
@@ -9652,11 +9652,10 @@ def register_commands():
 
         {
             "name":
-                "member-list",
+                "membre-liste",
 
             "description":
-                "Afficher la liste des "
-                "membres EVE enregistrés",
+                "Afficher la liste des membres EVE enregistrés",
 
             "type":
                 1,
@@ -9669,11 +9668,10 @@ def register_commands():
 
         {
             "name":
-                "db-health",
+                "base-statut",
 
             "description":
-                "Afficher l'état de "
-                "la base Freeborn",
+                "Afficher l'état de la base de données Freeborn",
 
             "type":
                 1,
@@ -9686,7 +9684,7 @@ def register_commands():
 
         {
             "name":
-                "sync-status",
+                "synchro-statut",
 
             "description":
                 "Afficher l'état global "
@@ -9703,7 +9701,7 @@ def register_commands():
 
         {
             "name":
-                "sync-check",
+                "synchro-verifier",
 
             "description":
                 "Contrôler les personnages "
@@ -9720,11 +9718,10 @@ def register_commands():
 
         {
             "name":
-                "sync-apply",
+                "synchro-appliquer",
 
             "description":
-                "Synchroniser et révoquer "
-                "les anciens membres",
+                "Appliquer la synchronisation et les révocations confirmées",
 
             "type":
                 1,
@@ -9763,14 +9760,14 @@ def register_commands():
         ):
 
             print(
-                "Discord commands registered: "
-                "/orientation-panel, "
-                "/freeborn, /verify, /alt, /alt-remove, "
-                "/main-change, /member-info, "
-                "/member-remove, /member-list, "
-                "/db-health, /sync-status, "
-                "/sync-check, "
-                "/sync-apply."
+                "Commandes Discord enregistrées : "
+                "/orientation-panneau, "
+                "/freeborn, /verification, /alt-ajouter, /alt-ajouter-supprimer, "
+                "/main-changer, /membre-info, "
+                "/membre-supprimer, /membre-liste, "
+                "/base-statut, /synchro-statut, "
+                "/synchro-verifier, "
+                "/synchro-appliquer."
             )
 
         else:
