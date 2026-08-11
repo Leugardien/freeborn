@@ -57,6 +57,19 @@ DISCORD_LOGS_CHANNEL_ID = os.environ.get(
 )
 
 
+DISCORD_ORIENTATION_CHANNEL_ID = os.environ.get(
+    "DISCORD_ORIENTATION_CHANNEL_ID"
+)
+
+DISCORD_CORP_RULES_CHANNEL_ID = os.environ.get(
+    "DISCORD_CORP_RULES_CHANNEL_ID"
+)
+
+DISCORD_CHARTER_CHANNEL_ID = os.environ.get(
+    "DISCORD_CHARTER_CHANNEL_ID"
+)
+
+
 # Version identifiers recorded with each acceptance.
 # Increase a version when the corresponding document changes and
 # members must accept the new version again.
@@ -341,9 +354,36 @@ def init_database():
                         bot_management_channel_id TEXT,
                         logs_channel_id TEXT,
                         is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        orientation_channel_id TEXT,
+                        corp_rules_channel_id TEXT,
+                        charter_channel_id TEXT,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE discord_guilds
+                    ADD COLUMN IF NOT EXISTS
+                    orientation_channel_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE discord_guilds
+                    ADD COLUMN IF NOT EXISTS
+                    corp_rules_channel_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE discord_guilds
+                    ADD COLUMN IF NOT EXISTS
+                    charter_channel_id TEXT;
                     """
                 )
 
@@ -541,9 +581,14 @@ def init_database():
                         recruitment_channel_id,
                         bot_management_channel_id,
                         logs_channel_id,
+                        orientation_channel_id,
+                        corp_rules_channel_id,
+                        charter_channel_id,
                         updated_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, NOW()
+                    )
                     ON CONFLICT (guild_id)
                     DO UPDATE SET
                         corporation_id = EXCLUDED.corporation_id,
@@ -555,6 +600,18 @@ def init_database():
                             EXCLUDED.logs_channel_id,
                             discord_guilds.logs_channel_id
                         ),
+                        orientation_channel_id = COALESCE(
+                            EXCLUDED.orientation_channel_id,
+                            discord_guilds.orientation_channel_id
+                        ),
+                        corp_rules_channel_id = COALESCE(
+                            EXCLUDED.corp_rules_channel_id,
+                            discord_guilds.corp_rules_channel_id
+                        ),
+                        charter_channel_id = COALESCE(
+                            EXCLUDED.charter_channel_id,
+                            discord_guilds.charter_channel_id
+                        ),
                         updated_at = NOW();
                     """,
                     (
@@ -565,6 +622,21 @@ def init_database():
                         (
                             str(DISCORD_LOGS_CHANNEL_ID)
                             if DISCORD_LOGS_CHANNEL_ID
+                            else None
+                        ),
+                        (
+                            str(DISCORD_ORIENTATION_CHANNEL_ID)
+                            if DISCORD_ORIENTATION_CHANNEL_ID
+                            else None
+                        ),
+                        (
+                            str(DISCORD_CORP_RULES_CHANNEL_ID)
+                            if DISCORD_CORP_RULES_CHANNEL_ID
+                            else None
+                        ),
+                        (
+                            str(DISCORD_CHARTER_CHANNEL_ID)
+                            if DISCORD_CHARTER_CHANNEL_ID
                             else None
                         ),
                     ),
@@ -945,7 +1017,10 @@ def get_guild_config(guild_id):
                     recruitment_channel_id,
                     bot_management_channel_id,
                     logs_channel_id,
-                    is_active
+                    is_active,
+                    orientation_channel_id,
+                    corp_rules_channel_id,
+                    charter_channel_id
                 FROM discord_guilds
                 WHERE guild_id = %s
                 LIMIT 1;
@@ -3000,6 +3075,77 @@ def interaction_is_staff(
     )
 
 
+def guild_dedicated_channel_id(
+    guild_config,
+    channel_type,
+):
+
+    if not guild_config:
+
+        return None
+
+    indexes = {
+        "orientation":
+            7,
+
+        "corp_rules":
+            8,
+
+        "charter":
+            9,
+    }
+
+    index = indexes.get(
+        str(channel_type)
+    )
+
+    if index is None:
+
+        return None
+
+    try:
+
+        channel_id = guild_config[index]
+
+    except IndexError:
+
+        return None
+
+    return (
+        str(channel_id)
+        if channel_id
+        else None
+    )
+
+
+def dedicated_channel_error(
+    expected_channel_id,
+    label,
+):
+
+    channel_text = (
+        f"<#{expected_channel_id}>"
+        if expected_channel_id
+        else
+        f"le salon **{label}** configuré"
+    )
+
+    return jsonify({
+        "type":
+            4,
+
+        "data": {
+            "content":
+                "📍 **Mauvais salon**\n\n"
+                f"Cette action doit être utilisée dans "
+                f"{channel_text}.",
+
+            "flags":
+                64,
+        },
+    })
+
+
 def interaction_response_flags(data):
 
     channel_id = str(
@@ -4413,6 +4559,26 @@ def handle_message_component(
                 },
             })
 
+        orientation_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                "orientation",
+            )
+        )
+
+        if (
+            not orientation_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            orientation_channel_id
+        ):
+
+            return dedicated_channel_error(
+                orientation_channel_id,
+                "orientation",
+            )
+
         member_roles = (
             interaction_member_role_ids(
                 data
@@ -4672,6 +4838,8 @@ def handle_message_component(
             document_version = CORP_RULES_VERSION
             document_label = "Règlement Corp"
             audit_event = "policy_accept_corp_rules"
+            dedicated_channel_type = "corp_rules"
+            dedicated_channel_label = "règlement-corp"
 
         else:
 
@@ -4679,6 +4847,28 @@ def handle_message_component(
             document_version = FREEBORN_CHARTER_VERSION
             document_label = "Charte Freeborn"
             audit_event = "policy_accept_charter"
+            dedicated_channel_type = "charter"
+            dedicated_channel_label = "charte-freeborn"
+
+        expected_policy_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                dedicated_channel_type,
+            )
+        )
+
+        if (
+            not expected_policy_channel_id
+            or
+            channel_id
+            !=
+            expected_policy_channel_id
+        ):
+
+            return dedicated_channel_error(
+                expected_policy_channel_id,
+                dedicated_channel_label,
+            )
 
         existing_acceptance = (
             has_policy_acceptance_v3(
@@ -5504,6 +5694,26 @@ def interactions():
         "orientation-panel"
     ):
 
+        orientation_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                "orientation",
+            )
+        )
+
+        if (
+            not orientation_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            orientation_channel_id
+        ):
+
+            return dedicated_channel_error(
+                orientation_channel_id,
+                "orientation",
+            )
+
         guest_role_id = (
             resolve_guild_role_id(
                 guild_id,
@@ -5606,6 +5816,26 @@ def interactions():
         "corp-rules-panel"
     ):
 
+        corp_rules_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                "corp_rules",
+            )
+        )
+
+        if (
+            not corp_rules_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            corp_rules_channel_id
+        ):
+
+            return dedicated_channel_error(
+                corp_rules_channel_id,
+                "règlement-corp",
+            )
+
         return jsonify({
             "type":
                 4,
@@ -5653,6 +5883,26 @@ def interactions():
         ==
         "charter-panel"
     ):
+
+        charter_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                "charter",
+            )
+        )
+
+        if (
+            not charter_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            charter_channel_id
+        ):
+
+            return dedicated_channel_error(
+                charter_channel_id,
+                "charte-freeborn",
+            )
 
         return jsonify({
             "type":
