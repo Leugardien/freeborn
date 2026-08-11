@@ -8855,6 +8855,53 @@ def callback():
         ]
     )
 
+    # ========================================================
+    # TEMPORARY ESI CORPORATION DIAGNOSTIC
+    # Safe diagnostic only: no token, code, state or secret logged.
+    # ========================================================
+
+    esi_date = character_response.headers.get(
+        "Date",
+        "",
+    )
+
+    esi_expires = character_response.headers.get(
+        "Expires",
+        "",
+    )
+
+    esi_age = character_response.headers.get(
+        "Age",
+        "",
+    )
+
+    esi_etag = character_response.headers.get(
+        "ETag",
+        "",
+    )
+
+    corporation_match = (
+        int(corporation_id)
+        ==
+        int(expected_corporation_id)
+    )
+
+    print(
+        "[FREEBORN ESI DEBUG] "
+        f"character={character_name!r} "
+        f"character_id={character_id} "
+        f"corporation_id_esi={corporation_id} "
+        f"corporation_id_expected={expected_corporation_id} "
+        f"match={corporation_match} "
+        f"verification_type={verification_type!r} "
+        f"guild_id={guild_id} "
+        f"esi_date={esi_date!r} "
+        f"esi_expires={esi_expires!r} "
+        f"esi_age={esi_age!r} "
+        f"esi_etag={esi_etag!r}",
+        flush=True,
+    )
+
     if (
         int(corporation_id)
         !=
