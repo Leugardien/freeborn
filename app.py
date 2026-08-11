@@ -1348,6 +1348,86 @@ def has_policy_acceptance_v3(
             return cur.fetchone()
 
 
+def has_required_policy_acceptances_v3(
+    guild_id,
+    discord_user_id,
+):
+
+    corp_rules = has_policy_acceptance_v3(
+        guild_id,
+        discord_user_id,
+        "corp_rules",
+        CORP_RULES_VERSION,
+    )
+
+    charter = has_policy_acceptance_v3(
+        guild_id,
+        discord_user_id,
+        "freeborn_charter",
+        FREEBORN_CHARTER_VERSION,
+    )
+
+    return {
+        "corp_rules":
+            corp_rules,
+
+        "charter":
+            charter,
+
+        "complete":
+            bool(
+                corp_rules
+                and
+                charter
+            ),
+    }
+
+
+def has_verified_main_v3(
+    guild_id,
+    discord_user_id,
+):
+    """
+    Read the guild-scoped V3 table first.
+
+    During the Freeborn migration, fall back to the legacy
+    eve_characters table for the bootstrap guild because /verify
+    still writes there until its dedicated V3 conversion step.
+    """
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT 1
+                FROM guild_eve_characters
+                WHERE guild_id = %s
+                AND discord_user_id = %s
+                AND character_type = 'main'
+                AND in_corporation = TRUE
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                ),
+            )
+
+            if cur.fetchone():
+
+                return True
+
+    if str(guild_id) == str(DISCORD_GUILD_ID):
+
+        return has_main_character(
+            discord_user_id
+        )
+
+    return False
+
+
 def save_policy_acceptance_v3(
     guild_id,
     discord_user_id,
@@ -2548,6 +2628,56 @@ def verify_discord_signature(
 # ============================================================
 # STAFF ACCESS
 # ============================================================
+
+def interaction_has_any_role(
+    data,
+    allowed_role_ids,
+):
+
+    member_roles = interaction_member_role_ids(
+        data
+    )
+
+    return bool(
+        member_roles
+        &
+        set(
+            str(role_id)
+            for role_id
+            in allowed_role_ids
+            if role_id
+        )
+    )
+
+
+def interaction_is_recruitment_manager(
+    data
+):
+
+    return interaction_has_any_role(
+        data,
+        RECRUITMENT_MANAGER_ROLE_IDS,
+    )
+
+
+def recruitment_access_denied():
+
+    return jsonify({
+        "type":
+            4,
+
+        "data": {
+            "content":
+                "⛔ **Accès refusé**\n\n"
+                "Cette action est réservée aux rôles "
+                "**CEO**, **Haut Conseil**, **Direction** "
+                "et **Ressources Humaines**.",
+
+            "flags":
+                64,
+        },
+    })
+
 
 def interaction_is_staff(
     data
@@ -4969,6 +5099,11 @@ def interactions():
         "sync-apply",
     }
 
+    RECRUITMENT_MANAGER_COMMANDS = {
+        "candidate-accept",
+        "member-promote",
+    }
+
     if (
         command_name
         in STAFF_ONLY_COMMANDS
@@ -4983,6 +5118,20 @@ def interactions():
         return (
             staff_access_denied(data)
         )
+
+
+    if (
+        command_name
+        in RECRUITMENT_MANAGER_COMMANDS
+
+        and
+
+        not interaction_is_recruitment_manager(
+            data
+        )
+    ):
+
+        return recruitment_access_denied()
 
     if (
         command_name
@@ -5213,6 +5362,393 @@ def interactions():
                         ],
                     }
                 ],
+            },
+        })
+
+    # ========================================================
+    # /candidate-accept
+    # V3 RECRUITMENT MANAGEMENT
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "candidate-accept"
+    ):
+
+        options = (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        )
+
+        target_user_id = None
+
+        for option in options:
+
+            if option.get("name") == "membre":
+
+                target_user_id = str(
+                    option["value"]
+                )
+
+                break
+
+        if not target_user_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun candidat sélectionné.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        current_status = get_member_status_v3(
+            guild_id,
+            target_user_id,
+        )
+
+        if (
+            not current_status
+            or
+            current_status[0]
+            !=
+            "candidate"
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "ℹ️ Cette personne n'a pas "
+                        "le statut V3 **Candidat**. "
+                        "Aucune modification effectuée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                target_user_id,
+            )
+        )
+
+        if not policy_state["complete"]:
+
+            missing_documents = []
+
+            if not policy_state["corp_rules"]:
+
+                missing_documents.append(
+                    "Règlement Corp"
+                )
+
+            if not policy_state["charter"]:
+
+                missing_documents.append(
+                    "Charte Freeborn"
+                )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Validation impossible**\n\n"
+                        "Le candidat doit encore accepter : "
+                        + ", ".join(missing_documents)
+                        + ".",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        try:
+
+            role_result = (
+                apply_recruitment_status_role(
+                    guild_id,
+                    target_user_id,
+                    "candidate_accepted",
+                )
+            )
+
+            if (
+                role_result["add_status_code"]
+                not in
+                (200, 204)
+            ):
+
+                raise RuntimeError(
+                    "Candidate Accepted role assignment failed: "
+                    f"{role_result['add_status_code']}"
+                )
+
+            set_member_status_v3(
+                guild_id,
+                target_user_id,
+                "candidate_accepted",
+                discord_user_id,
+            )
+
+            add_audit_event_v3(
+                guild_id,
+                "candidate_accepted",
+                target_discord_user_id=
+                    target_user_id,
+                actor_discord_user_id=
+                    discord_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "V3 candidate acceptance failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Le passage vers "
+                        "**Candidat Accepté** a échoué. "
+                        "Aucune validation n'est confirmée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "✅ **Candidat validé**\n\n"
+                    f"<@{target_user_id}> est maintenant "
+                    "**Candidat Accepté**.\n"
+                    "Les anciens rôles transitoires ont été "
+                    "retirés automatiquement.",
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # /member-promote
+    # V3 RECRUITMENT MANAGEMENT
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "member-promote"
+    ):
+
+        options = (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        )
+
+        target_user_id = None
+
+        for option in options:
+
+            if option.get("name") == "membre":
+
+                target_user_id = str(
+                    option["value"]
+                )
+
+                break
+
+        if not target_user_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun candidat accepté sélectionné.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        current_status = get_member_status_v3(
+            guild_id,
+            target_user_id,
+        )
+
+        if (
+            not current_status
+            or
+            current_status[0]
+            !=
+            "candidate_accepted"
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "ℹ️ Cette personne n'a pas "
+                        "le statut **Candidat Accepté**. "
+                        "Aucune modification effectuée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                target_user_id,
+            )
+        )
+
+        if not policy_state["complete"]:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Promotion impossible**\n\n"
+                        "Les deux acceptations actuelles "
+                        "(Règlement Corp et Charte Freeborn) "
+                        "sont obligatoires.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if not has_verified_main_v3(
+            guild_id,
+            target_user_id,
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Promotion impossible**\n\n"
+                        "Aucun Main EVE valide n'est enregistré "
+                        "pour ce candidat. Il doit d'abord "
+                        "effectuer **/verify**.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        try:
+
+            role_result = (
+                apply_recruitment_status_role(
+                    guild_id,
+                    target_user_id,
+                    "member",
+                )
+            )
+
+            if (
+                role_result["add_status_code"]
+                not in
+                (200, 204)
+            ):
+
+                raise RuntimeError(
+                    "Member role assignment failed: "
+                    f"{role_result['add_status_code']}"
+                )
+
+            set_member_status_v3(
+                guild_id,
+                target_user_id,
+                "member",
+                discord_user_id,
+            )
+
+            add_audit_event_v3(
+                guild_id,
+                "member_promoted",
+                target_discord_user_id=
+                    target_user_id,
+                actor_discord_user_id=
+                    discord_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "V3 member promotion failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Le passage vers **Membre** "
+                        "a échoué. Aucune promotion "
+                        "n'est confirmée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "✅ **Recrutement terminé**\n\n"
+                    f"<@{target_user_id}> est maintenant "
+                    "**Membre**.\n"
+                    "Les rôles transitoires précédents ont "
+                    "été retirés automatiquement.",
+
+                "flags":
+                    64,
             },
         })
 
@@ -7464,6 +8000,66 @@ def register_commands():
 
             "default_member_permissions":
                 "0",
+        },
+
+        {
+            "name":
+                "candidate-accept",
+
+            "description":
+                "Valider un Candidat en Candidat Accepté",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type":
+                        6,
+
+                    "name":
+                        "membre",
+
+                    "description":
+                        "Candidat à valider",
+
+                    "required":
+                        True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "member-promote",
+
+            "description":
+                "Promouvoir un Candidat Accepté en Membre",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type":
+                        6,
+
+                    "name":
+                        "membre",
+
+                    "description":
+                        "Candidat Accepté à promouvoir",
+
+                    "required":
+                        True,
+                }
+            ],
         },
 
         {
