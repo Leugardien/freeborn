@@ -38,46 +38,16 @@ DISCORD_PUBLIC_KEY = os.environ["DISCORD_PUBLIC_KEY"]
 DISCORD_APPLICATION_ID = os.environ["DISCORD_APPLICATION_ID"]
 DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
 
-# ============================================================
-# DISCORD V3 CONFIGURATION
-# ============================================================
-#
-# V3 rule:
-# - Discord's native Membership Screening handles the Discord rules.
-# - There is no "Accès Discord" role.
-# - Recruitment status roles are Invité / Candidat /
-#   Candidat Accepté / Membre.
-# - IDs belonging to the Discord architecture must come from
-#   environment variables rather than being hard-coded here.
-#
-# During the V3 migration, compatibility fallbacks keep the current
-# V2 configuration usable on this development branch. They will be
-# removed after the new Discord IDs have been configured in Render.
+# Discord channels used for persistent command history
+DISCORD_EVE_VERIFICATION_CHANNEL_ID = "1535497827503964190"
+DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID = "1535497895929708648"
 
-DISCORD_RECRUITMENT_CHANNEL_ID = os.environ.get(
-    "DISCORD_RECRUITMENT_CHANNEL_ID",
-    "1535497827503964190",
-)
-
-DISCORD_BOT_MANAGEMENT_CHANNEL_ID = os.environ.get(
-    "DISCORD_BOT_MANAGEMENT_CHANNEL_ID",
-    "1535497895929708648",
-)
-
-# Compatibility aliases used by the existing V2 command code.
-# They intentionally point to the V3 configuration above.
-DISCORD_EVE_VERIFICATION_CHANNEL_ID = (
-    DISCORD_RECRUITMENT_CHANNEL_ID
-)
-
-DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID = (
-    DISCORD_BOT_MANAGEMENT_CHANNEL_ID
-)
-
-
-# Core membership / EVE roles already used by V2.
 DISCORD_MEMBER_ROLE_ID = os.environ[
     "DISCORD_MEMBER_ROLE_ID"
+]
+
+DISCORD_RECRUIT_ROLE_ID = os.environ[
+    "DISCORD_RECRUIT_ROLE_ID"
 ]
 
 DISCORD_EVE_VERIFIED_ROLE_ID = os.environ[
@@ -92,123 +62,31 @@ DISCORD_ALT_CHARACTER_ROLE_ID = os.environ[
     "DISCORD_ALT_CHARACTER_ROLE_ID"
 ]
 
+DISCORD_FOUNDER_ROLE_ID = os.environ[
+    "DISCORD_FOUNDER_ROLE_ID"
+]
 
-# Recruitment V3 roles.
-# The Candidat role temporarily accepts the former V2
-# DISCORD_RECRUIT_ROLE_ID as a migration fallback.
-DISCORD_GUEST_ROLE_ID = os.environ.get(
-    "DISCORD_GUEST_ROLE_ID"
-)
-
-DISCORD_CANDIDATE_ROLE_ID = (
-    os.environ.get("DISCORD_CANDIDATE_ROLE_ID")
-    or
-    os.environ.get("DISCORD_RECRUIT_ROLE_ID")
-)
-
-DISCORD_CANDIDATE_ACCEPTED_ROLE_ID = os.environ.get(
-    "DISCORD_CANDIDATE_ACCEPTED_ROLE_ID"
-)
-
-# Compatibility alias for the existing V2 callback.
-DISCORD_RECRUIT_ROLE_ID = (
-    DISCORD_CANDIDATE_ROLE_ID
-)
-
-
-# New Freeborn Legacy hierarchy.
 DISCORD_CEO_ROLE_ID = os.environ[
     "DISCORD_CEO_ROLE_ID"
 ]
 
-DISCORD_HIGH_COUNCIL_ROLE_ID = os.environ.get(
-    "DISCORD_HIGH_COUNCIL_ROLE_ID"
-)
-
-DISCORD_DIRECTION_ROLE_ID = (
-    os.environ.get("DISCORD_DIRECTION_ROLE_ID")
-    or
-    os.environ.get("DISCORD_DIRECTOR_ROLE_ID")
-)
-
-DISCORD_HR_ROLE_ID = os.environ.get(
-    "DISCORD_HR_ROLE_ID"
-)
-
-DISCORD_OFFICER_ROLE_ID = os.environ.get(
-    "DISCORD_OFFICER_ROLE_ID"
-)
-
-DISCORD_FLEET_COMMANDER_ROLE_ID = os.environ.get(
-    "DISCORD_FLEET_COMMANDER_ROLE_ID"
-)
-
-DISCORD_VETERAN_ROLE_ID = os.environ.get(
-    "DISCORD_VETERAN_ROLE_ID"
-)
-
-# Compatibility alias for the existing V2 code.
-DISCORD_DIRECTOR_ROLE_ID = (
-    DISCORD_DIRECTION_ROLE_ID
-)
-
+DISCORD_DIRECTOR_ROLE_ID = os.environ[
+    "DISCORD_DIRECTOR_ROLE_ID"
+]
 
 FLASK_SECRET_KEY = os.environ["FLASK_SECRET_KEY"]
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 
 # ============================================================
-# V3 ROLE ACCESS GROUPS
+# STAFF ROLES
 # ============================================================
 
-def configured_role_ids(*role_ids):
-    """
-    Return only configured Discord role IDs.
-
-    Optional V3 roles are deliberately ignored until their IDs are
-    added to the environment. This lets us prepare the V3 code before
-    changing the live Render configuration.
-    """
-
-    return {
-        str(role_id)
-        for role_id in role_ids
-        if role_id
-    }
-
-
-SYSTEM_ADMIN_ROLE_IDS = configured_role_ids(
+STAFF_ROLE_IDS = {
+    DISCORD_FOUNDER_ROLE_ID,
     DISCORD_CEO_ROLE_ID,
-    DISCORD_HIGH_COUNCIL_ROLE_ID,
-    DISCORD_DIRECTION_ROLE_ID,
-)
-
-RECRUITMENT_MANAGER_ROLE_IDS = configured_role_ids(
-    DISCORD_CEO_ROLE_ID,
-    DISCORD_HIGH_COUNCIL_ROLE_ID,
-    DISCORD_DIRECTION_ROLE_ID,
-    DISCORD_HR_ROLE_ID,
-)
-
-MODERATION_ROLE_IDS = configured_role_ids(
-    DISCORD_CEO_ROLE_ID,
-    DISCORD_HIGH_COUNCIL_ROLE_ID,
-    DISCORD_DIRECTION_ROLE_ID,
-    DISCORD_HR_ROLE_ID,
-    DISCORD_OFFICER_ROLE_ID,
-)
-
-AUDIT_VIEWER_ROLE_IDS = configured_role_ids(
-    DISCORD_CEO_ROLE_ID,
-    DISCORD_HIGH_COUNCIL_ROLE_ID,
-    DISCORD_DIRECTION_ROLE_ID,
-    DISCORD_HR_ROLE_ID,
-)
-
-# Compatibility name used by the existing V2 staff commands.
-# For now, those sensitive commands remain limited to the
-# administrative group and are not broadened to RH/Officier.
-STAFF_ROLE_IDS = SYSTEM_ADMIN_ROLE_IDS
+    DISCORD_DIRECTOR_ROLE_ID,
+}
 
 
 # ============================================================
@@ -1824,8 +1702,8 @@ def staff_access_denied(
             "content":
                 "⛔ **Accès refusé**\n\n"
                 "Cette action est réservée "
-                "aux rôles **CEO**, "
-                "**Haut Conseil** et **Direction**.",
+                "aux rôles **Fondateur**, "
+                "**CEO** et **Directeur**.",
 
             "flags":
                 flags,
