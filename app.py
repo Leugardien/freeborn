@@ -6593,7 +6593,7 @@ def interactions():
 
         welcome_image_url = (
             f"{PUBLIC_BASE_URL}"
-            "/assets/bienvenue.png"
+            "/assets/bienvenue-v2.png"
         )
 
         return jsonify({
