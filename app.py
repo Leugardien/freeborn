@@ -4434,7 +4434,10 @@ def handle_autocomplete(
                         f"{DISCORD_API}/guilds/"
                         f"{guild_id}/members/"
                         f"{candidate_user_id}",
-                        headers=discord_headers(),
+                        headers={
+                            "Authorization":
+                                f"Bot {DISCORD_BOT_TOKEN}",
+                        },
                         timeout=10,
                     )
                 )
