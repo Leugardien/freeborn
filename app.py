@@ -6530,24 +6530,29 @@ def interactions():
             "data": {
                 "embeds": [
                     {
-                        "title":
-                            "🛡️ RÈGLEMENT DISCORD — FREEBORN LEGACY",
-
-                        "description":
-                            "Le règlement présenté ci-dessous complète "
-                            "le **règlement natif de Discord**, qui reste "
-                            "le système officiel d'acceptation lors de "
-                            "l'arrivée sur le serveur.\n\n"
-                            "📜 **Son respect est obligatoire pendant "
-                            "toute ta présence sur Freeborn Legacy.**",
-
-                        "color":
-                            0x2F81F7,
-
                         "image": {
                             "url":
                                 rules_image_url
                         },
+
+                        "color":
+                            0x2F81F7,
+                    },
+
+                    {
+                        "title":
+                            "🛡️ RÈGLEMENT DISCORD — FREEBORN LEGACY",
+
+                        "description":
+                            "📜 L'acceptation du règlement est gérée "
+                            "directement par **Discord** lors de l'arrivée "
+                            "sur le serveur.\n\n"
+                            "Le visuel ci-dessus en présente les principes "
+                            "essentiels. **Son respect reste obligatoire "
+                            "pendant toute ta présence sur Freeborn Legacy.**",
+
+                        "color":
+                            0x2F81F7,
 
                         "fields": [
                             {
@@ -6567,10 +6572,9 @@ def interactions():
 
                         "footer": {
                             "text":
-                                "Freeborn Legacy • Règlement Discord • "
-                                "Communauté, respect, organisation"
+                                "Freeborn Legacy • Règlement Discord"
                         },
-                    }
+                    },
                 ],
             },
         })
@@ -6599,67 +6603,39 @@ def interactions():
             "data": {
                 "embeds": [
                     {
-                        "title":
-                            "🛡️ BIENVENUE CHEZ FREEBORN LEGACY",
-
-                        "description":
-                            "Tu viens de rejoindre le serveur officiel "
-                            "de **Freeborn Legacy**.\n\n"
-                            "🧭 **Prochaine étape : ton orientation**\n"
-                            "Rends-toi dans le salon **Orientation** "
-                            "pour choisir le parcours qui te correspond.",
-
-                        "color":
-                            0x2F81F7,
-
                         "image": {
                             "url":
                                 welcome_image_url
                         },
 
-                        "fields": [
-                            {
-                                "name":
-                                    "🔵 Invité",
+                        "color":
+                            0x2F81F7,
+                    },
 
-                                "value":
-                                    "Accès aux espaces diplomatiques et "
-                                    "communautaires prévus pour les visiteurs.",
+                    {
+                        "title":
+                            "🧭 PROCHAINE ÉTAPE : ORIENTATION",
 
-                                "inline":
-                                    True,
-                            },
-                            {
-                                "name":
-                                    "🟢 Candidat",
+                        "description":
+                            "Rends-toi dans le salon **Orientation** "
+                            "pour choisir ton parcours.\n\n"
+                            "🔵 **Invité** → accès aux espaces diplomatiques "
+                            "et communautaires prévus pour les visiteurs.\n"
+                            "🟢 **Candidat** → accès au parcours de "
+                            "recrutement Freeborn Legacy.\n\n"
+                            "📌 **Suis les étapes dans l'ordre : "
+                            "Freeborn Verify s'occupe automatiquement "
+                            "de la suite.**",
 
-                                "value":
-                                    "Accès au parcours de recrutement "
-                                    "Freeborn Legacy.",
-
-                                "inline":
-                                    True,
-                            },
-                            {
-                                "name":
-                                    "📌 À retenir",
-
-                                "value":
-                                    "Suis les étapes dans l'ordre : "
-                                    "**Freeborn Verify s'occupe automatiquement "
-                                    "de la suite.**",
-
-                                "inline":
-                                    False,
-                            },
-                        ],
+                        "color":
+                            0x2F81F7,
 
                         "footer": {
                             "text":
                                 "Freeborn Legacy • Bienvenue • "
                                 "Orientation → Invité ou Candidat"
                         },
-                    }
+                    },
                 ],
             },
         })
