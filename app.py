@@ -56,6 +56,20 @@ DISCORD_LOGS_CHANNEL_ID = os.environ.get(
     "DISCORD_LOGS_CHANNEL_ID"
 )
 
+
+# Version identifiers recorded with each acceptance.
+# Increase a version when the corresponding document changes and
+# members must accept the new version again.
+CORP_RULES_VERSION = os.environ.get(
+    "CORP_RULES_VERSION",
+    "1",
+)
+
+FREEBORN_CHARTER_VERSION = os.environ.get(
+    "FREEBORN_CHARTER_VERSION",
+    "1",
+)
+
 DISCORD_EVE_VERIFICATION_CHANNEL_ID = (
     DISCORD_RECRUITMENT_CHANNEL_ID
 )
@@ -1300,6 +1314,38 @@ def add_audit_event_v3(
             )
 
         conn.commit()
+
+
+def has_policy_acceptance_v3(
+    guild_id,
+    discord_user_id,
+    document_type,
+    document_version,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT accepted_at
+                FROM policy_acceptances
+                WHERE guild_id = %s
+                AND discord_user_id = %s
+                AND document_type = %s
+                AND document_version = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                    str(document_type),
+                    str(document_version),
+                ),
+            )
+
+            return cur.fetchone()
 
 
 def save_policy_acceptance_v3(
@@ -4092,6 +4138,209 @@ def handle_message_component(
             },
         })
 
+    # ========================================================
+    # V3 POLICY ACCEPTANCE
+    # ========================================================
+
+    if custom_id in {
+        "v3_accept_corp_rules",
+        "v3_accept_charter",
+    }:
+
+        try:
+
+            actor_user_id = str(
+                data["member"]["user"]["id"]
+            )
+
+            guild_id = str(
+                data["guild_id"]
+            )
+
+            channel_id = str(
+                data.get("channel_id", "")
+            )
+
+            message_id = str(
+                data.get("message", {}).get(
+                    "id",
+                    "",
+                )
+            )
+
+        except Exception:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Impossible d'identifier "
+                        "ton compte ou ce message.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        guild_config = get_guild_config(
+            guild_id
+        )
+
+        if (
+            not guild_config
+            or
+            not guild_config[6]
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ Ce serveur n'est pas "
+                        "configuré pour Freeborn Verify V3.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        current_status = get_member_status_v3(
+            guild_id,
+            actor_user_id,
+        )
+
+        allowed_statuses = {
+            "candidate",
+            "candidate_accepted",
+            "member",
+        }
+
+        if (
+            not current_status
+            or
+            current_status[0]
+            not in allowed_statuses
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "ℹ️ Cette acceptation est réservée "
+                        "aux **Candidats** et aux membres "
+                        "du parcours Freeborn.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if custom_id == "v3_accept_corp_rules":
+
+            document_type = "corp_rules"
+            document_version = CORP_RULES_VERSION
+            document_label = "Règlement Corp"
+            audit_event = "policy_accept_corp_rules"
+
+        else:
+
+            document_type = "freeborn_charter"
+            document_version = FREEBORN_CHARTER_VERSION
+            document_label = "Charte Freeborn"
+            audit_event = "policy_accept_charter"
+
+        existing_acceptance = (
+            has_policy_acceptance_v3(
+                guild_id,
+                actor_user_id,
+                document_type,
+                document_version,
+            )
+        )
+
+        if existing_acceptance:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        f"✅ Tu as déjà accepté "
+                        f"**{document_label}** "
+                        f"(version `{document_version}`).\n"
+                        f"Acceptation enregistrée le "
+                        f"**{format_datetime(existing_acceptance[0])}**.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        try:
+
+            save_policy_acceptance_v3(
+                guild_id,
+                actor_user_id,
+                document_type,
+                document_version,
+                message_id=message_id,
+                channel_id=channel_id,
+            )
+
+            add_audit_event_v3(
+                guild_id,
+                audit_event,
+                target_discord_user_id=
+                    actor_user_id,
+                actor_discord_user_id=
+                    actor_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "V3 policy acceptance failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ L'acceptation n'a pas pu "
+                        "être enregistrée. "
+                        "Aucune validation n'a été confirmée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    f"✅ **{document_label} accepté**\n\n"
+                    f"Version : `{document_version}`\n"
+                    "Ta preuve d'acceptation horodatée "
+                    "a été enregistrée par Freeborn Verify.",
+
+                "flags":
+                    64,
+            },
+        })
+
     # --------------------------------------------------------
     # Ignore unknown components
     # --------------------------------------------------------
@@ -4710,6 +4959,8 @@ def interactions():
 
     STAFF_ONLY_COMMANDS = {
         "orientation-panel",
+        "corp-rules-panel",
+        "charter-panel",
         "member-remove",
         "member-list",
         "db-health",
@@ -4740,6 +4991,8 @@ def interactions():
             -
             {
                 "orientation-panel",
+                "corp-rules-panel",
+                "charter-panel",
             }
         )
 
@@ -4861,6 +5114,102 @@ def interactions():
                                 "custom_id":
                                     "v3_orientation_candidate",
                             },
+                        ],
+                    }
+                ],
+            },
+        })
+
+    # ========================================================
+    # /corp-rules-panel
+    # V3 STAFF SETUP
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "corp-rules-panel"
+    ):
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "## 📜 Règlement Corp\n\n"
+                    "Lis le **Règlement Corp** publié dans "
+                    "ce salon, puis utilise le bouton ci-dessous "
+                    "pour enregistrer ton acceptation.\n\n"
+                    f"Version actuelle : `{CORP_RULES_VERSION}`",
+
+                "components": [
+                    {
+                        "type":
+                            1,
+
+                        "components": [
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    3,
+
+                                "label":
+                                    "J'accepte le Règlement Corp",
+
+                                "custom_id":
+                                    "v3_accept_corp_rules",
+                            }
+                        ],
+                    }
+                ],
+            },
+        })
+
+    # ========================================================
+    # /charter-panel
+    # V3 STAFF SETUP
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "charter-panel"
+    ):
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "## 📘 Charte Freeborn\n\n"
+                    "Lis la **Charte Freeborn** publiée dans "
+                    "ce salon, puis utilise le bouton ci-dessous "
+                    "pour enregistrer ton acceptation.\n\n"
+                    f"Version actuelle : `{FREEBORN_CHARTER_VERSION}`",
+
+                "components": [
+                    {
+                        "type":
+                            1,
+
+                        "components": [
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    3,
+
+                                "label":
+                                    "J'accepte la Charte Freeborn",
+
+                                "custom_id":
+                                    "v3_accept_charter",
+                            }
                         ],
                     }
                 ],
@@ -7081,6 +7430,34 @@ def register_commands():
 
             "description":
                 "Publier le panneau Orientation V3",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "corp-rules-panel",
+
+            "description":
+                "Publier le bouton d'acceptation du Règlement Corp",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "charter-panel",
+
+            "description":
+                "Publier le bouton d'acceptation de la Charte Freeborn",
 
             "type":
                 1,
