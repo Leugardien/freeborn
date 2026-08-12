@@ -96,12 +96,12 @@ DISCORD_CHARTER_CHANNEL_ID = os.environ.get(
 # members must accept the new version again.
 CORP_RULES_VERSION = os.environ.get(
     "CORP_RULES_VERSION",
-    "1",
+    "1.0",
 )
 
 FREEBORN_CHARTER_VERSION = os.environ.get(
     "FREEBORN_CHARTER_VERSION",
-    "1",
+    "1.0",
 )
 
 DISCORD_EVE_VERIFICATION_CHANNEL_ID = (
@@ -5483,7 +5483,7 @@ def handle_message_component(
 
             document_type = "freeborn_charter"
             document_version = FREEBORN_CHARTER_VERSION
-            document_label = "Charte Freeborn"
+            document_label = "Charte Freeborn Legacy"
             audit_event = "policy_accept_charter"
             dedicated_channel_type = "charter"
             dedicated_channel_label = "charte-freeborn"
@@ -5556,13 +5556,82 @@ def handle_message_component(
                     actor_user_id,
             )
 
+            recorded_acceptance = (
+                has_policy_acceptance_v3(
+                    guild_id,
+                    actor_user_id,
+                    document_type,
+                    document_version,
+                )
+            )
+
+            main_row = get_guild_main_character_v3(
+                guild_id,
+                actor_user_id,
+            )
+
+            accepted_at_text = (
+                format_datetime(recorded_acceptance[0])
+                if recorded_acceptance
+                else "Horodatage indisponible"
+            )
+
+            eve_identity_text = (
+                (
+                    f"**{main_row[1]}** "
+                    f"(`{main_row[0]}`)"
+                )
+                if main_row
+                else
+                "Non encore liée — validation EVE à venir"
+            )
+
+            log_title = (
+                "📕 **RÈGLEMENT CORPORATION ACCEPTÉ**"
+                if document_type == "corp_rules"
+                else
+                "📜 **CHARTE FREEBORN LEGACY ACCEPTÉE**"
+            )
+
+            policy_progress = (
+                has_required_policy_acceptances_v3(
+                    guild_id,
+                    actor_user_id,
+                )
+            )
+
+            documentation_complete = bool(
+                policy_progress["complete"]
+            )
+
+            documentation_status_text = (
+                "✅ **COMPLET — Règlement + Charte acceptés**"
+                if documentation_complete
+                else
+                "⏳ **EN COURS — un document reste à accepter**"
+            )
+
             log_v3_event_to_discord(
                 guild_config,
-                "📜 **Acceptation enregistrée**\n"
-                f"Membre : <@{actor_user_id}> (`{actor_user_id}`)\n"
+                f"{log_title}\n"
+                f"Discord : <@{actor_user_id}> (`{actor_user_id}`)\n"
+                f"Main EVE : {eve_identity_text}\n"
                 f"Document : **{document_label}**\n"
-                f"Version : `{document_version}`",
+                f"Version : `{document_version}`\n"
+                f"Accepté le : **{accepted_at_text}**\n"
+                f"Canal : <#{channel_id}>\n"
+                f"Parcours documentaire : {documentation_status_text}",
             )
+
+            if documentation_complete:
+                add_audit_event_v3(
+                    guild_id,
+                    "policy_documents_complete",
+                    target_discord_user_id=
+                        actor_user_id,
+                    actor_discord_user_id=
+                        actor_user_id,
+                )
 
         except Exception as error:
 
@@ -5595,7 +5664,24 @@ def handle_message_component(
                     f"✅ **{document_label} accepté**\n\n"
                     f"Version : `{document_version}`\n"
                     "Ta preuve d'acceptation horodatée "
-                    "a été enregistrée par Freeborn Verify.",
+                    "a été enregistrée par Freeborn Verify.\n\n"
+                    + (
+                        (
+                            "✅ **Parcours documentaire terminé.**\n"
+                            "Le Règlement Corporation et la Charte "
+                            "Freeborn Legacy sont maintenant validés."
+                        )
+                        if documentation_complete
+                        else
+                        (
+                            "➡️ Tu peux maintenant poursuivre avec "
+                            "la **Charte Freeborn Legacy**."
+                            if document_type == "corp_rules"
+                            else
+                            "➡️ Le **Règlement Corporation** doit encore "
+                            "être accepté pour terminer cette étape."
+                        )
+                    ),
 
                 "flags":
                     64,
@@ -7010,7 +7096,7 @@ def interactions():
 
     # ========================================================
     # /reglement-corp-panneau
-    # V3 STAFF SETUP
+    # V3 STAFF SETUP — official 3-part visual publication
     # ========================================================
 
     if (
@@ -7039,17 +7125,97 @@ def interactions():
                 "règlement-corp",
             )
 
+        corp_rules_image_urls = [
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/reglement-corp-part1.png"
+            ),
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/reglement-corp-part2.png"
+            ),
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/reglement-corp-part3.png"
+            ),
+        ]
+
         return jsonify({
             "type":
                 4,
 
             "data": {
-                "content":
-                    "## 📜 Règlement Corp\n\n"
-                    "Lis le **Règlement Corp** publié dans "
-                    "ce salon, puis utilise le bouton ci-dessous "
-                    "pour enregistrer ton acceptation.\n\n"
-                    f"Version actuelle : `{CORP_RULES_VERSION}`",
+                "embeds": [
+                    {
+                        "image": {
+                            "url":
+                                corp_rules_image_urls[0]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "image": {
+                            "url":
+                                corp_rules_image_urls[1]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "image": {
+                            "url":
+                                corp_rules_image_urls[2]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "title":
+                            "📕 RÈGLEMENT CORPORATION — FREEBORN LEGACY",
+
+                        "description":
+                            "Lis attentivement les **3 parties** du "
+                            "Règlement Corporation ci-dessus.\n\n"
+                            "En validant, tu confirmes avoir lu et "
+                            "accepté **l'intégralité du règlement**. "
+                            "Freeborn Verify enregistre une preuve "
+                            "horodatée de ton acceptation.",
+
+                        "color":
+                            0x0A84FF,
+
+                        "fields": [
+                            {
+                                "name":
+                                    "📌 Version en vigueur",
+
+                                "value":
+                                    f"`{CORP_RULES_VERSION}` "
+                                    "— 11 août 2026",
+
+                                "inline":
+                                    False,
+                            },
+                            {
+                                "name":
+                                    "➡️ Étape suivante",
+
+                                "value":
+                                    "Après le Règlement Corporation, "
+                                    "poursuis avec la **Charte Freeborn**.",
+
+                                "inline":
+                                    False,
+                            },
+                        ],
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Règlement Corporation"
+                        },
+                    },
+                ],
 
                 "components": [
                     {
@@ -7065,7 +7231,7 @@ def interactions():
                                     3,
 
                                 "label":
-                                    "J'ai lu et accepté",
+                                    "J'accepte le Règlement Corporation",
 
                                 "custom_id":
                                     "v3_accept_corp_rules",
@@ -7078,7 +7244,7 @@ def interactions():
 
     # ========================================================
     # /charte-panneau
-    # V3 STAFF SETUP
+    # V3 STAFF SETUP — official 3-part visual publication
     # ========================================================
 
     if (
@@ -7107,17 +7273,100 @@ def interactions():
                 "charte-freeborn",
             )
 
+        charter_image_urls = [
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/charte-corp-part1.png"
+            ),
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/charte-corp-part2.png"
+            ),
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/charte-corp-part3.png"
+            ),
+        ]
+
         return jsonify({
             "type":
                 4,
 
             "data": {
-                "content":
-                    "## 📘 Charte Freeborn\n\n"
-                    "Lis la **Charte Freeborn** publiée dans "
-                    "ce salon, puis utilise le bouton ci-dessous "
-                    "pour enregistrer ton acceptation.\n\n"
-                    f"Version actuelle : `{FREEBORN_CHARTER_VERSION}`",
+                "embeds": [
+                    {
+                        "image": {
+                            "url":
+                                charter_image_urls[0]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "image": {
+                            "url":
+                                charter_image_urls[1]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "image": {
+                            "url":
+                                charter_image_urls[2]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "title":
+                            "📜 CHARTE DE FREEBORN LEGACY",
+
+                        "description":
+                            "Lis attentivement les **3 parties** de "
+                            "la Charte Freeborn Legacy ci-dessus.\n\n"
+                            "En validant, tu confirmes avoir lu et "
+                            "accepté **l'intégralité de la Charte**. "
+                            "Freeborn Verify enregistre une preuve "
+                            "horodatée de ton acceptation.",
+
+                        "color":
+                            0x0A84FF,
+
+                        "fields": [
+                            {
+                                "name":
+                                    "📌 Version en vigueur",
+
+                                "value":
+                                    f"`{FREEBORN_CHARTER_VERSION}` "
+                                    "— 11 août 2026",
+
+                                "inline":
+                                    False,
+                            },
+                            {
+                                "name":
+                                    "✅ Validation documentaire",
+
+                                "value":
+                                    "Le parcours documentaire n'est "
+                                    "considéré comme terminé que lorsque "
+                                    "le **Règlement Corporation** et la "
+                                    "**Charte Freeborn Legacy** sont tous "
+                                    "les deux acceptés.",
+
+                                "inline":
+                                    False,
+                            },
+                        ],
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Charte Corporation"
+                        },
+                    },
+                ],
 
                 "components": [
                     {
@@ -7133,7 +7382,7 @@ def interactions():
                                     3,
 
                                 "label":
-                                    "J'ai lu et accepté",
+                                    "J'accepte la Charte Freeborn Legacy",
 
                                 "custom_id":
                                     "v3_accept_charter",
