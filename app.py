@@ -1277,6 +1277,48 @@ def interaction_member_role_ids(data):
         return set()
 
 
+
+def infer_recruitment_status_from_interaction_roles(
+    data,
+    guild_id,
+):
+    """
+    Infer the current V3 recruitment status from the live Discord
+    member roles included in an interaction payload.
+
+    The database remains the normal source of truth. This helper is
+    only used to recover from a missing/stale member_statuses row,
+    for example after a manual role adjustment by staff.
+    """
+
+    live_role_ids = interaction_member_role_ids(
+        data
+    )
+
+    role_priority = (
+        "member",
+        "candidate_accepted",
+        "candidate",
+    )
+
+    for status in role_priority:
+
+        role_id = resolve_guild_role_id(
+            guild_id,
+            status,
+        )
+
+        if (
+            role_id
+            and
+            str(role_id) in live_role_ids
+        ):
+
+            return status
+
+    return None
+
+
 def apply_recruitment_status_role(
     guild_id,
     discord_user_id,
@@ -5448,12 +5490,52 @@ def handle_message_component(
             "member",
         }
 
-        if (
-            not current_status
-            or
-            current_status[0]
-            not in allowed_statuses
-        ):
+        current_status_name = (
+            str(current_status[0])
+            if current_status
+            else None
+        )
+
+        if current_status_name not in allowed_statuses:
+
+            live_status = (
+                infer_recruitment_status_from_interaction_roles(
+                    data,
+                    guild_id,
+                )
+            )
+
+            if live_status in allowed_statuses:
+
+                try:
+
+                    set_member_status_v3(
+                        guild_id,
+                        actor_user_id,
+                        live_status,
+                        changed_by_discord_user_id=
+                            actor_user_id,
+                    )
+
+                    current_status_name = live_status
+
+                    add_audit_event_v3(
+                        guild_id,
+                        "member_status_reconciled_from_discord_roles",
+                        target_discord_user_id=
+                            actor_user_id,
+                        actor_discord_user_id=
+                            actor_user_id,
+                    )
+
+                except Exception as error:
+
+                    print(
+                        "Policy role/status reconciliation error:",
+                        repr(error),
+                    )
+
+        if current_status_name not in allowed_statuses:
 
             return jsonify({
                 "type":
@@ -5462,8 +5544,8 @@ def handle_message_component(
                 "data": {
                     "content":
                         "ℹ️ Cette acceptation est réservée "
-                        "aux **Candidats** et aux membres "
-                        "du parcours Freeborn.",
+                        "aux **Candidats**, **Candidats Acceptés** "
+                        "et **Membres** du parcours Freeborn.",
 
                     "flags":
                         64,
