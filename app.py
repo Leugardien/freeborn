@@ -3841,12 +3841,11 @@ def get_eve_character_affiliation(
 
     try:
 
-        response = requests.get(
+        response = requests.post(
             f"{ESI_BASE_URL}/characters/affiliation/",
-            params={
-                "characters":
-                    str(int(character_id)),
-            },
+            json=[
+                int(character_id),
+            ],
             timeout=15,
         )
 
