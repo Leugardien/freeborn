@@ -3829,6 +3829,96 @@ def get_current_eve_character(
     return data
 
 
+def get_eve_character_affiliation(
+    character_id
+):
+    """Return ESI affiliation data for one character, or None on failure.
+
+    The dedicated affiliation route is preferred for corporation membership
+    checks because it is specifically intended to expose corporation/alliance
+    affiliation. The caller keeps the regular character endpoint as fallback.
+    """
+
+    try:
+
+        response = requests.get(
+            f"{ESI_BASE_URL}/characters/affiliation/",
+            params={
+                "characters":
+                    str(int(character_id)),
+            },
+            timeout=15,
+        )
+
+    except Exception as error:
+
+        print(
+            "ESI affiliation lookup error:",
+            character_id,
+            repr(error),
+        )
+
+        return None
+
+    if (
+        response.status_code
+        !=
+        200
+    ):
+
+        print(
+            "ESI affiliation lookup failed:",
+            character_id,
+            response.status_code,
+            response.text[:500],
+        )
+
+        return None
+
+    try:
+
+        data = response.json()
+
+    except Exception as error:
+
+        print(
+            "ESI affiliation JSON decode failed:",
+            character_id,
+            repr(error),
+        )
+
+        return None
+
+    if (
+        not isinstance(data, list)
+        or
+        not data
+    ):
+
+        return None
+
+    affiliation = data[0]
+
+    if (
+        str(affiliation.get("character_id"))
+        !=
+        str(int(character_id))
+        or
+        "corporation_id"
+        not in affiliation
+    ):
+
+        return None
+
+    return {
+        "data":
+            affiliation,
+
+        "response":
+            response,
+    }
+
+
 # ============================================================
 # DISCORD HELPERS
 # ============================================================
@@ -9857,57 +9947,89 @@ def callback():
                 character_name=character_name,
             ), 502
 
-    character_response = requests.get(
-        (
-            f"{ESI_BASE_URL}/characters/"
-            f"{character_id}/"
-        ),
-        timeout=15,
+    affiliation_source = "characters/affiliation"
+    affiliation_result = get_eve_character_affiliation(
+        character_id
     )
 
-    if (
-        character_response.status_code
-        !=
-        200
-    ):
+    if affiliation_result:
 
-        return freeborn_web_page(
-            "Personnage EVE indisponible",
-            "Les informations du personnage n'ont pas pu être récupérées auprès d'EVE Online.",
-            status="error",
-        ), 400
+        character_data = (
+            affiliation_result["data"]
+        )
 
-    character_data = (
-        character_response.json()
-    )
+        corporation_response = (
+            affiliation_result["response"]
+        )
 
-    corporation_id = (
-        character_data[
-            "corporation_id"
-        ]
-    )
+        corporation_id = (
+            character_data[
+                "corporation_id"
+            ]
+        )
+
+    else:
+
+        # Fallback to the existing public character route so an outage or
+        # unexpected response from /characters/affiliation/ does not break
+        # the integration flow.
+        affiliation_source = "characters/{character_id}"
+
+        character_response = requests.get(
+            (
+                f"{ESI_BASE_URL}/characters/"
+                f"{character_id}/"
+            ),
+            timeout=15,
+        )
+
+        if (
+            character_response.status_code
+            !=
+            200
+        ):
+
+            return freeborn_web_page(
+                "Personnage EVE indisponible",
+                "Les informations du personnage n'ont pas pu être récupérées auprès d'EVE Online.",
+                status="error",
+            ), 400
+
+        character_data = (
+            character_response.json()
+        )
+
+        corporation_id = (
+            character_data[
+                "corporation_id"
+            ]
+        )
+
+        corporation_response = (
+            character_response
+        )
 
     # ========================================================
     # TEMPORARY ESI CORPORATION DIAGNOSTIC
     # Safe diagnostic only: no token, code, state or secret logged.
     # ========================================================
 
-    esi_date = character_response.headers.get(
+    esi_date = corporation_response.headers.get(
         "Date",
         "",
     )
 
-    esi_expires = character_response.headers.get(
+    esi_expires = corporation_response.headers.get(
         "Expires",
         "",
     )
 
-    esi_age = character_response.headers.get(
+    esi_age = corporation_response.headers.get(
         "Age",
         "",
     )
 
-    esi_etag = character_response.headers.get(
+    esi_etag = corporation_response.headers.get(
         "ETag",
         "",
     )
@@ -9925,6 +10047,7 @@ def callback():
         f"corporation_id_esi={corporation_id} "
         f"corporation_id_expected={expected_corporation_id} "
         f"match={corporation_match} "
+        f"affiliation_source={affiliation_source!r} "
         f"verification_type={verification_type!r} "
         f"guild_id={guild_id} "
         f"esi_date={esi_date!r} "
