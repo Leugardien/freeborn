@@ -9025,15 +9025,20 @@ def freeborn_web_page(
 ):
 
     status_map = {
-        "success": ("✅", "Succès"),
-        "error": ("❌", "Action refusée"),
-        "warning": ("⚠️", "Attention"),
-        "info": ("🛡️", "Freeborn Verify"),
+        "success": ("✓", "VALIDATION CONFIRMÉE", "#22C55E"),
+        "pending": ("⌛", "SYNCHRONISATION ESI", "#FFB300"),
+        "warning": ("i", "INFORMATIONS", "#0A84FF"),
+        "error": ("×", "ERREUR", "#FF3B30"),
+        "info": ("i", "INFORMATIONS", "#00E5FF"),
     }
 
-    icon, badge = status_map.get(status, status_map["info"])
+    icon, badge, accent = status_map.get(
+        status,
+        status_map["info"],
+    )
+
     safe_title = escape(str(title))
-    safe_message = escape(str(message))
+    safe_message = escape(str(message)).replace("\n", "<br>")
     safe_character = (
         escape(str(character_name))
         if character_name
@@ -9041,7 +9046,12 @@ def freeborn_web_page(
     )
 
     character_html = (
-        f'<div class="character">Personnage EVE : <strong>{safe_character}</strong></div>'
+        f"""
+        <div class="character">
+            <span>Personnage EVE</span>
+            <strong>{safe_character}</strong>
+        </div>
+        """
         if safe_character
         else ""
     )
@@ -9051,33 +9061,171 @@ def freeborn_web_page(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#02070d">
+<link rel="icon" type="image/png" href="/assets/favicon.png">
 <title>Freeborn Legacy — {safe_title}</title>
 <style>
-:root {{ color-scheme: dark; }}
-* {{ box-sizing: border-box; }}
-body {{ margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
-background:radial-gradient(circle at top,#16324c 0,#0d1722 42%,#070b10 100%);
-font-family:Inter,Segoe UI,Arial,sans-serif; color:#eef4fa; }}
-.card {{ width:min(720px,100%); background:rgba(13,23,34,.96); border:1px solid #2d455b;
-border-radius:18px; padding:34px; box-shadow:0 24px 70px rgba(0,0,0,.45); }}
-.brand {{ font-size:14px; letter-spacing:.16em; text-transform:uppercase; color:#8fb8d8; margin-bottom:22px; }}
-.badge {{ display:inline-flex; gap:9px; align-items:center; padding:8px 12px; border-radius:999px;
-background:#172b3d; color:#cfe9ff; font-weight:700; font-size:14px; }}
-h1 {{ margin:18px 0 10px; font-size:clamp(28px,5vw,42px); }}
-p {{ margin:0; color:#c6d3df; font-size:18px; line-height:1.6; }}
-.character {{ margin:22px 0 0; padding:14px 16px; background:#101c28; border-radius:10px; color:#dce8f2; }}
-.footer {{ margin-top:28px; padding-top:20px; border-top:1px solid #263847; color:#8ea3b4; font-size:14px; }}
+:root {{
+    color-scheme: dark;
+    --accent:{accent};
+    --cyan:#00E5FF;
+    --blue:#0A84FF;
+    --green:#22C55E;
+    --orange:#FFB300;
+    --red:#FF3B30;
+    --text:#F5F8FC;
+    --muted:#B9C8D5;
+}}
+* {{ box-sizing:border-box; }}
+html,body {{ min-height:100%; }}
+body {{
+    margin:0;
+    min-height:100vh;
+    display:grid;
+    place-items:center;
+    padding:28px;
+    color:var(--text);
+    font-family:"Segoe UI",Arial,sans-serif;
+    background:
+        linear-gradient(rgba(0,4,9,.38),rgba(0,4,9,.58)),
+        url("/assets/bg-space.jpg") center/cover fixed no-repeat,
+        #01050a;
+}}
+.page {{
+    width:min(940px,100%);
+}}
+.frame {{
+    position:relative;
+    padding:2px;
+    background:linear-gradient(135deg,var(--cyan),var(--blue) 28%,transparent 45%,var(--blue) 72%,var(--cyan));
+    clip-path:polygon(0 28px,28px 0,calc(100% - 28px) 0,100% 28px,100% calc(100% - 28px),calc(100% - 28px) 100%,28px 100%,0 calc(100% - 28px));
+    filter:drop-shadow(0 0 14px rgba(0,132,255,.38));
+}}
+.card {{
+    position:relative;
+    min-height:560px;
+    padding:30px 58px 38px;
+    text-align:center;
+    background:
+        linear-gradient(rgba(1,8,15,.91),rgba(1,7,13,.96)),
+        url("/assets/bg-panel.jpg") center/cover;
+    clip-path:inherit;
+    overflow:hidden;
+}}
+.card::before,
+.card::after {{
+    content:"";
+    position:absolute;
+    top:78px;
+    width:22%;
+    height:1px;
+    background:linear-gradient(90deg,transparent,var(--cyan));
+    box-shadow:0 0 9px var(--blue);
+}}
+.card::before {{ left:3%; }}
+.card::after {{ right:3%; transform:scaleX(-1); }}
+.logo {{
+    display:block;
+    width:min(250px,52vw);
+    height:auto;
+    margin:0 auto 22px;
+    object-fit:contain;
+}}
+.status-icon {{
+    width:62px;
+    height:62px;
+    margin:0 auto 14px;
+    display:grid;
+    place-items:center;
+    transform:rotate(45deg);
+    border:2px solid var(--accent);
+    border-radius:8px;
+    color:var(--accent);
+    font-size:32px;
+    font-weight:900;
+    background:color-mix(in srgb,var(--accent) 10%,#02070d);
+    box-shadow:0 0 20px color-mix(in srgb,var(--accent) 52%,transparent);
+}}
+.status-icon span {{ transform:rotate(-45deg); }}
+.badge {{
+    margin:0 0 8px;
+    color:var(--accent);
+    font-size:13px;
+    font-weight:800;
+    letter-spacing:.16em;
+}}
+h1 {{
+    margin:6px 0 18px;
+    font-size:clamp(30px,5vw,46px);
+    line-height:1.05;
+    text-transform:uppercase;
+    letter-spacing:.025em;
+    color:var(--accent);
+    text-shadow:0 0 22px color-mix(in srgb,var(--accent) 24%,transparent);
+}}
+.message {{
+    max-width:720px;
+    margin:0 auto;
+    color:#F2F6FA;
+    font-size:17px;
+    line-height:1.65;
+}}
+.character {{
+    max-width:650px;
+    margin:26px auto 0;
+    padding:15px 20px;
+    display:flex;
+    justify-content:center;
+    gap:18px;
+    align-items:center;
+    border:1px solid color-mix(in srgb,var(--accent) 78%,transparent);
+    background:rgba(0,7,14,.78);
+    box-shadow:inset 0 0 22px rgba(0,0,0,.45);
+}}
+.character span {{ color:#E9F0F6; }}
+.character span::after {{ content:" :"; }}
+.character strong {{ color:var(--accent); }}
+.footer {{
+    margin:27px auto 0;
+    padding-top:18px;
+    max-width:720px;
+    border-top:1px solid rgba(0,229,255,.28);
+    color:var(--muted);
+    font-size:14px;
+}}
+.brandline {{
+    margin-top:22px;
+    color:#48B9FF;
+    font-size:11px;
+    letter-spacing:.22em;
+    text-transform:uppercase;
+}}
+@media (max-width:640px) {{
+    body {{ padding:12px; }}
+    .card {{ min-height:0; padding:24px 20px 28px; }}
+    .card::before,.card::after {{ top:64px; width:14%; }}
+    .logo {{ margin-bottom:18px; }}
+    .status-icon {{ width:54px; height:54px; font-size:27px; }}
+    .message {{ font-size:16px; }}
+    .character {{ flex-direction:column; gap:5px; }}
+}}
 </style>
 </head>
 <body>
-<main class="card">
-<div class="brand">Freeborn Legacy · Freeborn Verify V3</div>
-<div class="badge">{icon} {badge}</div>
-<h1>{safe_title}</h1>
-<p>{safe_message}</p>
-{character_html}
-<div class="footer">Tu peux fermer cette fenêtre et retourner sur Discord.</div>
-</main>
+<div class="page">
+    <div class="frame">
+        <main class="card">
+            <img class="logo" src="/assets/logo-freeborn-legacy.png" alt="Freeborn Legacy">
+            <div class="status-icon"><span>{icon}</span></div>
+            <div class="badge">{badge}</div>
+            <h1>{safe_title}</h1>
+            <div class="message">{safe_message}</div>
+            {character_html}
+            <div class="footer">Tu peux fermer cette fenêtre et retourner sur Discord.</div>
+            <div class="brandline">Freeborn Legacy · Freeborn Verify V3</div>
+        </main>
+    </div>
+</div>
 </body>
 </html>"""
 
@@ -9378,11 +9526,19 @@ def callback():
     ):
 
         return freeborn_web_page(
-            "Intégration refusée",
-            "Ce personnage n'appartient pas à la corporation EVE configurée pour ce serveur Discord.",
-            status="error",
+            "Intégration en attente",
+            (
+                "Freeborn Verify ne peut pas encore confirmer ton appartenance "
+                "à Freeborn Legacy auprès de l’ESI EVE Online.\n\n"
+                "Après une entrée récente dans la corporation, la synchronisation "
+                "des données ESI peut nécessiter un certain délai. Un délai pouvant "
+                "aller jusqu’à 24 heures peut être nécessaire.\n\n"
+                "Réessaie simplement /freeborn un peu plus tard. Si la situation "
+                "persiste au-delà de ce délai, contacte le staff."
+            ),
+            status="pending",
             character_name=character_name,
-        ), 403
+        ), 409
 
     # ========================================================
     # FREEBORN FINAL INTEGRATION FLOW
