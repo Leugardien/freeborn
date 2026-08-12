@@ -1750,8 +1750,8 @@ def save_main_character_v3(
                         %s, %s, %s, %s, 'main',
                         %s, TRUE, NOW(), NOW(), NOW(), NULL,
                         %s, %s, %s,
-                        CASE WHEN %s IS NULL THEN NULL ELSE NOW() END,
-                        CASE WHEN %s IS NULL THEN NULL ELSE NOW() END
+                        CASE WHEN %s::BIGINT IS NULL THEN NULL ELSE NOW() END,
+                        CASE WHEN %s::TEXT IS NULL THEN NULL ELSE NOW() END
                     )
                     ON CONFLICT (guild_id, character_id)
                     DO UPDATE SET
