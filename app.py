@@ -9083,7 +9083,7 @@ body {{
     min-height:100vh;
     display:grid;
     place-items:center;
-    padding:28px;
+    padding:18px;
     color:var(--text);
     font-family:"Segoe UI",Arial,sans-serif;
     background:
@@ -9092,7 +9092,7 @@ body {{
         #01050a;
 }}
 .page {{
-    width:min(940px,100%);
+    width:min(860px,100%);
 }}
 .frame {{
     position:relative;
@@ -9103,8 +9103,8 @@ body {{
 }}
 .card {{
     position:relative;
-    min-height:560px;
-    padding:30px 58px 38px;
+    min-height:0;
+    padding:20px 48px 24px;
     text-align:center;
     background:
         linear-gradient(rgba(1,8,15,.91),rgba(1,7,13,.96)),
@@ -9116,7 +9116,7 @@ body {{
 .card::after {{
     content:"";
     position:absolute;
-    top:78px;
+    top:62px;
     width:22%;
     height:1px;
     background:linear-gradient(90deg,transparent,var(--cyan));
@@ -9126,37 +9126,37 @@ body {{
 .card::after {{ right:3%; transform:scaleX(-1); }}
 .logo {{
     display:block;
-    width:min(250px,52vw);
+    width:min(210px,48vw);
     height:auto;
-    margin:0 auto 22px;
+    margin:0 auto 10px;
     object-fit:contain;
 }}
 .status-icon {{
-    width:62px;
-    height:62px;
-    margin:0 auto 14px;
+    width:54px;
+    height:54px;
+    margin:0 auto 10px;
     display:grid;
     place-items:center;
     transform:rotate(45deg);
     border:2px solid var(--accent);
     border-radius:8px;
     color:var(--accent);
-    font-size:32px;
+    font-size:27px;
     font-weight:900;
     background:color-mix(in srgb,var(--accent) 10%,#02070d);
     box-shadow:0 0 20px color-mix(in srgb,var(--accent) 52%,transparent);
 }}
 .status-icon span {{ transform:rotate(-45deg); }}
 .badge {{
-    margin:0 0 8px;
+    margin:0 0 6px;
     color:var(--accent);
     font-size:13px;
     font-weight:800;
     letter-spacing:.16em;
 }}
 h1 {{
-    margin:6px 0 18px;
-    font-size:clamp(30px,5vw,46px);
+    margin:4px 0 12px;
+    font-size:clamp(28px,4.4vw,40px);
     line-height:1.05;
     text-transform:uppercase;
     letter-spacing:.025em;
@@ -9167,13 +9167,13 @@ h1 {{
     max-width:720px;
     margin:0 auto;
     color:#F2F6FA;
-    font-size:17px;
-    line-height:1.65;
+    font-size:16px;
+    line-height:1.5;
 }}
 .character {{
     max-width:650px;
-    margin:26px auto 0;
-    padding:15px 20px;
+    margin:18px auto 0;
+    padding:12px 18px;
     display:flex;
     justify-content:center;
     gap:18px;
@@ -9186,15 +9186,15 @@ h1 {{
 .character span::after {{ content:" :"; }}
 .character strong {{ color:var(--accent); }}
 .footer {{
-    margin:27px auto 0;
-    padding-top:18px;
+    margin:18px auto 0;
+    padding-top:13px;
     max-width:720px;
     border-top:1px solid rgba(0,229,255,.28);
     color:var(--muted);
     font-size:14px;
 }}
 .brandline {{
-    margin-top:22px;
+    margin-top:14px;
     color:#48B9FF;
     font-size:11px;
     letter-spacing:.22em;
