@@ -6730,6 +6730,90 @@ def interactions():
         })
 
     # ========================================================
+    # /guide-membre + /guide-staff
+    # V3 — private visual command guides
+    # Both responses are always ephemeral (visible only to caller).
+    # ========================================================
+
+    if command_name == "guide-membre":
+
+        guide_member_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/guide-membre.png"
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "embeds": [
+                    {
+                        "title": "📘 GUIDE MEMBRE — FREEBORN VERIFY V3",
+                        "description": (
+                            "Guide personnel des commandes et du parcours "
+                            "Freeborn Legacy."
+                        ),
+                        "image": {"url": guide_member_image_url},
+                        "color": 0xD9A21B,
+                        "footer": {
+                            "text": "Freeborn Legacy • Guide Membre"
+                        },
+                    }
+                ],
+                "flags": 64,
+            },
+        })
+
+    if command_name == "guide-staff":
+
+        try:
+            member_roles = {
+                str(role_id)
+                for role_id in data["member"]["roles"]
+            }
+        except (KeyError, TypeError):
+            member_roles = set()
+
+        if not (member_roles & MODERATION_ROLE_IDS):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Accès refusé**\n\n"
+                        "Le Guide Staff est réservé aux rôles **CEO**, "
+                        "**Haut Conseil**, **Direction**, "
+                        "**Ressources Humaines** et **Officier**."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        guide_staff_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/guide-staff.png"
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "embeds": [
+                    {
+                        "title": "🛡️ GUIDE STAFF — FREEBORN VERIFY V3",
+                        "description": (
+                            "Référence privée des commandes de gestion "
+                            "et du parcours de recrutement."
+                        ),
+                        "image": {"url": guide_staff_image_url},
+                        "color": 0xD9A21B,
+                        "footer": {
+                            "text": "Freeborn Legacy • Guide Staff"
+                        },
+                    }
+                ],
+                "flags": 64,
+            },
+        })
+
+    # ========================================================
     # STAFF-ONLY COMMANDS
     # ========================================================
 
@@ -10378,6 +10462,31 @@ def register_commands():
 
         {
             "name":
+                "guide-membre",
+
+            "description":
+                "Afficher ton guide privé Freeborn Verify V3",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "guide-staff",
+
+            "description":
+                "Afficher le guide privé des commandes staff V3",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
                 "verification",
 
             "description":
@@ -10796,7 +10905,7 @@ def register_commands():
 
             print(
                 "Commandes Discord enregistrées : "
-                "/freeborn, /verification, "
+                "/freeborn, /guide-membre, /guide-staff, /verification, "
                 "/alt-ajouter, /alt-supprimer, /main-changer, "
                 "/membre-info, /membre-liste, "
                 "/membre-promouvoir, /membre-supprimer, "
