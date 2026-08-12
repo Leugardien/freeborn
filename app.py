@@ -3338,6 +3338,17 @@ def dedicated_channel_error(
 
 def interaction_response_flags(data):
 
+    command_name = str(
+        ((data.get("data") or {}).get("name") or "")
+    ).lower()
+
+    # /freeborn contains the personal EVE SSO link and must always
+    # remain private to the member who launched the command, even
+    # when it is used in the public recruitment channel.
+    if command_name == "freeborn":
+
+        return 64
+
     channel_id = str(
         data.get("channel_id", "")
     )
