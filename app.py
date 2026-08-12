@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import os
 from html import escape
 from urllib.parse import urlencode
@@ -7,6 +9,7 @@ import requests
 
 from flask import Flask, jsonify, request, send_from_directory
 from nacl.exceptions import BadSignatureError
+from nacl.secret import SecretBox
 from nacl.signing import VerifyKey
 
 from itsdangerous import (
@@ -249,6 +252,12 @@ EVE_METADATA_URL = (
 )
 
 ESI_BASE_URL = "https://esi.evetech.net/latest"
+
+# Private ESI permissions requested only during the /freeborn
+# candidate/member integration flow. Guests never use EVE SSO.
+FREEBORN_EVE_SCOPES = (
+    "esi-skills.read_skills.v1",
+)
 
 DISCORD_API = "https://discord.com/api/v10"
 
@@ -552,6 +561,48 @@ def init_database():
                             REFERENCES discord_guilds (guild_id)
                             ON DELETE CASCADE
                     );
+                    """
+                )
+
+                # Authenticated ESI data kept with the guild-scoped Main.
+                # The refresh token is encrypted before it reaches Neon.
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    eve_refresh_token_encrypted TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    eve_scopes TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    total_skill_points BIGINT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    skills_updated_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    sso_authorized_at TIMESTAMPTZ;
                     """
                 )
 
@@ -1526,7 +1577,9 @@ def get_guild_main_character_v3(
                     in_corporation,
                     verified_at,
                     last_checked_at,
-                    left_corporation_at
+                    left_corporation_at,
+                    total_skill_points,
+                    skills_updated_at
                 FROM guild_eve_characters
                 WHERE guild_id = %s
                 AND discord_user_id = %s
@@ -1548,12 +1601,27 @@ def save_main_character_v3(
     character_id,
     character_name,
     corporation_id,
+    refresh_token=None,
+    granted_scopes=None,
+    total_skill_points=None,
 ):
 
     guild_id = str(guild_id)
     discord_user_id = str(discord_user_id)
     character_id = int(character_id)
     corporation_id = int(corporation_id)
+
+    encrypted_refresh_token = (
+        encrypt_eve_refresh_token(refresh_token)
+        if refresh_token
+        else None
+    )
+
+    scopes_text = (
+        " ".join(sorted(set(granted_scopes or [])))
+        if granted_scopes
+        else None
+    )
 
     with psycopg.connect(DATABASE_URL) as conn:
 
@@ -1629,11 +1697,19 @@ def save_main_character_v3(
                         verified_at,
                         updated_at,
                         last_checked_at,
-                        left_corporation_at
+                        left_corporation_at,
+                        eve_refresh_token_encrypted,
+                        eve_scopes,
+                        total_skill_points,
+                        skills_updated_at,
+                        sso_authorized_at
                     )
                     VALUES (
                         %s, %s, %s, %s, 'main',
-                        %s, TRUE, NOW(), NOW(), NOW(), NULL
+                        %s, TRUE, NOW(), NOW(), NOW(), NULL,
+                        %s, %s, %s,
+                        CASE WHEN %s IS NULL THEN NULL ELSE NOW() END,
+                        CASE WHEN %s IS NULL THEN NULL ELSE NOW() END
                     )
                     ON CONFLICT (guild_id, character_id)
                     DO UPDATE SET
@@ -1652,7 +1728,27 @@ def save_main_character_v3(
                         last_checked_at =
                             NOW(),
                         left_corporation_at =
-                            NULL;
+                            NULL,
+                        eve_refresh_token_encrypted = COALESCE(
+                            EXCLUDED.eve_refresh_token_encrypted,
+                            guild_eve_characters.eve_refresh_token_encrypted
+                        ),
+                        eve_scopes = COALESCE(
+                            EXCLUDED.eve_scopes,
+                            guild_eve_characters.eve_scopes
+                        ),
+                        total_skill_points = COALESCE(
+                            EXCLUDED.total_skill_points,
+                            guild_eve_characters.total_skill_points
+                        ),
+                        skills_updated_at = COALESCE(
+                            EXCLUDED.skills_updated_at,
+                            guild_eve_characters.skills_updated_at
+                        ),
+                        sso_authorized_at = COALESCE(
+                            EXCLUDED.sso_authorized_at,
+                            guild_eve_characters.sso_authorized_at
+                        );
                     """,
                     (
                         guild_id,
@@ -1660,6 +1756,19 @@ def save_main_character_v3(
                         discord_user_id,
                         str(character_name),
                         corporation_id,
+                        encrypted_refresh_token,
+                        scopes_text,
+                        (
+                            int(total_skill_points)
+                            if total_skill_points is not None
+                            else None
+                        ),
+                        (
+                            int(total_skill_points)
+                            if total_skill_points is not None
+                            else None
+                        ),
+                        encrypted_refresh_token,
                     ),
                 )
 
@@ -1917,6 +2026,44 @@ def save_policy_acceptance_v3(
             )
 
         conn.commit()
+
+
+# ============================================================
+# AUTHENTICATED ESI STORAGE
+# ============================================================
+
+def _eve_token_box():
+    """Build the symmetric box used to encrypt EVE refresh tokens at rest."""
+
+    key = hashlib.sha256(
+        FLASK_SECRET_KEY.encode("utf-8")
+    ).digest()
+
+    return SecretBox(key)
+
+
+def encrypt_eve_refresh_token(refresh_token):
+    """Encrypt an EVE refresh token before saving it to Neon."""
+
+    encrypted = _eve_token_box().encrypt(
+        str(refresh_token).encode("utf-8")
+    )
+
+    return base64.urlsafe_b64encode(
+        bytes(encrypted)
+    ).decode("ascii")
+
+
+def decrypt_eve_refresh_token(encrypted_refresh_token):
+    """Decrypt a stored EVE refresh token for a future token refresh."""
+
+    raw = base64.urlsafe_b64decode(
+        str(encrypted_refresh_token).encode("ascii")
+    )
+
+    return _eve_token_box().decrypt(
+        raw
+    ).decode("utf-8")
 
 
 # ============================================================
@@ -3512,10 +3659,65 @@ def get_eve_identity(
         "Unknown",
     )
 
+    granted_scopes = payload.get(
+        "scp",
+        [],
+    )
+
+    if isinstance(granted_scopes, str):
+        granted_scopes = [
+            granted_scopes
+        ]
+
+    granted_scopes = {
+        str(scope)
+        for scope in granted_scopes
+    }
+
     return (
         character_id,
         character_name,
+        granted_scopes,
     )
+
+
+def get_eve_character_skills(
+    character_id,
+    access_token,
+):
+    """Read the authenticated character skill summary from ESI."""
+
+    response = requests.get(
+        (
+            f"{ESI_BASE_URL}/characters/"
+            f"{int(character_id)}/skills/"
+        ),
+        headers={
+            "Authorization":
+                f"Bearer {access_token}",
+        },
+        timeout=15,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if "total_sp" not in data:
+        raise ValueError(
+            "ESI skills response does not contain total_sp"
+        )
+
+    return {
+        "total_sp":
+            int(data["total_sp"]),
+
+        "unallocated_sp":
+            int(data.get("unallocated_sp", 0) or 0),
+
+        "trained_skills":
+            len(data.get("skills", [])),
+    }
 
 
 # ============================================================
@@ -8460,12 +8662,20 @@ def interactions():
                 main_verified_at,
                 main_last_checked_at,
                 main_left_at,
+                main_total_skill_points,
+                main_skills_updated_at,
             ) = main_row
 
             main_text = (
                 f"✅ **{main_name}** "
                 f"(`{main_character_id}`)"
             )
+
+            if main_total_skill_points is not None:
+                main_text += (
+                    "\n🎓 Skill Points : "
+                    f"**{int(main_total_skill_points):,} SP**"
+                )
 
         else:
 
@@ -8721,6 +8931,14 @@ def interactions():
         "state":
             state,
     }
+
+    # Only candidates finalising /freeborn grant the private ESI scope.
+    # Guests never authenticate to EVE, and legacy Main/Alt actions do not
+    # request private character data.
+    if verification_type == "freeborn":
+        params["scope"] = " ".join(
+            FREEBORN_EVE_SCOPES
+        )
 
     login_url = (
         f"{EVE_AUTHORIZE_URL}?"
@@ -8983,10 +9201,14 @@ def callback():
             status="error",
         ), 400
 
-    access_token = (
-        token_response.json()[
-            "access_token"
-        ]
+    token_data = token_response.json()
+
+    access_token = token_data[
+        "access_token"
+    ]
+
+    refresh_token = token_data.get(
+        "refresh_token"
     )
 
     try:
@@ -8994,6 +9216,7 @@ def callback():
         (
             character_id,
             character_name,
+            granted_scopes,
         ) = get_eve_identity(
             access_token
         )
@@ -9010,6 +9233,55 @@ def callback():
             "L'identité du personnage EVE n'a pas pu être vérifiée.",
             status="error",
         ), 400
+
+    skill_summary = None
+
+    if verification_type == "freeborn":
+
+        missing_scopes = (
+            set(FREEBORN_EVE_SCOPES)
+            -
+            set(granted_scopes)
+        )
+
+        if missing_scopes:
+
+            return freeborn_web_page(
+                "Autorisation ESI incomplète",
+                "Le scope ESI nécessaire aux compétences n'a pas été accordé. Relance /freeborn et accepte l'autorisation EVE demandée.",
+                status="error",
+                character_name=character_name,
+            ), 403
+
+        if not refresh_token:
+
+            return freeborn_web_page(
+                "Autorisation EVE incomplète",
+                "EVE n'a pas fourni de refresh token. Relance /freeborn afin que Freeborn puisse conserver l'autorisation sans te redemander de te connecter.",
+                status="error",
+                character_name=character_name,
+            ), 400
+
+        try:
+
+            skill_summary = get_eve_character_skills(
+                character_id,
+                access_token,
+            )
+
+        except Exception as error:
+
+            print(
+                "EVE skills lookup failed:",
+                repr(error),
+            )
+
+            return freeborn_web_page(
+                "Compétences EVE indisponibles",
+                "Freeborn Verify n'a pas pu récupérer les Skill Points du personnage. Aucune intégration n'a été enregistrée ; relance /freeborn dans quelques instants.",
+                status="warning",
+                character_name=character_name,
+            ), 502
 
     character_response = requests.get(
         (
@@ -9155,6 +9427,9 @@ def callback():
                 character_id,
                 character_name,
                 corporation_id,
+                refresh_token=refresh_token,
+                granted_scopes=granted_scopes,
+                total_skill_points=skill_summary["total_sp"],
             )
 
             if str(guild_id) == str(DISCORD_GUILD_ID):
@@ -9275,6 +9550,7 @@ def callback():
             "🛡️ **Identité EVE vérifiée**\n"
             f"Membre : <@{discord_user_id}> (`{discord_user_id}`)\n"
             f"Main EVE : **{character_name}**\n"
+            f"Skill Points : **{skill_summary['total_sp']:,} SP**\n"
             "Étape suivante : contrôle staff puis promotion en Membre.",
         )
 
