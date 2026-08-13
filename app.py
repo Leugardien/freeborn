@@ -7630,9 +7630,130 @@ _eve_type_dogma_cache = {}
 
 _eve_type_category_cache = {}
 _eve_group_category_cache = {}
+_eve_type_metadata_cache = {}
+_eve_group_metadata_cache = {}
 
 # EVE inventory category 18 = Drone.
 EVE_CATEGORY_DRONE = 18
+
+
+def get_eve_type_metadata(type_id):
+    """
+    Return the public ESI metadata for one inventory type.
+
+    Cached in-process because the same type is commonly used several times
+    while one fitting page is rendered.
+    """
+    if not type_id:
+        return {}
+
+    type_id = int(type_id)
+
+    if type_id in _eve_type_metadata_cache:
+        return _eve_type_metadata_cache[type_id]
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/types/{type_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+        _eve_type_metadata_cache[type_id] = payload
+        return payload
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI type metadata lookup failed:",
+            type_id,
+            repr(error),
+        )
+        return {}
+
+
+def get_eve_group_metadata(group_id):
+    """Return one EVE inventory group metadata payload with process caching."""
+    if not group_id:
+        return {}
+
+    group_id = int(group_id)
+
+    if group_id in _eve_group_metadata_cache:
+        return _eve_group_metadata_cache[group_id]
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/groups/{group_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+        _eve_group_metadata_cache[group_id] = payload
+        return payload
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI group metadata lookup failed:",
+            group_id,
+            repr(error),
+        )
+        return {}
+
+
+def get_eve_type_group_name(type_id):
+    """
+    Resolve one inventory type's public group name.
+
+    Phase 4O-B uses this only as a conservative classifier for the two
+    universal weapon fitting skills. The future SDE Dogma layer will replace
+    this classifier with modifierInfo-driven rules.
+    """
+    type_payload = get_eve_type_metadata(type_id)
+    group_id = type_payload.get("group_id")
+
+    if not group_id:
+        return ""
+
+    group_payload = get_eve_group_metadata(group_id)
+
+    return str(
+        group_payload.get("name")
+        or ""
+    ).strip()
+
+
+def freeborn_is_weapon_fitting_group(type_id):
+    """
+    Conservative launcher/turret/smartbomb classifier for 4O-B.
+
+    Weapon Upgrades affects CPU use of weapon turrets, launchers and
+    smartbombs; Advanced Weapon Upgrades affects PG use of turrets/launchers.
+    Group-name matching is temporary and intentionally narrow: unknown
+    modules are left untouched rather than receiving a guessed modifier.
+    """
+    name = get_eve_type_group_name(type_id).casefold()
+
+    if not name:
+        return False
+
+    keywords = (
+        "launcher",
+        "turret",
+        "smartbomb",
+    )
+
+    return any(
+        keyword in name
+        for keyword in keywords
+    )
 
 
 def get_eve_group_category_id(group_id):
@@ -7684,17 +7805,8 @@ def get_eve_type_category_id(type_id):
         return _eve_type_category_cache[type_id]
 
     try:
-        response = requests.get(
-            f"{ESI_BASE_URL}/universe/types/{type_id}/",
-            params={"datasource": "tranquility"},
-            headers={
-                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
-            },
-            timeout=15,
-        )
-        response.raise_for_status()
-
-        group_id = response.json().get("group_id")
+        payload = get_eve_type_metadata(type_id)
+        group_id = payload.get("group_id")
         category_id = get_eve_group_category_id(group_id)
 
         _eve_type_category_cache[type_id] = category_id
@@ -7884,12 +7996,16 @@ def calculate_base_fitting_resources(
 
 
 # ============================================================
-# FREEBORN FITTINGS — PHASE 4O-A SKILL-AWARE ENGINE CORE
+# FREEBORN FITTINGS — PHASE 4O-B SKILL-AWARE ENGINE
 # ============================================================
 
 # Universal Engineering skills affecting the ship's fitting outputs.
 EVE_SKILL_CPU_MANAGEMENT = 3426
 EVE_SKILL_POWER_GRID_MANAGEMENT = 3413
+
+# Weapon fitting skills.
+EVE_SKILL_WEAPON_UPGRADES = 3318
+EVE_SKILL_ADVANCED_WEAPON_UPGRADES = 11207
 
 FREEBORN_ALL_V_LEVEL = 5
 
@@ -7898,12 +8014,6 @@ def freeborn_skill_level_map(skills_snapshot):
     """
     Convert the ESI skills snapshot into:
         {skill_id: trained_skill_level}
-
-    ESI skill rows normally contain:
-        skill_id
-        trained_skill_level
-        active_skill_level
-        skillpoints_in_skill
     """
     levels = {}
 
@@ -7940,7 +8050,7 @@ def freeborn_fitting_skill_context(
     Build the skill context used by the fitting engine.
 
     mode='all_v':
-        relevant skills are evaluated at V.
+        all relevant skills are evaluated at V.
 
     mode='character':
         actual trained levels from the ESI snapshot are used.
@@ -7979,7 +8089,46 @@ def freeborn_context_skill_level(context, skill_id):
     )
 
 
-def calculate_skill_aware_fitting_resources_core(
+def freeborn_fitted_module_rows(
+    eft_sections,
+    type_ids,
+):
+    """
+    Return one normalized row per fitted module type.
+
+    Cargo, drones, charges and scripts are excluded.
+    """
+    rows = []
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    for type_id, quantity in counts.items():
+        dogma = get_eve_type_dogma(type_id)
+
+        rows.append({
+            "type_id": int(type_id),
+            "quantity": int(quantity),
+            "cpu_base": float(
+                dogma.get(DOGMA_CPU_NEED, 0.0)
+                if dogma
+                else 0.0
+            ),
+            "power_base": float(
+                dogma.get(DOGMA_POWER_NEED, 0.0)
+                if dogma
+                else 0.0
+            ),
+            "dogma_ok": bool(dogma),
+            "weapon_group":
+                freeborn_is_weapon_fitting_group(type_id),
+        })
+
+    return rows
+
+
+def calculate_skill_aware_fitting_resources(
     ship_type_id,
     eft_sections,
     type_ids,
@@ -7988,17 +8137,22 @@ def calculate_skill_aware_fitting_resources_core(
     skills_snapshot=None,
 ):
     """
-    Phase 4O-A skill-aware CPU/PG engine core.
+    Phase 4O-B CPU/PG engine.
 
-    This starts from the existing raw Dogma telemetry and applies the
-    universal ship-output skills:
-      - CPU Management: +5% CPU output per level
-      - Power Grid Management: +5% powergrid output per level
+    Applied in this phase:
+      Ship output:
+        - CPU Management: +5% CPU output / level
+        - Power Grid Management: +5% PG output / level
 
-    The module 'used' side deliberately remains BASE in 4O-A because
-    module-family skill reductions require Dogma effect/requirement
-    classification. Keeping that distinction explicit prevents Freeborn
-    from displaying a false 'ALL V' result.
+      Weapon module fitting needs:
+        - Weapon Upgrades: -5% CPU need / level
+          on conservative weapon groups
+        - Advanced Weapon Upgrades: -2% PG need / level
+          on conservative weapon groups
+
+    This is materially closer to EVE fitting than BASE/4O-A, but it is still
+    marked "validation" until the SDE modifierInfo layer covers the remaining
+    skill-conditioned module families generically.
     """
     base = calculate_base_fitting_resources(
         ship_type_id,
@@ -8019,6 +8173,14 @@ def calculate_skill_aware_fitting_resources_core(
         context,
         EVE_SKILL_POWER_GRID_MANAGEMENT,
     )
+    weapon_upgrades_level = freeborn_context_skill_level(
+        context,
+        EVE_SKILL_WEAPON_UPGRADES,
+    )
+    awu_level = freeborn_context_skill_level(
+        context,
+        EVE_SKILL_ADVANCED_WEAPON_UPGRADES,
+    )
 
     cpu_output = base["cpu_output"]
     power_output = base["power_output"]
@@ -8033,33 +8195,101 @@ def calculate_skill_aware_fitting_resources_core(
             1.0 + (0.05 * pg_level)
         )
 
+    module_rows = freeborn_fitted_module_rows(
+        eft_sections,
+        type_ids,
+    )
+
+    cpu_used = 0.0
+    power_used = 0.0
+    weapon_module_count = 0
+    module_data_complete = True
+
+    for row in module_rows:
+        if not row["dogma_ok"]:
+            module_data_complete = False
+
+        cpu_need = row["cpu_base"]
+        power_need = row["power_base"]
+
+        if row["weapon_group"]:
+            weapon_module_count += int(row["quantity"])
+
+            cpu_need *= (
+                1.0 - (0.05 * weapon_upgrades_level)
+            )
+
+            # AWU applies to turrets/launchers. The temporary 4O-B classifier
+            # also recognizes smartbomb groups for WU; smartbomb PG is not
+            # modified here.
+            group_name = get_eve_type_group_name(
+                row["type_id"]
+            ).casefold()
+
+            if (
+                "launcher" in group_name
+                or
+                "turret" in group_name
+            ):
+                power_need *= (
+                    1.0 - (0.02 * awu_level)
+                )
+
+        cpu_used += (
+            float(cpu_need)
+            * int(row["quantity"])
+        )
+        power_used += (
+            float(power_need)
+            * int(row["quantity"])
+        )
+
+    cpu_remaining = (
+        float(cpu_output) - float(cpu_used)
+        if cpu_output is not None
+        else None
+    )
+    power_remaining = (
+        float(power_output) - float(power_used)
+        if power_output is not None
+        else None
+    )
+
     return {
         "mode": context["mode"],
 
         "cpu_management_level": cpu_level,
         "power_grid_management_level": pg_level,
+        "weapon_upgrades_level": weapon_upgrades_level,
+        "advanced_weapon_upgrades_level": awu_level,
 
-        "cpu_used_base": float(base["cpu_used"]),
+        "cpu_used": cpu_used,
         "cpu_output": cpu_output,
-        "cpu_remaining_core": (
-            float(cpu_output) - float(base["cpu_used"])
-            if cpu_output is not None
-            else None
+        "cpu_remaining": cpu_remaining,
+        "cpu_valid": (
+            cpu_remaining is not None
+            and cpu_remaining >= -0.0001
         ),
-        "cpu_complete": bool(base["cpu_complete"]),
 
-        "power_used_base": float(base["power_used"]),
+        "power_used": power_used,
         "power_output": power_output,
-        "power_remaining_core": (
-            float(power_output) - float(base["power_used"])
-            if power_output is not None
-            else None
+        "power_remaining": power_remaining,
+        "power_valid": (
+            power_remaining is not None
+            and power_remaining >= -0.0001
         ),
-        "power_complete": bool(base["power_complete"]),
 
-        # False is intentional in 4O-A:
-        # module-side fitting reductions are not applied yet.
-        "full_all_v_ready": False,
+        "weapon_module_count": weapon_module_count,
+
+        "data_complete": (
+            bool(base["cpu_complete"])
+            and bool(base["power_complete"])
+            and module_data_complete
+        ),
+
+        # 4O-B is a validation engine: universal + weapon fitting skills
+        # are applied, but the full SDE modifierInfo pass is still pending.
+        "official_all_v_ready": False,
     }
 
 
@@ -8079,6 +8309,45 @@ def format_engine_number(value, unit):
         )
 
     return f"{number} {unit}"
+
+
+def format_engine_resource_pair(
+    used,
+    output,
+    unit,
+):
+    if used is None or output is None:
+        return "— / — " + unit
+
+    def fmt(value):
+        value = float(value)
+
+        if abs(value - round(value)) < 0.0001:
+            return f"{int(round(value)):,}".replace(",", " ")
+
+        return (
+            f"{value:,.1f}"
+            .replace(",", " ")
+            .replace(".", ",")
+        )
+
+    return f"{fmt(used)} / {fmt(output)} {unit}"
+
+
+def format_engine_margin(
+    remaining,
+    unit,
+):
+    if remaining is None:
+        return "Donnée indisponible"
+
+    value = float(remaining)
+    sign = "+" if value >= 0 else "−"
+
+    return (
+        f"{sign}{format_engine_number(abs(value), unit)}"
+    )
+
 
 
 def format_fitting_resource_value(
@@ -8235,7 +8504,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4O-A
+    FREEBORN FITTINGS — Phase 4O-B
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -8321,14 +8590,14 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             <span class="pilot-ready">✓ Profil prêt</span>
           </div>
           <div class="pilot-note">
-            Profil ESI chargé. Le moteur 4O-A applique maintenant les
-            compétences universelles de fitting CPU / Powergrid du personnage.
-            La télémétrie principale reste volontairement en BASE tant que
-            les réductions Dogma propres aux familles de modules ne sont pas
-            toutes appliquées.
+            Profil ESI chargé. Le moteur 4O-B applique les compétences
+            universelles CPU / Powergrid ainsi que Weapon Upgrades et
+            Advanced Weapon Upgrades aux groupes d'armes reconnus.
+            La télémétrie principale reste en BASE pendant cette validation
+            avant promotion définitive de la référence ALL V.
           </div>
           <div class="pilot-engine-core">
-            <div class="pilot-engine-title">MOTEUR 4O-A — CONTRÔLE SKILLS</div>
+            <div class="pilot-engine-title">MOTEUR 4O-B — CPU / POWERGRID</div>
             <div class="pilot-engine-row">
               <span>CPU Management</span>
               <b id="pilot-cpu-skill">—</b>
@@ -8338,12 +8607,32 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
               <b id="pilot-pg-skill">—</b>
             </div>
             <div class="pilot-engine-row">
-              <span>CPU disponible</span>
-              <b id="pilot-cpu-output">—</b>
+              <span>Weapon Upgrades</span>
+              <b id="pilot-wu-skill">—</b>
             </div>
             <div class="pilot-engine-row">
-              <span>Powergrid disponible</span>
-              <b id="pilot-pg-output">—</b>
+              <span>Advanced Weapon Upgrades</span>
+              <b id="pilot-awu-skill">—</b>
+            </div>
+            <div class="pilot-engine-separator"></div>
+            <div class="pilot-engine-row">
+              <span>CPU — mon personnage</span>
+              <b id="pilot-cpu-pair">—</b>
+            </div>
+            <div class="pilot-engine-row">
+              <span>Marge CPU</span>
+              <b id="pilot-cpu-margin">—</b>
+            </div>
+            <div class="pilot-engine-row">
+              <span>Powergrid — mon personnage</span>
+              <b id="pilot-pg-pair">—</b>
+            </div>
+            <div class="pilot-engine-row">
+              <span>Marge Powergrid</span>
+              <b id="pilot-pg-margin">—</b>
+            </div>
+            <div class="pilot-engine-compat" id="pilot-compat">
+              ANALYSE EN COURS
             </div>
           </div>
           <a class="pilot-button pilot-refresh" href="{escape(pilot_start_url)}">
@@ -8426,20 +8715,72 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
     )
 
-    all_v_core = calculate_skill_aware_fitting_resources_core(
+    all_v_core = calculate_skill_aware_fitting_resources(
         fit.get("ship_type_id"),
         eft_sections,
         eft_type_ids,
         mode="all_v",
     )
 
+    all_v_cpu_pair = escape(
+        format_engine_resource_pair(
+            all_v_core["cpu_used"],
+            all_v_core["cpu_output"],
+            "tf",
+        )
+    )
+    all_v_pg_pair = escape(
+        format_engine_resource_pair(
+            all_v_core["power_used"],
+            all_v_core["power_output"],
+            "MW",
+        )
+    )
+    all_v_cpu_margin = escape(
+        format_engine_margin(
+            all_v_core["cpu_remaining"],
+            "tf",
+        )
+    )
+    all_v_pg_margin = escape(
+        format_engine_margin(
+            all_v_core["power_remaining"],
+            "MW",
+        )
+    )
+
+    all_v_compat = (
+        "✓ COMPATIBLE"
+        if (
+            all_v_core["cpu_valid"]
+            and all_v_core["power_valid"]
+        )
+        else
+        "✕ FITTING INSUFFISANT"
+    )
+
     if pilot_profile:
-        character_core = calculate_skill_aware_fitting_resources_core(
+        character_core = calculate_skill_aware_fitting_resources(
             fit.get("ship_type_id"),
             eft_sections,
             eft_type_ids,
             mode="character",
             skills_snapshot=pilot_profile.get("skills_snapshot") or [],
+        )
+
+        pilot_compat = (
+            "✓ COMPATIBLE"
+            if (
+                character_core["cpu_valid"]
+                and character_core["power_valid"]
+            )
+            else "✕ NON COMPATIBLE"
+        )
+
+        pilot_compat_class = (
+            "ok"
+            if pilot_compat.startswith("✓")
+            else "bad"
         )
 
         pilot_panel_html = (
@@ -8461,10 +8802,27 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                 + '</b>',
             )
             .replace(
-                '<b id="pilot-cpu-output">—</b>',
-                '<b id="pilot-cpu-output">'
+                '<b id="pilot-wu-skill">—</b>',
+                '<b id="pilot-wu-skill">'
                 + escape(
-                    format_engine_number(
+                    f'{character_core["weapon_upgrades_level"]}/5'
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-awu-skill">—</b>',
+                '<b id="pilot-awu-skill">'
+                + escape(
+                    f'{character_core["advanced_weapon_upgrades_level"]}/5'
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cpu-pair">—</b>',
+                '<b id="pilot-cpu-pair">'
+                + escape(
+                    format_engine_resource_pair(
+                        character_core["cpu_used"],
                         character_core["cpu_output"],
                         "tf",
                     )
@@ -8472,15 +8830,46 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                 + '</b>',
             )
             .replace(
-                '<b id="pilot-pg-output">—</b>',
-                '<b id="pilot-pg-output">'
+                '<b id="pilot-cpu-margin">—</b>',
+                '<b id="pilot-cpu-margin">'
                 + escape(
-                    format_engine_number(
+                    format_engine_margin(
+                        character_core["cpu_remaining"],
+                        "tf",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-pg-pair">—</b>',
+                '<b id="pilot-pg-pair">'
+                + escape(
+                    format_engine_resource_pair(
+                        character_core["power_used"],
                         character_core["power_output"],
                         "MW",
                     )
                 )
                 + '</b>',
+            )
+            .replace(
+                '<b id="pilot-pg-margin">—</b>',
+                '<b id="pilot-pg-margin">'
+                + escape(
+                    format_engine_margin(
+                        character_core["power_remaining"],
+                        "MW",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<div class="pilot-engine-compat" id="pilot-compat">\\n              ANALYSE EN COURS\\n            </div>',
+                '<div class="pilot-engine-compat '
+                + pilot_compat_class
+                + '" id="pilot-compat">'
+                + escape(pilot_compat)
+                + '</div>',
             )
         )
 
@@ -8835,6 +9224,94 @@ button{{font:inherit}}
   color:#8faabd;
   font-size:11px;
 }}
+.pilot-engine-separator{{
+  height:1px;
+  margin:6px 0;
+  background:rgba(49,185,255,.14);
+}}
+.pilot-engine-compat{{
+  margin-top:7px;
+  padding:7px 8px;
+  border:1px solid rgba(49,185,255,.20);
+  text-align:center;
+  color:#9fb7c8;
+  font-size:11px;
+  font-weight:850;
+  letter-spacing:.07em;
+}}
+.pilot-engine-compat.ok{{
+  color:#9cec94;
+  border-color:rgba(121,221,115,.38);
+  background:rgba(121,221,115,.055);
+}}
+.pilot-engine-compat.bad{{
+  color:#ff8686;
+  border-color:rgba(228,87,87,.40);
+  background:rgba(228,87,87,.055);
+}}
+.allv-preview{{
+  margin:8px 7px 0;
+  padding:10px 11px;
+  border:1px solid rgba(214,168,60,.38);
+  background:
+    linear-gradient(180deg,rgba(214,168,60,.065),rgba(0,0,0,.13));
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+}}
+.allv-head{{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  align-items:baseline;
+}}
+.allv-head strong{{
+  color:var(--gold2);
+  font-size:11px;
+  letter-spacing:.08em;
+}}
+.allv-head span{{
+  color:#8da2b2;
+  font-size:10px;
+}}
+.allv-grid{{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:7px;
+  margin-top:8px;
+}}
+.allv-grid>div{{
+  padding:7px 8px;
+  border:1px solid rgba(214,168,60,.18);
+  background:rgba(0,0,0,.16);
+}}
+.allv-grid small{{
+  display:block;
+  color:#7fcfff;
+  font-size:9px;
+  letter-spacing:.09em;
+}}
+.allv-grid b{{
+  display:block;
+  margin-top:3px;
+  color:#f4f7fa;
+  font-size:13px;
+}}
+.allv-grid em{{
+  display:block;
+  margin-top:2px;
+  color:#a8c0d0;
+  font-size:10px;
+  font-style:normal;
+}}
+.allv-status{{
+  margin-top:7px;
+  padding-top:6px;
+  border-top:1px solid rgba(214,168,60,.16);
+  text-align:right;
+  color:#d7b95e;
+  font-size:11px;
+  font-weight:850;
+  letter-spacing:.06em;
+}}
 .pilot-engine-row:last-child{{border-bottom:0}}
 .pilot-engine-row b{{
   color:#edf6ff;
@@ -8981,6 +9458,25 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             <div class="resist exp"><i class="resist-icon" aria-hidden="true">✹</i><span>Exp</span><b>—</b></div>
           </div>
         </div>
+        <div class="allv-preview">
+          <div class="allv-head">
+            <strong>ALL V — VALIDATION 4O-B</strong>
+            <span>Référence corporate en cours de validation Dogma</span>
+          </div>
+          <div class="allv-grid">
+            <div>
+              <small>CPU</small>
+              <b>{all_v_cpu_pair}</b>
+              <em>{all_v_cpu_margin}</em>
+            </div>
+            <div>
+              <small>POWERGRID</small>
+              <b>{all_v_pg_pair}</b>
+              <em>{all_v_pg_margin}</em>
+            </div>
+          </div>
+          <div class="allv-status">{all_v_compat}</div>
+        </div>
         {pilot_panel_html}
       </article>
     </div>
@@ -9007,7 +9503,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-A</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-B</span>
   </footer>
 </main>
 
