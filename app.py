@@ -9118,7 +9118,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4O-H — FITTING / CAPACITEUR</div>
+              <div class="pilot-engine-title">MOTEUR 4O-H2 — FITTING / CAPACITEUR</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -9329,6 +9329,34 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         capacitor_audit_coverage = "Données indisponibles"
 
 
+    capacitor_activity_audit = (
+        build_fitted_capacitor_activity_audit(
+            eft_sections
+        )
+    )
+
+    conditional_sources_html = (
+        format_capacitor_audit_items(
+            capacitor_activity_audit[
+                "conditional_sources"
+            ]
+        )
+    )
+    injectors_html = (
+        format_capacitor_audit_items(
+            capacitor_activity_audit[
+                "active_injectors"
+            ]
+        )
+    )
+    transfers_html = (
+        format_capacitor_audit_items(
+            capacitor_activity_audit[
+                "energy_transfers"
+            ]
+        )
+    )
+
     all_v_cap = calculate_skill_aware_capacitor(
         fit.get("ship_type_id"),
         eft_sections,
@@ -9375,6 +9403,22 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
     else:
         all_v_cap_state = "Indéterminé"
+
+    capacitor_projection_policy = capacitor_verdict_policy(
+        all_v_cap_state,
+        capacitor_activity_audit,
+    )
+
+    capacitor_projection_label = escape(
+        capacitor_projection_policy[
+            "verdict"
+        ]
+    )
+    capacitor_projection_reason = escape(
+        capacitor_projection_policy[
+            "reason"
+        ]
+    )
 
     character_cap = None
 
@@ -10164,6 +10208,15 @@ button{{font:inherit}}
   color:#9eb0bd;
   font-size:12px;
 }}
+.capacitor-audit .cap-audit-key{{
+  color:#7ed8ff;
+  font-weight:800;
+}}
+.capacitor-audit .cap-audit-verdict{{
+  color:#f1cc67;
+  font-weight:900;
+  letter-spacing:.05em;
+}}
 .allv-warning{{
   margin-top:7px;
   padding:6px 7px;
@@ -10362,7 +10415,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-H</strong>
+            <strong>ALL V — VALIDATION 4O-H2</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -10382,15 +10435,22 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             </div>
           </div>
           <div class="allv-status">{all_v_compat}</div>
-          <div class="allv-warning" style="margin-top:10px">
-            <strong>CAPACITEUR — MOTEUR 4O-H</strong><br>
+          <div class="allv-warning capacitor-audit" style="margin-top:10px">
+            <strong>CAPACITEUR — AUDIT 4O-H2</strong><br>
             ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
             pic {all_v_cap_peak} • drain continu {all_v_cap_drain}<br>
-            Projection all-active : {all_v_cap_state}.<br>
-            Couverture : {escape(capacitor_audit_coverage)}.
-            Cette projection reste volontairement distincte d'un verdict EVE
-            final : Nosferatu, injections, charges, surchauffe et effets
-            conditionnels ne sont pas encore simulés.
+            Projection hors apports conditionnels : {all_v_cap_state}.<br>
+            <span class="cap-audit-verdict">{capacitor_projection_label}</span>
+            — {capacitor_projection_reason}<br>
+            <span class="cap-audit-key">Sources conditionnelles :</span>
+            {conditional_sources_html}<br>
+            <span class="cap-audit-key">Injecteurs :</span>
+            {injectors_html}<br>
+            <span class="cap-audit-key">Transferts d'énergie :</span>
+            {transfers_html}<br>
+            Couverture cyclique : {escape(capacitor_audit_coverage)}.
+            Les apports détectés restent exclus du calcul numérique tant que
+            leur déclenchement Dogma exact n'est pas simulé.
           </div>
         </div>
         {pilot_panel_html}
@@ -10419,7 +10479,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-H</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-H2</span>
   </footer>
 </main>
 
@@ -15620,6 +15680,95 @@ def build_capacitor_activity_audit(item_names):
     for item in item_names or []:
         audit[keymap[classify_capacitor_item(item)]].append(item)
     return audit
+
+
+def build_fitted_capacitor_activity_audit(
+    eft_sections,
+):
+    """
+    Build a capacitor-behaviour audit from the modules actually fitted.
+
+    Returns display-ready rows with quantities. Cargo, drones and charges
+    are deliberately excluded.
+    """
+    fitted_lines = (
+        eft_sections.get("low", [])
+        + eft_sections.get("mid", [])
+        + eft_sections.get("high", [])
+        + eft_sections.get("rigs", [])
+    )
+
+    counts = {}
+
+    for raw_line in fitted_lines:
+        item_name = normalize_eft_item_name(raw_line)
+
+        if not item_name:
+            continue
+
+        key = item_name.casefold()
+
+        if key not in counts:
+            counts[key] = {
+                "name": item_name,
+                "quantity": 0,
+            }
+
+        counts[key]["quantity"] += 1
+
+    audit = {
+        "continuous_consumers": [],
+        "conditional_sources": [],
+        "active_injectors": [],
+        "energy_transfers": [],
+        "neutral_or_unknown": [],
+    }
+
+    keymap = {
+        "continuous_consumer": "continuous_consumers",
+        "conditional_source": "conditional_sources",
+        "active_injector": "active_injectors",
+        "energy_transfer": "energy_transfers",
+        "neutral_or_unknown": "neutral_or_unknown",
+    }
+
+    for row in counts.values():
+        classification = classify_capacitor_item(
+            row["name"]
+        )
+
+        audit[keymap[classification]].append(
+            row
+        )
+
+    return audit
+
+
+def format_capacitor_audit_items(rows):
+    """Compact HTML-safe list such as '1× Corpus X-Type Heavy Energy Nosferatu'."""
+    if not rows:
+        return "Aucun"
+
+    parts = []
+
+    for row in rows:
+        quantity = int(
+            row.get("quantity", 1)
+            or 1
+        )
+        name = escape(
+            str(
+                row.get("name")
+                or "Module inconnu"
+            )
+        )
+
+        parts.append(
+            f"{quantity}× {name}"
+        )
+
+    return " • ".join(parts)
+
 
 def capacitor_verdict_policy(base_projection, audit):
     audit = audit or {}
