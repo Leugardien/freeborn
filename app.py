@@ -7635,6 +7635,7 @@ DOGMA_CAPACITOR_NEED = 6
 DOGMA_DURATION = 73
 
 _eve_type_dogma_cache = {}
+_eve_dogma_attribute_metadata_cache = {}
 
 _eve_type_category_cache = {}
 _eve_group_category_cache = {}
@@ -7851,6 +7852,298 @@ def split_eft_drone_and_cargo(extras, type_ids):
             cargo.append(line)
 
     return drones, cargo
+
+
+
+def get_eve_dogma_attribute_metadata(attribute_id):
+    """
+    Return public metadata for one Dogma attribute.
+
+    ESI source:
+        /dogma/attributes/{attribute_id}/
+
+    Cached in-process because one fitting can expose many repeated attributes.
+    """
+    if attribute_id is None:
+        return {}
+
+    attribute_id = int(attribute_id)
+
+    if attribute_id in _eve_dogma_attribute_metadata_cache:
+        return _eve_dogma_attribute_metadata_cache[attribute_id]
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/dogma/attributes/{attribute_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+
+        _eve_dogma_attribute_metadata_cache[attribute_id] = payload
+        return payload
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI Dogma attribute lookup failed:",
+            attribute_id,
+            repr(error),
+        )
+        return {}
+
+
+def freeborn_dogma_attribute_label(attribute_id):
+    """Human-readable normalized Dogma attribute label."""
+    metadata = get_eve_dogma_attribute_metadata(attribute_id)
+
+    parts = [
+        metadata.get("name"),
+        metadata.get("display_name"),
+        metadata.get("description"),
+    ]
+
+    return " ".join(
+        str(part)
+        for part in parts
+        if part
+    ).casefold()
+
+
+def find_capacitor_transfer_amount_attribute(type_id):
+    """
+    Find a likely capacitor/energy transfer amount on one module by inspecting
+    the *actual* Dogma attribute metadata rather than hard-coding a module ID.
+
+    Returns:
+        {
+            "attribute_id": ...,
+            "value": ...,
+            "name": ...,
+            "display_name": ...,
+            "score": ...
+        }
+        or None.
+
+    The scoring is deliberately conservative. An uncertain match is rejected.
+    """
+    dogma = get_eve_type_dogma(type_id)
+
+    if not dogma:
+        return None
+
+    candidates = []
+
+    for attribute_id, value in dogma.items():
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+
+        if numeric_value <= 0:
+            continue
+
+        metadata = get_eve_dogma_attribute_metadata(attribute_id)
+        name = str(metadata.get("name") or "")
+        display_name = str(metadata.get("display_name") or "")
+        description = str(metadata.get("description") or "")
+        haystack = " ".join(
+            [name, display_name, description]
+        ).casefold()
+
+        score = 0
+
+        # Strong positive signals.
+        if "powertransferamount" in haystack:
+            score += 12
+        if "energytransferamount" in haystack:
+            score += 12
+        if "capacitortransferamount" in haystack:
+            score += 12
+
+        if "transfer" in haystack:
+            score += 5
+        if "amount" in haystack:
+            score += 3
+        if "capacitor" in haystack:
+            score += 4
+        if "energy" in haystack:
+            score += 3
+        if "power" in haystack:
+            score += 2
+
+        # Reject obvious unrelated attributes.
+        for token in (
+            "range",
+            "optimal",
+            "falloff",
+            "capacitor need",
+            "capacitorneed",
+            "duration",
+            "cpu",
+            "powergrid",
+            "mass",
+            "volume",
+            "radius",
+            "bonus",
+            "multiplier",
+            "resonance",
+            "damage",
+        ):
+            if token in haystack:
+                score -= 8
+
+        candidates.append({
+            "attribute_id": int(attribute_id),
+            "value": numeric_value,
+            "name": name,
+            "display_name": display_name,
+            "score": score,
+        })
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda row: (
+            row["score"],
+            row["value"],
+        ),
+        reverse=True,
+    )
+
+    best = candidates[0]
+
+    # Require meaningful confidence: do not guess from a generic positive attr.
+    if best["score"] < 9:
+        return None
+
+    return best
+
+
+def build_conditional_capacitor_source_dogma_probe(
+    eft_sections,
+    type_ids,
+    capacitor_activity_audit,
+):
+    """
+    Probe the fitted conditional capacitor sources (Nosferatu family).
+
+    The transfer is shown as a *maximum theoretical source* and remains
+    excluded from the stability calculation until target-dependent activation
+    conditions are modeled.
+    """
+    source_rows = (
+        capacitor_activity_audit.get(
+            "conditional_sources",
+            []
+        )
+        or []
+    )
+
+    results = []
+
+    for source in source_rows:
+        name = str(source.get("name") or "")
+        quantity = int(source.get("quantity", 1) or 1)
+        type_id = type_ids.get(name.casefold())
+
+        row = {
+            "name": name,
+            "quantity": quantity,
+            "type_id": type_id,
+            "transfer_gj_cycle": None,
+            "cycle_seconds": None,
+            "max_transfer_gjs": None,
+            "attribute_name": None,
+            "resolved": False,
+        }
+
+        if not type_id:
+            results.append(row)
+            continue
+
+        dogma = get_eve_type_dogma(type_id)
+        duration_ms = dogma.get(DOGMA_DURATION)
+        transfer_attr = find_capacitor_transfer_amount_attribute(
+            type_id
+        )
+
+        if (
+            transfer_attr
+            and duration_ms is not None
+            and float(duration_ms) > 0
+        ):
+            per_cycle = float(transfer_attr["value"])
+            cycle_seconds = float(duration_ms) / 1000.0
+
+            row.update({
+                "transfer_gj_cycle": per_cycle,
+                "cycle_seconds": cycle_seconds,
+                "max_transfer_gjs": (
+                    per_cycle
+                    / cycle_seconds
+                    * quantity
+                ),
+                "attribute_name": (
+                    transfer_attr.get("display_name")
+                    or transfer_attr.get("name")
+                    or f'attribute {transfer_attr["attribute_id"]}'
+                ),
+                "resolved": True,
+            })
+
+        results.append(row)
+
+    return results
+
+
+def format_conditional_source_dogma_probe(rows):
+    """
+    Render an explicit technical proof of what the Dogma probe resolved.
+    """
+    if not rows:
+        return "Aucune source conditionnelle."
+
+    output = []
+
+    for row in rows:
+        safe_name = escape(
+            str(
+                row.get("name")
+                or "Module inconnu"
+            )
+        )
+        quantity = int(
+            row.get("quantity", 1)
+            or 1
+        )
+
+        if not row.get("resolved"):
+            output.append(
+                f"{quantity}× {safe_name} — attribut de transfert non résolu"
+            )
+            continue
+
+        attr_name = escape(
+            str(
+                row.get("attribute_name")
+                or "Dogma"
+            )
+        )
+
+        output.append(
+            f"{quantity}× {safe_name} — "
+            f"{row['transfer_gj_cycle']:.2f} GJ/cycle • "
+            f"{row['cycle_seconds']:.2f} s • "
+            f"maximum théorique {row['max_transfer_gjs']:.2f} GJ/s "
+            f"[{attr_name}]"
+        )
+
+    return "<br>".join(output)
 
 
 
@@ -9118,7 +9411,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4O-H2 — FITTING / CAPACITEUR</div>
+              <div class="pilot-engine-title">MOTEUR 4O-I — FITTING / CAPACITEUR</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -9355,6 +9648,32 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                 "energy_transfers"
             ]
         )
+    )
+
+    conditional_source_dogma_probe = (
+        build_conditional_capacitor_source_dogma_probe(
+            eft_sections,
+            eft_type_ids,
+            capacitor_activity_audit,
+        )
+    )
+
+    conditional_source_dogma_html = (
+        format_conditional_source_dogma_probe(
+            conditional_source_dogma_probe
+        )
+    )
+
+    resolved_conditional_sources = sum(
+        1
+        for row in conditional_source_dogma_probe
+        if row.get("resolved")
+    )
+
+    max_conditional_source_gjs = sum(
+        float(row.get("max_transfer_gjs") or 0.0)
+        for row in conditional_source_dogma_probe
+        if row.get("resolved")
     )
 
     all_v_cap = calculate_skill_aware_capacitor(
@@ -10217,6 +10536,12 @@ button{{font:inherit}}
   font-weight:900;
   letter-spacing:.05em;
 }}
+.capacitor-audit .cap-dogma-probe{{
+  color:#c8dce9;
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-size:11px;
+  line-height:1.35;
+}}
 .allv-warning{{
   margin-top:7px;
   padding:6px 7px;
@@ -10415,7 +10740,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-H2</strong>
+            <strong>ALL V — VALIDATION 4O-I</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -10436,21 +10761,34 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           </div>
           <div class="allv-status">{all_v_compat}</div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
-            <strong>CAPACITEUR — AUDIT 4O-H2</strong><br>
+            <strong>CAPACITEUR — DOGMA 4O-I</strong><br>
             ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
             pic {all_v_cap_peak} • drain continu {all_v_cap_drain}<br>
             Projection hors apports conditionnels : {all_v_cap_state}.<br>
+
             <span class="cap-audit-verdict">{capacitor_projection_label}</span>
             — {capacitor_projection_reason}<br>
+
             <span class="cap-audit-key">Sources conditionnelles :</span>
             {conditional_sources_html}<br>
+
+            <span class="cap-audit-key">Lecture Dogma de la source :</span><br>
+            <span class="cap-dogma-probe">{conditional_source_dogma_html}</span><br>
+
+            <span class="cap-audit-key">Potentiel conditionnel maximum résolu :</span>
+            {escape(f"{max_conditional_source_gjs:.2f} GJ/s")}
+            ({resolved_conditional_sources} source(s) résolue(s))<br>
+
             <span class="cap-audit-key">Injecteurs :</span>
             {injectors_html}<br>
             <span class="cap-audit-key">Transferts d'énergie :</span>
             {transfers_html}<br>
+
             Couverture cyclique : {escape(capacitor_audit_coverage)}.
-            Les apports détectés restent exclus du calcul numérique tant que
-            leur déclenchement Dogma exact n'est pas simulé.
+            Le potentiel du Nosferatu est maintenant lu depuis ses attributs
+            Dogma mais reste volontairement EXCLU de la stabilité : sa
+            disponibilité dépend de la cible et ne peut pas être garantie
+            par le fitting seul.
           </div>
         </div>
         {pilot_panel_html}
@@ -10479,7 +10817,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-H2</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-I</span>
   </footer>
 </main>
 
