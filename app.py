@@ -8350,6 +8350,62 @@ def format_engine_margin(
 
 
 
+
+def format_engine_delta(
+    character_value,
+    all_v_value,
+    unit,
+    *,
+    lower_is_better=False,
+):
+    """
+    Format the difference Character - ALL V.
+
+    For resource consumption (CPU/PG used), lower_is_better=True means
+    a positive raw difference is displayed as a penalty.
+    """
+    if character_value is None or all_v_value is None:
+        return "—"
+
+    delta = float(character_value) - float(all_v_value)
+
+    if abs(delta) < 0.0001:
+        return "Identique à ALL V"
+
+    amount = format_engine_number(abs(delta), unit)
+
+    if lower_is_better:
+        return (
+            f"+{amount} vs ALL V"
+            if delta > 0
+            else f"−{amount} vs ALL V"
+        )
+
+    return (
+        f"+{amount} vs ALL V"
+        if delta > 0
+        else f"−{amount} vs ALL V"
+    )
+
+
+def freeborn_4ob_coverage_label(engine_result):
+    """
+    Make the current validation scope explicit.
+    4O-C still uses the 4O-B calculation kernel; this label prevents the
+    partial engine from being confused with the final complete Dogma engine.
+    """
+    weapon_count = int(
+        engine_result.get("weapon_module_count", 0) or 0
+    )
+
+    return (
+        f"Universel + armes reconnues ({weapon_count} module"
+        + ("" if weapon_count == 1 else "s")
+        + ")"
+    )
+
+
+
 def format_fitting_resource_value(
     used,
     output,
@@ -8504,7 +8560,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4O-B
+    FREEBORN FITTINGS — Phase 4O-C
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -8590,14 +8646,14 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             <span class="pilot-ready">✓ Profil prêt</span>
           </div>
           <div class="pilot-note">
-            Profil ESI chargé. Le moteur 4O-B applique les compétences
+            Profil ESI chargé. Le moteur 4O-C applique les compétences
             universelles CPU / Powergrid ainsi que Weapon Upgrades et
             Advanced Weapon Upgrades aux groupes d'armes reconnus.
             La télémétrie principale reste en BASE pendant cette validation
             avant promotion définitive de la référence ALL V.
           </div>
           <div class="pilot-engine-core">
-            <div class="pilot-engine-title">MOTEUR 4O-B — CPU / POWERGRID</div>
+            <div class="pilot-engine-title">MOTEUR 4O-C — CPU / POWERGRID</div>
             <div class="pilot-engine-row">
               <span>CPU Management</span>
               <b id="pilot-cpu-skill">—</b>
@@ -8633,6 +8689,15 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             </div>
             <div class="pilot-engine-compat" id="pilot-compat">
               ANALYSE EN COURS
+            </div>
+            <div class="pilot-compare" id="pilot-compare">
+              <div class="pilot-compare-title">ÉCART AVEC LA RÉFÉRENCE ALL V</div>
+              <div class="pilot-compare-grid">
+                <span>CPU utilisé</span><b id="pilot-delta-cpu-used">—</b>
+                <span>CPU disponible</span><b id="pilot-delta-cpu-out">—</b>
+                <span>PG utilisé</span><b id="pilot-delta-pg-used">—</b>
+                <span>PG disponible</span><b id="pilot-delta-pg-out">—</b>
+              </div>
             </div>
           </div>
           <a class="pilot-button pilot-refresh" href="{escape(pilot_start_url)}">
@@ -8758,6 +8823,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         else
         "✕ FITTING INSUFFISANT"
     )
+    all_v_coverage = escape(
+        freeborn_4ob_coverage_label(all_v_core)
+    )
+
 
     if pilot_profile:
         character_core = calculate_skill_aware_fitting_resources(
@@ -8864,6 +8933,56 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                 + '</b>',
             )
             .replace(
+                '<b id="pilot-delta-cpu-used">—</b>',
+                '<b id="pilot-delta-cpu-used">'
+                + escape(
+                    format_engine_delta(
+                        character_core["cpu_used"],
+                        all_v_core["cpu_used"],
+                        "tf",
+                        lower_is_better=True,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-cpu-out">—</b>',
+                '<b id="pilot-delta-cpu-out">'
+                + escape(
+                    format_engine_delta(
+                        character_core["cpu_output"],
+                        all_v_core["cpu_output"],
+                        "tf",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-pg-used">—</b>',
+                '<b id="pilot-delta-pg-used">'
+                + escape(
+                    format_engine_delta(
+                        character_core["power_used"],
+                        all_v_core["power_used"],
+                        "MW",
+                        lower_is_better=True,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-pg-out">—</b>',
+                '<b id="pilot-delta-pg-out">'
+                + escape(
+                    format_engine_delta(
+                        character_core["power_output"],
+                        all_v_core["power_output"],
+                        "MW",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
                 '<div class="pilot-engine-compat" id="pilot-compat">\\n              ANALYSE EN COURS\\n            </div>',
                 '<div class="pilot-engine-compat '
                 + pilot_compat_class
@@ -8871,6 +8990,20 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                 + escape(pilot_compat)
                 + '</div>',
             )
+        )
+
+        pilot_panel_html = re.sub(
+            r'<div class="pilot-engine-compat" id="pilot-compat">\s*'
+            r'ANALYSE EN COURS\s*</div>',
+            (
+                '<div class="pilot-engine-compat '
+                + pilot_compat_class
+                + '" id="pilot-compat">'
+                + escape(pilot_compat)
+                + '</div>'
+            ),
+            pilot_panel_html,
+            count=1,
         )
 
     low_html = format_eft_web_items(
@@ -9249,6 +9382,31 @@ button{{font:inherit}}
   border-color:rgba(228,87,87,.40);
   background:rgba(228,87,87,.055);
 }}
+.pilot-compare{{
+  margin-top:8px;
+  padding-top:8px;
+  border-top:1px solid rgba(49,185,255,.13);
+}}
+.pilot-compare-title{{
+  margin-bottom:5px;
+  color:#72d3ff;
+  font-size:10px;
+  font-weight:800;
+  letter-spacing:.08em;
+}}
+.pilot-compare-grid{{
+  display:grid;
+  grid-template-columns:1fr auto;
+  gap:4px 10px;
+  align-items:center;
+  color:#8faabd;
+  font-size:10px;
+}}
+.pilot-compare-grid b{{
+  color:#dbe9f3;
+  text-align:right;
+  white-space:nowrap;
+}}
 .allv-preview{{
   margin:8px 7px 0;
   padding:10px 11px;
@@ -9271,6 +9429,15 @@ button{{font:inherit}}
 .allv-head span{{
   color:#8da2b2;
   font-size:10px;
+}}
+.allv-warning{{
+  margin-top:7px;
+  padding:6px 7px;
+  border-left:2px solid rgba(214,168,60,.52);
+  background:rgba(214,168,60,.035);
+  color:#a79a72;
+  font-size:10px;
+  line-height:1.35;
 }}
 .allv-grid{{
   display:grid;
@@ -9460,8 +9627,12 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-B</strong>
-            <span>Référence corporate en cours de validation Dogma</span>
+            <strong>ALL V — VALIDATION 4O-C</strong>
+            <span>{all_v_coverage}</span>
+          </div>
+          <div class="allv-warning">
+            Calcul encore partiel : les modificateurs Dogma non couverts
+            ne sont pas devinés. BASE reste donc la télémétrie officielle.
           </div>
           <div class="allv-grid">
             <div>
@@ -9503,7 +9674,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-B</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-C</span>
   </footer>
 </main>
 
