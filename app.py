@@ -7628,6 +7628,11 @@ DOGMA_CPU_NEED = 50
 # Ship capacitor telemetry (Dogma): 482 = capacitorCapacity, 55 = rechargeRate (ms).
 DOGMA_CAPACITOR_CAPACITY = 482
 DOGMA_CAPACITOR_RECHARGE_TIME = 55
+# Active module capacitor telemetry.
+# 6 = capacitorNeed (GJ per activation)
+# 73 = duration (milliseconds per activation cycle)
+DOGMA_CAPACITOR_NEED = 6
+DOGMA_DURATION = 73
 
 _eve_type_dogma_cache = {}
 
@@ -7994,6 +7999,91 @@ def calculate_base_fitting_resources(
     result["cpu_complete"] = cpu_ok
     result["power_complete"] = power_ok
 
+    return result
+
+
+
+def calculate_base_capacitor_engine(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+):
+    """
+    Phase 4O-F capacitor engine.
+
+    This layer intentionally stays conservative. It calculates only values
+    directly supported by public Dogma attributes:
+      - base capacitor capacity;
+      - base recharge time;
+      - theoretical peak passive recharge (2.5 * capacity / recharge time);
+      - capacitor drain of fitted modules exposing both capacitorNeed and
+        duration.
+
+    It does NOT yet claim final EVE stability when conditional capacitor
+    warfare/injection, charges, scripts, overheating, implants, fleet effects,
+    or uncovered modifier chains can alter the result.
+    """
+    result = {
+        "capacity_gj": None,
+        "recharge_seconds": None,
+        "peak_recharge_gjs": None,
+        "active_drain_gjs": 0.0,
+        "net_peak_gjs": None,
+        "complete": False,
+        "consumer_count": 0,
+        "unresolved_count": 0,
+    }
+
+    ship_dogma = get_eve_type_dogma(ship_type_id)
+    if not ship_dogma:
+        return result
+
+    capacity = ship_dogma.get(DOGMA_CAPACITOR_CAPACITY)
+    recharge_ms = ship_dogma.get(DOGMA_CAPACITOR_RECHARGE_TIME)
+
+    if capacity is None or recharge_ms in (None, 0):
+        return result
+
+    capacity = float(capacity)
+    recharge_seconds = float(recharge_ms) / 1000.0
+    peak_recharge = (2.5 * capacity / recharge_seconds) if recharge_seconds > 0 else None
+
+    result["capacity_gj"] = capacity
+    result["recharge_seconds"] = recharge_seconds
+    result["peak_recharge_gjs"] = peak_recharge
+
+    module_counts = _eft_fitted_module_counts(eft_sections, type_ids)
+    module_dogma_complete = True
+
+    for type_id, quantity in module_counts.items():
+        dogma = get_eve_type_dogma(type_id)
+        if not dogma:
+            module_dogma_complete = False
+            result["unresolved_count"] += int(quantity)
+            continue
+
+        cap_need = dogma.get(DOGMA_CAPACITOR_NEED)
+        duration_ms = dogma.get(DOGMA_DURATION)
+
+        # No capacitorNeed means no directly measurable cyclic drain here.
+        if cap_need is None or float(cap_need) <= 0:
+            continue
+
+        # A positive capacitorNeed without a usable duration cannot safely be
+        # converted to GJ/s; mark the audit incomplete rather than guessing.
+        if duration_ms is None or float(duration_ms) <= 0:
+            module_dogma_complete = False
+            result["unresolved_count"] += int(quantity)
+            continue
+
+        per_module_gjs = float(cap_need) / (float(duration_ms) / 1000.0)
+        result["active_drain_gjs"] += per_module_gjs * int(quantity)
+        result["consumer_count"] += int(quantity)
+
+    if peak_recharge is not None:
+        result["net_peak_gjs"] = peak_recharge - result["active_drain_gjs"]
+
+    result["complete"] = module_dogma_complete
     return result
 
 
@@ -8669,7 +8759,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4O-E — CPU / POWERGRID</div>
+              <div class="pilot-engine-title">MOTEUR 4O-F — CPU / POWERGRID</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -8812,26 +8902,60 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
     )
 
-    # Phase 4O-E — capacitor BASE telemetry.
-    # We expose only values directly supported by ship Dogma here; module cycle
-    # drain, cap warfare and stability remain deliberately unclaimed until the
-    # effect engine covers them.
-    ship_dogma = get_eve_type_dogma(fit.get("ship_type_id"))
-    capacitor_capacity = ship_dogma.get(DOGMA_CAPACITOR_CAPACITY) if ship_dogma else None
-    capacitor_recharge_ms = ship_dogma.get(DOGMA_CAPACITOR_RECHARGE_TIME) if ship_dogma else None
-    if capacitor_capacity is not None and capacitor_recharge_ms is not None:
-        capacitor_recharge_seconds = float(capacitor_recharge_ms) / 1000.0
+    # Phase 4O-F — capacitor engine.
+    # The main telemetry remains BASE while the engine audits cyclic module
+    # consumption. We expose peak passive recharge but do not invent final
+    # stability for conditional/special capacitor mechanics.
+    capacitor_engine = calculate_base_capacitor_engine(
+        fit.get("ship_type_id"),
+        eft_sections,
+        eft_type_ids,
+    )
+    capacitor_capacity = capacitor_engine["capacity_gj"]
+    capacitor_recharge_seconds = capacitor_engine["recharge_seconds"]
+    capacitor_peak = capacitor_engine["peak_recharge_gjs"]
+    capacitor_drain = capacitor_engine["active_drain_gjs"]
+    capacitor_net_peak = capacitor_engine["net_peak_gjs"]
+
+    if capacitor_capacity is not None and capacitor_recharge_seconds is not None:
         capacitor_value = escape(
-            f"{float(capacitor_capacity):,.0f} GJ • {capacitor_recharge_seconds:,.0f} s"
+            f"{float(capacitor_capacity):,.0f} GJ • {float(capacitor_recharge_seconds):,.0f} s"
             .replace(",", " ")
         )
         capacitor_title = escape(
-            "Capacité et temps de recharge BASE du vaisseau (Dogma). "
-            "Stabilité et consommation des modules : moteur à venir."
+            "Capaciteur BASE Dogma. "
+            + (
+                f"Recharge passive maximale théorique : {capacitor_peak:.2f} GJ/s. "
+                if capacitor_peak is not None else ""
+            )
+            + (
+                f"Consommation cyclique détectée : {capacitor_drain:.2f} GJ/s. "
+                if capacitor_engine["consumer_count"] else
+                "Aucune consommation cyclique Dogma détectée. "
+            )
+            + "La stabilité finale n'est pas encore déclarée tant que les effets "
+              "conditionnels et modificateurs Dogma ne sont pas tous couverts."
         )
     else:
         capacitor_value = "À calculer"
         capacitor_title = "Données Dogma capaciteur indisponibles."
+
+    if capacitor_peak is not None:
+        capacitor_audit_peak = escape(f"{capacitor_peak:.2f} GJ/s")
+        capacitor_audit_drain = escape(f"{capacitor_drain:.2f} GJ/s")
+        capacitor_audit_net = escape(
+            f"{capacitor_net_peak:+.2f} GJ/s" if capacitor_net_peak is not None else "—"
+        )
+        capacitor_audit_coverage = (
+            "Dogma cyclique résolu"
+            if capacitor_engine["complete"]
+            else f"Partiel • {capacitor_engine['unresolved_count']} module(s) non résolu(s)"
+        )
+    else:
+        capacitor_audit_peak = "—"
+        capacitor_audit_drain = "—"
+        capacitor_audit_net = "—"
+        capacitor_audit_coverage = "Données indisponibles"
 
     all_v_core = calculate_skill_aware_fitting_resources(
         fit.get("ship_type_id"),
@@ -9734,7 +9858,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-E</strong>
+            <strong>ALL V — VALIDATION 4O-F</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -9754,6 +9878,14 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             </div>
           </div>
           <div class="allv-status">{all_v_compat}</div>
+          <div class="allv-warning" style="margin-top:10px">
+            <strong>CAPACITEUR — AUDIT 4O-F</strong><br>
+            Pic recharge BASE : {capacitor_audit_peak} •
+            Drain cyclique détecté : {capacitor_audit_drain} •
+            Solde au pic : {capacitor_audit_net}<br>
+            Couverture : {escape(capacitor_audit_coverage)}.
+            La stabilité EVE finale reste volontairement non déclarée à ce stade.
+          </div>
         </div>
         {pilot_panel_html}
       </article>
@@ -9781,7 +9913,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-E</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-F</span>
   </footer>
 </main>
 
