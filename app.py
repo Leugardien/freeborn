@@ -7346,8 +7346,25 @@ def freeborn_fitting_web_page(fit):
     safe_ship = escape(str(fit.get("ship_name") or "Vaisseau inconnu"))
     safe_usage = escape(str(fit.get("usage") or "Non précisé"))
     safe_notes = escape(str(fit.get("notes") or "Aucune note du créateur."))
-    safe_creator = escape(str(fit.get("created_by_discord_user_id") or "—"))
+    safe_eft = escape(str(fit.get("eft_text") or "EFT indisponible."))
+    creator_id = str(fit.get("created_by_discord_user_id") or "")
     status = str(fit.get("status") or "proposed").lower()
+
+    creator_display = creator_id or "Créateur inconnu"
+    try:
+        member = get_discord_member(str(fit.get("guild_id") or DISCORD_GUILD_ID), creator_id)
+        if member:
+            user = member.get("user") or {}
+            creator_display = (
+                member.get("nick")
+                or user.get("global_name")
+                or user.get("username")
+                or creator_display
+            )
+    except Exception as error:
+        print("Freeborn Fittings creator lookup failed:", repr(error))
+
+    safe_creator = escape(str(creator_display))
 
     status_map = {
         "proposed": ("PROPOSÉ", "#d5a632"),
@@ -7380,30 +7397,46 @@ def freeborn_fitting_web_page(fit):
   --status:{status_color};
 }}
 *{{box-sizing:border-box}}
-body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:linear-gradient(rgba(1,4,8,.72),rgba(1,4,8,.86)),url('/assets/bg-space.jpg') center/cover fixed no-repeat,#03060a;padding:20px}}
-.shell{{width:min(1180px,100%);margin:auto;border:1px solid rgba(213,166,50,.65);background:linear-gradient(145deg,rgba(7,10,15,.96),rgba(3,6,10,.98));box-shadow:0 0 35px rgba(0,0,0,.65),inset 0 0 45px rgba(20,156,255,.035)}}
-.top{{display:grid;grid-template-columns:150px 1fr auto;gap:24px;align-items:center;padding:24px 28px;border-bottom:1px solid rgba(213,166,50,.42)}}
-.logo{{width:138px;max-width:100%}}
-.brand h1{{margin:0;font-size:clamp(28px,5vw,54px);letter-spacing:.08em;line-height:.95;text-transform:uppercase;color:#e8e5df;text-shadow:0 2px 0 #31343b}}
+html{{scroll-behavior:smooth}}
+body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:linear-gradient(rgba(1,4,8,.72),rgba(1,4,8,.88)),url('/assets/bg-space.jpg') center/cover fixed no-repeat,#03060a;padding:10px}}
+button{{font:inherit}}
+.shell{{width:min(1240px,100%);margin:auto;border:1px solid rgba(213,166,50,.66);background:linear-gradient(145deg,rgba(7,10,15,.97),rgba(3,6,10,.99));box-shadow:0 0 35px rgba(0,0,0,.65),inset 0 0 45px rgba(20,156,255,.035)}}
+.top{{display:grid;grid-template-columns:108px 1fr auto;gap:18px;align-items:center;padding:12px 22px;border-bottom:1px solid rgba(213,166,50,.42);min-height:112px}}
+.logo{{width:98px;max-width:100%;filter:drop-shadow(0 0 12px rgba(20,156,255,.18))}}
+.brand h1{{margin:0;font-size:clamp(28px,4.5vw,50px);letter-spacing:.08em;line-height:.95;text-transform:uppercase;color:#e8e5df;text-shadow:0 2px 0 #31343b}}
 .brand h1 span{{color:var(--gold2)}}
-.brand p{{margin:10px 0 0;color:#d6d1c8;letter-spacing:.18em;text-transform:uppercase;font-size:12px}}
-.badge{{border:1px solid var(--status);color:var(--status);padding:12px 16px;font-weight:800;letter-spacing:.08em;white-space:nowrap;background:color-mix(in srgb,var(--status) 8%,#05080d);box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
-.content{{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,44%);gap:18px;padding:20px}}
-.panel{{border:1px solid rgba(213,166,50,.38);background:linear-gradient(180deg,rgba(13,18,25,.94),rgba(7,10,15,.96));padding:22px}}
-.kicker{{color:var(--gold2);font-size:12px;letter-spacing:.18em;text-transform:uppercase}}
-h2{{margin:7px 0 2px;font-size:clamp(30px,4vw,48px);text-transform:uppercase}}
-.ref{{color:var(--muted);font-family:Consolas,monospace;font-size:14px}}
-.meta{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:24px}}
-.meta div{{padding:13px 14px;border-top:1px solid rgba(213,166,50,.26);background:rgba(0,0,0,.16)}}
-.meta small{{display:block;color:var(--gold2);text-transform:uppercase;letter-spacing:.13em;margin-bottom:5px}}
-.notes{{margin-top:20px;padding:18px;border-left:3px solid var(--gold);background:rgba(213,166,50,.055);line-height:1.55;white-space:pre-wrap}}
-.shipbox{{min-height:440px;display:grid;place-items:center;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(213,166,50,.12),rgba(0,0,0,.08) 45%,rgba(0,0,0,.55))}}
+.brand p{{margin:7px 0 0;color:#d6d1c8;letter-spacing:.16em;text-transform:uppercase;font-size:11px}}
+.badge{{border:1px solid var(--status);color:var(--status);padding:10px 14px;font-weight:800;letter-spacing:.08em;white-space:nowrap;background:color-mix(in srgb,var(--status) 8%,#05080d);box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
+.content{{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,42%);gap:14px;padding:14px 16px 10px}}
+.panel{{border:1px solid rgba(213,166,50,.38);background:linear-gradient(180deg,rgba(13,18,25,.94),rgba(7,10,15,.97));padding:16px}}
+.kicker{{color:var(--gold2);font-size:11px;letter-spacing:.18em;text-transform:uppercase}}
+h2{{margin:5px 0 2px;font-size:clamp(27px,3.8vw,44px);line-height:1.08;text-transform:uppercase}}
+.ref{{color:var(--muted);font-family:Consolas,monospace;font-size:13px}}
+.meta{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px}}
+.meta div{{padding:9px 12px;border-top:1px solid rgba(213,166,50,.26);background:rgba(0,0,0,.16)}}
+.meta small{{display:block;color:var(--gold2);text-transform:uppercase;letter-spacing:.13em;margin-bottom:4px;font-size:10px}}
+.notes{{margin-top:12px;padding:12px 14px;border-left:3px solid var(--gold);background:rgba(213,166,50,.055);line-height:1.42;white-space:pre-wrap;min-height:76px}}
+.shipbox{{min-height:332px;display:grid;place-items:center;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(213,166,50,.12),rgba(0,0,0,.08) 45%,rgba(0,0,0,.55));padding:12px}}
 .shipbox:before{{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent 49.8%,rgba(20,156,255,.12) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(213,166,50,.09) 50%,transparent 50.2%);pointer-events:none}}
-.ship{{width:100%;height:auto;max-height:520px;object-fit:contain;position:relative;filter:drop-shadow(0 16px 26px rgba(0,0,0,.75))}}
+.ship{{width:100%;height:100%;max-height:360px;object-fit:contain;position:relative;filter:drop-shadow(0 16px 26px rgba(0,0,0,.75))}}
 .ship-placeholder{{color:var(--muted);letter-spacing:.18em;text-align:center}}
-.bottom{{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:16px 28px;border-top:1px solid rgba(213,166,50,.38);color:#aeb6c0;font-size:12px;letter-spacing:.12em;text-transform:uppercase}}
+.actions{{display:flex;flex-wrap:wrap;gap:9px;padding:0 16px 12px}}
+.action{{appearance:none;border:1px solid rgba(213,166,50,.62);background:linear-gradient(180deg,rgba(213,166,50,.11),rgba(213,166,50,.035));color:#f5d36f;padding:9px 14px;min-height:38px;text-transform:uppercase;letter-spacing:.08em;font-weight:800;font-size:11px;cursor:pointer;transition:.18s ease;display:inline-flex;align-items:center;gap:8px}}
+.action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 18px rgba(213,166,50,.13)}}
+.action.blue{{border-color:rgba(20,156,255,.72);color:#69c7ff;background:linear-gradient(180deg,rgba(20,156,255,.12),rgba(20,156,255,.035))}}
+.action.green{{border-color:rgba(120,201,74,.65);color:#9ce36d}}
+.action:disabled{{opacity:.42;cursor:not-allowed;transform:none;box-shadow:none}}
+.eft-wrap{{padding:0 16px 12px}}
+.eft-panel{{display:none;border:1px solid rgba(20,156,255,.38);background:linear-gradient(180deg,rgba(6,12,20,.98),rgba(3,7,12,.99));padding:12px}}
+.eft-panel.open{{display:block}}
+.eft-head{{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}}
+.eft-head strong{{color:var(--gold2);letter-spacing:.12em;text-transform:uppercase;font-size:11px}}
+pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;border:1px solid rgba(255,255,255,.06);color:#d9e6f7;font:12px/1.42 Consolas,"Courier New",monospace;white-space:pre-wrap}}
+.bottom{{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:10px 22px;border-top:1px solid rgba(213,166,50,.38);color:#aeb6c0;font-size:10px;letter-spacing:.12em;text-transform:uppercase}}
 .motto{{color:var(--gold2)}}
-@media(max-width:780px){{body{{padding:8px}}.top{{grid-template-columns:84px 1fr;gap:14px;padding:18px}}.logo{{width:80px}}.badge{{grid-column:1/-1;text-align:center}}.content{{grid-template-columns:1fr;padding:10px}}.shipbox{{min-height:300px}}.meta{{grid-template-columns:1fr}}.bottom{{display:block;text-align:center;line-height:1.8}}}}
+.toast{{position:fixed;right:18px;bottom:18px;padding:10px 14px;border:1px solid rgba(120,201,74,.7);background:#07100a;color:#a9ee80;letter-spacing:.06em;font-weight:700;opacity:0;transform:translateY(8px);pointer-events:none;transition:.2s ease;z-index:50}}
+.toast.show{{opacity:1;transform:translateY(0)}}
+@media(max-width:820px){{body{{padding:6px}}.top{{grid-template-columns:72px 1fr;gap:10px;padding:12px}}.logo{{width:68px}}.badge{{grid-column:1/-1;text-align:center}}.content{{grid-template-columns:1fr;padding:8px}}.shipbox{{min-height:260px}}.meta{{grid-template-columns:1fr}}.actions,.eft-wrap{{padding-left:8px;padding-right:8px}}.action{{flex:1 1 145px;justify-content:center}}.bottom{{display:block;text-align:center;line-height:1.8}}}}
 </style>
 </head>
 <body>
@@ -7413,6 +7446,7 @@ h2{{margin:7px 0 2px;font-size:clamp(30px,4vw,48px);text-transform:uppercase}}
     <div class="brand"><h1>FREEBORN <span>FITTS</span></h1><p>Bibliothèque de fittings • par les FREE • pour les FREE</p></div>
     <div class="badge">{escape(status_label)}</div>
   </header>
+
   <section class="content">
     <article class="panel">
       <div class="kicker">{safe_ref} • fiche corporate</div>
@@ -7420,14 +7454,59 @@ h2{{margin:7px 0 2px;font-size:clamp(30px,4vw,48px);text-transform:uppercase}}
       <div class="ref">{safe_ship}</div>
       <div class="meta">
         <div><small>Usage</small><strong>{safe_usage}</strong></div>
-        <div><small>Créateur Discord</small><strong>{safe_creator}</strong></div>
+        <div><small>Créé par</small><strong>{safe_creator}</strong></div>
       </div>
       <div class="notes"><div class="kicker">Notes du créateur</div><br>{safe_notes}</div>
     </article>
     <aside class="panel shipbox">{ship_html}</aside>
   </section>
-  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Phase Web 4A</span></footer>
+
+  <nav class="actions" aria-label="Actions du fitting">
+    <button class="action" type="button" onclick="toggleEft()">▣ Afficher EFT</button>
+    <button class="action" type="button" onclick="copyEft()">▤ Copier EFT</button>
+    <button class="action blue" type="button" onclick="exportEft()">⇩ Exporter EFT</button>
+    <button class="action" type="button" disabled title="Disponible après authentification Discord">✎ Modifier</button>
+    <button class="action green" type="button" disabled title="Validation Web prévue à la prochaine phase">✓ Approuver / Refuser</button>
+  </nav>
+
+  <section class="eft-wrap" id="eftWrap">
+    <div class="eft-panel" id="eftPanel">
+      <div class="eft-head"><strong>EFT — {safe_ref} • {safe_ship}</strong><span class="ref">Source Neon</span></div>
+      <pre id="eftText">{safe_eft}</pre>
+    </div>
+  </section>
+
+  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Fittings 4B</span></footer>
 </main>
+<div class="toast" id="toast">EFT copié</div>
+<script>
+const fitRef = "{safe_ref}";
+const shipName = "{safe_ship}";
+function getEft() {{ return document.getElementById('eftText').textContent; }}
+function toggleEft() {{ document.getElementById('eftPanel').classList.toggle('open'); }}
+async function copyEft() {{
+  const text = getEft();
+  try {{
+    await navigator.clipboard.writeText(text);
+    showToast('EFT copié dans le presse-papiers');
+  }} catch (e) {{
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    showToast('EFT copié dans le presse-papiers');
+  }}
+}}
+function exportEft() {{
+  const blob = new Blob([getEft()], {{type:'text/plain;charset=utf-8'}});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `${{fitRef}}-${{shipName}}.txt`.replace(/[^a-z0-9._-]+/gi,'-');
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}}
+function showToast(message) {{
+  const toast = document.getElementById('toast'); toast.textContent = message; toast.classList.add('show');
+  window.clearTimeout(window.__fbToast); window.__fbToast = window.setTimeout(() => toast.classList.remove('show'), 1800);
+}}
+</script>
 </body>
 </html>'''
 
