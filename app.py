@@ -8422,38 +8422,60 @@ def fitted_mass_additions(
     }
 
 
-def effective_propulsion_thrust(row):
+def resolve_effective_propulsion_thrust(row):
     """
-    Return the effective thrust used by the velocity formula.
+    Resolve propulsion thrust in Newtons without trusting a possibly scaled
+    raw SDE/ESI thrust value blindly.
 
-    EVE propulsion sizing has a stable relationship between the propulsion
-    mass addition and effective thrust: thrust = 3 × massAddition.
+    For standard EVE propulsion size classes the canonical relationship is:
+        effective thrust = 3 × massAddition
 
-    The raw Dogma thrust is retained separately for diagnostics because some
-    SDE/ESI representations expose a value scaled differently.
+    Examples:
+        500,000 kg   -> 1,500,000 N
+        5,000,000 kg -> 15,000,000 N
+        50,000,000 kg -> 150,000,000 N
+
+    We retain the raw Dogma value and expose the scale ratio for audit.
+    If massAddition is unavailable, raw thrust is used only as a fallback.
     """
-    mass_addition = row.get(
-        "mass_addition"
-    )
+    mass_addition = row.get("mass_addition")
+    raw_thrust = row.get("thrust")
 
+    canonical = None
+    source = "unresolved"
+
+    if mass_addition is not None and float(mass_addition) > 0:
+        canonical = float(mass_addition) * 3.0
+        source = "massAddition × 3"
+    elif raw_thrust is not None and float(raw_thrust) > 0:
+        canonical = float(raw_thrust)
+        source = "raw Dogma fallback"
+
+    ratio = None
     if (
-        mass_addition is not None
-        and float(mass_addition) > 0
+        canonical is not None
+        and canonical > 0
+        and raw_thrust is not None
     ):
-        return (
-            float(mass_addition)
-            * 3.0
-        )
+        ratio = float(raw_thrust) / canonical
 
-    raw_thrust = row.get(
-        "thrust"
-    )
+    return {
+        "effective_thrust_n": canonical,
+        "raw_thrust": (
+            float(raw_thrust)
+            if raw_thrust is not None
+            else None
+        ),
+        "raw_to_effective_ratio": ratio,
+        "source": source,
+    }
 
-    return (
-        float(raw_thrust)
-        if raw_thrust is not None
-        else None
-    )
+
+def effective_propulsion_thrust(row):
+    """Compatibility wrapper retained for existing 4P-C call sites."""
+    return resolve_effective_propulsion_thrust(
+        row
+    )["effective_thrust_n"]
 
 
 def freeborn_propulsion_kind(
@@ -8772,6 +8794,12 @@ def calculate_skill_aware_velocity(
     active_propulsion = None
     effective_bonus = None
     effective_thrust = None
+    thrust_audit = {
+        "effective_thrust_n": None,
+        "raw_thrust": None,
+        "raw_to_effective_ratio": None,
+        "source": "unresolved",
+    }
 
     if (
         velocity_off is not None
@@ -8785,11 +8813,14 @@ def calculate_skill_aware_velocity(
             "speed_factor"
         )
 
-        effective_thrust = (
-            effective_propulsion_thrust(
+        thrust_audit = (
+            resolve_effective_propulsion_thrust(
                 active_propulsion
             )
         )
+        effective_thrust = thrust_audit[
+            "effective_thrust_n"
+        ]
 
         if (
             speed_factor is not None
@@ -8831,6 +8862,15 @@ def calculate_skill_aware_velocity(
         "active_propulsion": active_propulsion,
         "effective_propulsion_bonus": effective_bonus,
         "effective_thrust_n": effective_thrust,
+        "raw_propulsion_thrust": thrust_audit[
+            "raw_thrust"
+        ],
+        "raw_to_effective_thrust_ratio": thrust_audit[
+            "raw_to_effective_ratio"
+        ],
+        "thrust_source": thrust_audit[
+            "source"
+        ],
     }
 
 
@@ -10008,7 +10048,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4P-C
+    FREEBORN FITTINGS — Phase 4P-D
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -10114,7 +10154,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4P-C — FITTING / CAP / VITESSE</div>
+              <div class="pilot-engine-title">MOTEUR 4P-D — FITTING / CAP / VITESSE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -11580,7 +11620,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4P-C</strong>
+            <strong>ALL V — VALIDATION 4P-D</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -11631,7 +11671,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             par le fitting seul.
           </div>
           <div class="allv-warning" style="margin-top:10px">
-            <strong>VITESSE — MOTEUR 4P-C</strong><br>
+            <strong>VITESSE — MOTEUR 4P-D</strong><br>
             Hull BASE : {velocity_value} •
             ALL V, propulsion OFF : {all_v_velocity_value} •
             <strong>ALL V, propulsion ACTIVE : {all_v_active_velocity_value}</strong><br>
@@ -11644,10 +11684,18 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             {escape(f'{all_v_velocity["mass_addition_kg"]:,.0f} kg'.replace(",", " "))} •
             <span class="cap-audit-key">masse active :</span>
             {escape(f'{all_v_velocity["active_mass_kg"]:,.0f} kg'.replace(",", " ") if all_v_velocity["active_mass_kg"] is not None else "—")}<br>
-            <span class="cap-audit-key">Thrust effectif normalisé :</span>
+            <span class="cap-audit-key">Thrust Dogma brut :</span>
+            {escape(f'{all_v_velocity["raw_propulsion_thrust"]:,.0f}'.replace(",", " ") if all_v_velocity["raw_propulsion_thrust"] is not None else "—")} •
+            <span class="cap-audit-key">Thrust effectif :</span>
             {escape(f'{all_v_velocity["effective_thrust_n"]:,.0f} N'.replace(",", " ") if all_v_velocity["effective_thrust_n"] is not None else "—")}<br>
-            4P-C applique maintenant la formule propulsion complète
-            bonus × thrust / masse. Les effets de vitesse supplémentaires
+            <span class="cap-audit-key">Résolution thrust :</span>
+            {escape(all_v_velocity["thrust_source"])} •
+            <span class="cap-audit-key">ratio brut/effectif :</span>
+            {escape(f'{all_v_velocity["raw_to_effective_thrust_ratio"]:.2f}×' if all_v_velocity["raw_to_effective_thrust_ratio"] is not None else "—")}<br>
+            4P-D consolide la formule propulsion complète
+            bonus × thrust / masse. Le thrust effectif est dérivé de la classe
+            de propulsion via massAddition × 3 ; la valeur Dogma brute reste
+            affichée uniquement pour audit. Les effets de vitesse supplémentaires
             (overdrive, nanofiber, implants, boosts de flotte, surchauffe)
             restent hors couverture tant que leurs modificateurs Dogma
             spécifiques ne sont pas intégrés.
@@ -11679,7 +11727,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4P-C</span>
+    <span class="version">Freeborn Legacy • Fittings 4P-D</span>
   </footer>
 </main>
 
