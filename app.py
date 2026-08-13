@@ -8135,7 +8135,7 @@ def freeborn_capacitor_module_skill_modifier(
     """
     Return (cap_need_multiplier, duration_multiplier, rule_label).
 
-    Phase 4O-G intentionally recognizes only well-defined, common fitting
+    Phase 4O-H intentionally recognizes only well-defined, common fitting
     families. Unknown groups remain at 1.0 rather than receiving a guessed
     bonus. Full SDE modifierInfo coverage remains a later engine phase.
     """
@@ -8312,7 +8312,7 @@ def calculate_skill_aware_capacitor(
     skills_snapshot=None,
 ):
     """
-    Phase 4O-G skill-aware capacitor profile.
+    Phase 4O-H skill-aware capacitor profile.
 
     Universal pilot skills:
       - Capacitor Management: +5% capacity / level
@@ -9118,7 +9118,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4O-G — FITTING / CAPACITEUR</div>
+              <div class="pilot-engine-title">MOTEUR 4O-H — FITTING / CAPACITEUR</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -10362,7 +10362,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-G</strong>
+            <strong>ALL V — VALIDATION 4O-H</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -10383,7 +10383,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           </div>
           <div class="allv-status">{all_v_compat}</div>
           <div class="allv-warning" style="margin-top:10px">
-            <strong>CAPACITEUR — MOTEUR 4O-G</strong><br>
+            <strong>CAPACITEUR — MOTEUR 4O-H</strong><br>
             ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
             pic {all_v_cap_peak} • drain continu {all_v_cap_drain}<br>
             Projection all-active : {all_v_cap_state}.<br>
@@ -10419,7 +10419,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-G</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-H</span>
   </footer>
 </main>
 
@@ -15576,6 +15576,74 @@ register_commands()
 # ============================================================
 # START
 # ============================================================
+
+# ============================================================
+# PHASE 4O-H — ADVANCED CAPACITOR MODEL
+# ============================================================
+
+CAPACITOR_EFFECT_CLASSES = {
+    "continuous_consumer": (
+        "microwarpdrive", "afterburner", "shield booster", "armor repairer",
+        "armor repair", "hardener", "tracking computer", "guidance computer",
+        "sensor booster", "remote", "ecm", "warp disrupt", "warp scram",
+        "stasis web", "target painter", "cloaking device", "tractor beam",
+    ),
+    "conditional_source": ("nosferatu", "energy nosferatu"),
+    "active_injector": ("capacitor booster", "cap booster"),
+    "energy_transfer": ("energy transfer", "remote capacitor"),
+}
+
+def classify_capacitor_item(type_name):
+    name = (type_name or "").strip().lower()
+    if not name:
+        return "neutral_or_unknown"
+    for cls in ("conditional_source", "active_injector", "energy_transfer"):
+        if any(token in name for token in CAPACITOR_EFFECT_CLASSES[cls]):
+            return cls
+    if any(token in name for token in CAPACITOR_EFFECT_CLASSES["continuous_consumer"]):
+        return "continuous_consumer"
+    return "neutral_or_unknown"
+
+def build_capacitor_activity_audit(item_names):
+    audit = {
+        "continuous_consumers": [], "conditional_sources": [],
+        "active_injectors": [], "energy_transfers": [],
+        "neutral_or_unknown": [],
+    }
+    keymap = {
+        "continuous_consumer": "continuous_consumers",
+        "conditional_source": "conditional_sources",
+        "active_injector": "active_injectors",
+        "energy_transfer": "energy_transfers",
+        "neutral_or_unknown": "neutral_or_unknown",
+    }
+    for item in item_names or []:
+        audit[keymap[classify_capacitor_item(item)]].append(item)
+    return audit
+
+def capacitor_verdict_policy(base_projection, audit):
+    audit = audit or {}
+    conditional = (
+        audit.get("conditional_sources", [])
+        + audit.get("active_injectors", [])
+        + audit.get("energy_transfers", [])
+    )
+    if conditional:
+        return {
+            "projection": base_projection,
+            "verdict": "PROJECTION CONDITIONNELLE",
+            "is_final_eve_verdict": False,
+            "reason": "Source, injection ou transfert de capaciteur conditionnel détecté.",
+            "conditional_items": conditional,
+        }
+    return {
+        "projection": base_projection,
+        "verdict": "PROJECTION ALL-ACTIVE",
+        "is_final_eve_verdict": False,
+        "reason": "Projection théorique limitée aux effets Dogma actuellement couverts.",
+        "conditional_items": [],
+    }
+
 
 if __name__ == "__main__":
 
