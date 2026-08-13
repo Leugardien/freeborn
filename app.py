@@ -8088,6 +8088,365 @@ def calculate_base_capacitor_engine(
 
 
 
+
+_freeborn_skill_type_id_cache = {}
+
+
+def freeborn_skill_type_id(skill_name):
+    """
+    Resolve an exact EVE skill typeID once per process through public ESI.
+    This keeps the code independent from hard-coded skill typeIDs.
+    """
+    clean = str(skill_name or "").strip()
+
+    if not clean:
+        return None
+
+    key = clean.casefold()
+
+    if key in _freeborn_skill_type_id_cache:
+        return _freeborn_skill_type_id_cache[key]
+
+    type_id = resolve_eve_inventory_type_id(clean)
+    _freeborn_skill_type_id_cache[key] = type_id
+    return type_id
+
+
+def freeborn_context_named_skill_level(context, skill_name):
+    """Resolve a named skill level for ALL V or a real ESI character."""
+    if context.get("mode") == "all_v":
+        return FREEBORN_ALL_V_LEVEL
+
+    type_id = freeborn_skill_type_id(skill_name)
+
+    if not type_id:
+        return 0
+
+    return freeborn_context_skill_level(
+        context,
+        type_id,
+    )
+
+
+def freeborn_capacitor_module_skill_modifier(
+    type_id,
+    context,
+):
+    """
+    Return (cap_need_multiplier, duration_multiplier, rule_label).
+
+    Phase 4O-G intentionally recognizes only well-defined, common fitting
+    families. Unknown groups remain at 1.0 rather than receiving a guessed
+    bonus. Full SDE modifierInfo coverage remains a later engine phase.
+    """
+    group_name = get_eve_type_group_name(type_id).casefold()
+
+    cap_mult = 1.0
+    duration_mult = 1.0
+    rule = None
+
+    if "microwarpdrive" in group_name:
+        level = freeborn_context_named_skill_level(
+            context,
+            "High Speed Maneuvering",
+        )
+        cap_mult *= max(0.0, 1.0 - (0.05 * level))
+        rule = f"High Speed Maneuvering {level}/5"
+
+    elif "afterburner" in group_name:
+        level = freeborn_context_named_skill_level(
+            context,
+            "Afterburner",
+        )
+        cap_mult *= max(0.0, 1.0 - (0.10 * level))
+        duration_mult *= max(0.01, 1.0 - (0.05 * level))
+        rule = f"Afterburner {level}/5"
+
+    elif "shield booster" in group_name:
+        level = freeborn_context_named_skill_level(
+            context,
+            "Shield Compensation",
+        )
+        cap_mult *= max(0.0, 1.0 - (0.02 * level))
+        rule = f"Shield Compensation {level}/5"
+
+    elif "turret" in group_name:
+        level = freeborn_context_named_skill_level(
+            context,
+            "Controlled Bursts",
+        )
+        cap_mult *= max(0.0, 1.0 - (0.05 * level))
+        rule = f"Controlled Bursts {level}/5"
+
+    return cap_mult, duration_mult, rule
+
+
+def freeborn_capacitor_recharge_rate(
+    capacity_gj,
+    recharge_seconds,
+    capacitor_fraction,
+):
+    """
+    EVE capacitor recharge curve used for the continuous-load estimator.
+
+    x = capacitor fraction (0..1)
+    rate = 10 * C/T * (sqrt(x) - x)
+
+    Peak occurs at 25% capacitor and equals 2.5 * C/T.
+    """
+    if (
+        capacity_gj is None
+        or recharge_seconds in (None, 0)
+    ):
+        return None
+
+    x = max(0.0, min(1.0, float(capacitor_fraction)))
+
+    return (
+        10.0
+        * float(capacity_gj)
+        / float(recharge_seconds)
+        * ((x ** 0.5) - x)
+    )
+
+
+def freeborn_capacitor_continuous_state(
+    capacity_gj,
+    recharge_seconds,
+    drain_gjs,
+):
+    """
+    Estimate the continuous all-active capacitor state.
+
+    Returns:
+      stable=True + equilibrium_percent when average drain <= peak recharge;
+      stable=False + cap_out_seconds when drain exceeds peak recharge.
+
+    This is a continuous-load model, not yet a final discrete-cycle EVE
+    simulation. Conditional gains such as Nosferatu/cap injection are not
+    included.
+    """
+    if (
+        capacity_gj is None
+        or recharge_seconds in (None, 0)
+        or drain_gjs is None
+    ):
+        return {
+            "stable": None,
+            "equilibrium_percent": None,
+            "cap_out_seconds": None,
+        }
+
+    capacity = float(capacity_gj)
+    recharge = float(recharge_seconds)
+    drain = max(0.0, float(drain_gjs))
+    peak = 2.5 * capacity / recharge
+
+    if drain <= 0:
+        return {
+            "stable": True,
+            "equilibrium_percent": 100.0,
+            "cap_out_seconds": None,
+        }
+
+    if drain <= peak:
+        k = drain * recharge / (10.0 * capacity)
+        discriminant = max(0.0, 1.0 - (4.0 * k))
+        y = (1.0 + discriminant ** 0.5) / 2.0
+        equilibrium = max(0.0, min(1.0, y * y))
+
+        return {
+            "stable": True,
+            "equilibrium_percent": equilibrium * 100.0,
+            "cap_out_seconds": None,
+        }
+
+    # Numerical integration from 100% capacitor for an understandable
+    # cap-out estimate under constant average load.
+    cap = capacity
+    elapsed = 0.0
+    dt = 0.25
+    max_seconds = 24.0 * 60.0 * 60.0
+
+    while cap > 0 and elapsed < max_seconds:
+        fraction = cap / capacity
+        recharge_rate = freeborn_capacitor_recharge_rate(
+            capacity,
+            recharge,
+            fraction,
+        )
+        net = float(recharge_rate or 0.0) - drain
+        cap += net * dt
+        elapsed += dt
+
+    return {
+        "stable": False,
+        "equilibrium_percent": None,
+        "cap_out_seconds": elapsed if cap <= 0 else None,
+    }
+
+
+def format_capacitor_duration(seconds):
+    if seconds is None:
+        return "—"
+
+    seconds = max(0, int(round(float(seconds))))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+
+    if hours:
+        return f"{hours} h {minutes:02d} min {sec:02d} s"
+
+    if minutes:
+        return f"{minutes} min {sec:02d} s"
+
+    return f"{sec} s"
+
+
+def calculate_skill_aware_capacitor(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+    *,
+    mode="all_v",
+    skills_snapshot=None,
+):
+    """
+    Phase 4O-G skill-aware capacitor profile.
+
+    Universal pilot skills:
+      - Capacitor Management: +5% capacity / level
+      - Capacitor Systems Operation: -5% recharge time / level
+
+    Recognized module-use reductions are applied conservatively through
+    freeborn_capacitor_module_skill_modifier().
+    """
+    base = calculate_base_capacitor_engine(
+        ship_type_id,
+        eft_sections,
+        type_ids,
+    )
+
+    context = freeborn_fitting_skill_context(
+        mode=mode,
+        skills_snapshot=skills_snapshot,
+    )
+
+    cap_management = freeborn_context_named_skill_level(
+        context,
+        "Capacitor Management",
+    )
+    cap_systems = freeborn_context_named_skill_level(
+        context,
+        "Capacitor Systems Operation",
+    )
+
+    capacity = base["capacity_gj"]
+    recharge = base["recharge_seconds"]
+
+    if capacity is not None:
+        capacity = float(capacity) * (
+            1.0 + (0.05 * cap_management)
+        )
+
+    if recharge is not None:
+        recharge = float(recharge) * max(
+            0.01,
+            1.0 - (0.05 * cap_systems),
+        )
+
+    module_counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    drain = 0.0
+    consumers = 0
+    unresolved = 0
+    modified_modules = 0
+
+    for type_id, quantity in module_counts.items():
+        dogma = get_eve_type_dogma(type_id)
+
+        if not dogma:
+            unresolved += int(quantity)
+            continue
+
+        cap_need = dogma.get(DOGMA_CAPACITOR_NEED)
+        duration_ms = dogma.get(DOGMA_DURATION)
+
+        if cap_need is None or float(cap_need) <= 0:
+            continue
+
+        if duration_ms is None or float(duration_ms) <= 0:
+            unresolved += int(quantity)
+            continue
+
+        cap_mult, duration_mult, rule = (
+            freeborn_capacitor_module_skill_modifier(
+                type_id,
+                context,
+            )
+        )
+
+        if rule:
+            modified_modules += int(quantity)
+
+        adjusted_need = float(cap_need) * cap_mult
+        adjusted_duration_ms = float(duration_ms) * duration_mult
+
+        if adjusted_duration_ms <= 0:
+            unresolved += int(quantity)
+            continue
+
+        per_module = (
+            adjusted_need
+            / (adjusted_duration_ms / 1000.0)
+        )
+
+        drain += per_module * int(quantity)
+        consumers += int(quantity)
+
+    peak = (
+        2.5 * float(capacity) / float(recharge)
+        if (
+            capacity is not None
+            and recharge not in (None, 0)
+        )
+        else None
+    )
+
+    net_peak = (
+        float(peak) - float(drain)
+        if peak is not None
+        else None
+    )
+
+    continuous = freeborn_capacitor_continuous_state(
+        capacity,
+        recharge,
+        drain,
+    )
+
+    return {
+        "mode": context["mode"],
+        "capacitor_management_level": cap_management,
+        "capacitor_systems_operation_level": cap_systems,
+        "capacity_gj": capacity,
+        "recharge_seconds": recharge,
+        "peak_recharge_gjs": peak,
+        "active_drain_gjs": drain,
+        "net_peak_gjs": net_peak,
+        "consumer_count": consumers,
+        "modified_module_count": modified_modules,
+        "unresolved_count": unresolved,
+        "complete": unresolved == 0,
+        "continuous_stable": continuous["stable"],
+        "equilibrium_percent": continuous["equilibrium_percent"],
+        "cap_out_seconds": continuous["cap_out_seconds"],
+    }
+
+
 # ============================================================
 # FREEBORN FITTINGS — PHASE 4O-B SKILL-AWARE ENGINE
 # ============================================================
@@ -8759,7 +9118,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4O-F — CPU / POWERGRID</div>
+              <div class="pilot-engine-title">MOTEUR 4O-G — FITTING / CAPACITEUR</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -8776,6 +9135,14 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
               <div class="pilot-engine-row">
                 <span>Advanced Weapon Upgrades</span>
                 <b id="pilot-awu-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Capacitor Management</span>
+                <b id="pilot-cap-management">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Capacitor Systems Operation</span>
+                <b id="pilot-cap-systems">—</b>
               </div>
 
               <div class="pilot-engine-separator"></div>
@@ -8812,6 +9179,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                   <span>CPU disponible</span><b id="pilot-delta-cpu-out">—</b>
                   <span>PG utilisé</span><b id="pilot-delta-pg-used">—</b>
                   <span>PG disponible</span><b id="pilot-delta-pg-out">—</b>
+                  <span>Capacité capacitor</span><b id="pilot-cap-capacity">—</b>
+                  <span>Recharge capacitor</span><b id="pilot-cap-recharge">—</b>
+                  <span>Drain continu</span><b id="pilot-cap-drain">—</b>
+                  <span>Projection</span><b id="pilot-cap-state">—</b>
                 </div>
               </div>
 
@@ -8956,6 +9327,65 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         capacitor_audit_drain = "—"
         capacitor_audit_net = "—"
         capacitor_audit_coverage = "Données indisponibles"
+
+
+    all_v_cap = calculate_skill_aware_capacitor(
+        fit.get("ship_type_id"),
+        eft_sections,
+        eft_type_ids,
+        mode="all_v",
+    )
+
+    all_v_cap_capacity = escape(
+        format_engine_number(
+            all_v_cap["capacity_gj"],
+            "GJ",
+        )
+    )
+    all_v_cap_recharge = escape(
+        format_engine_number(
+            all_v_cap["recharge_seconds"],
+            "s",
+        )
+    )
+    all_v_cap_peak = escape(
+        f'{all_v_cap["peak_recharge_gjs"]:.2f} GJ/s'
+        if all_v_cap["peak_recharge_gjs"] is not None
+        else "—"
+    )
+    all_v_cap_drain = escape(
+        f'{all_v_cap["active_drain_gjs"]:.2f} GJ/s'
+    )
+
+    if all_v_cap["continuous_stable"] is True:
+        all_v_cap_state = escape(
+            "Stable théorique à "
+            + (
+                f'{all_v_cap["equilibrium_percent"]:.1f}%'
+                if all_v_cap["equilibrium_percent"] is not None
+                else "100%"
+            )
+        )
+    elif all_v_cap["continuous_stable"] is False:
+        all_v_cap_state = escape(
+            "Cap-out théorique : "
+            + format_capacitor_duration(
+                all_v_cap["cap_out_seconds"]
+            )
+        )
+    else:
+        all_v_cap_state = "Indéterminé"
+
+    character_cap = None
+
+    if pilot_profile:
+        character_cap = calculate_skill_aware_capacitor(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+            mode="character",
+            skills_snapshot=pilot_profile.get("skills_snapshot") or [],
+        )
 
     all_v_core = calculate_skill_aware_fitting_resources(
         fit.get("ship_type_id"),
@@ -9156,6 +9586,80 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                         all_v_core["power_output"],
                         "MW",
                     )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-management">—</b>',
+                '<b id="pilot-cap-management">'
+                + escape(
+                    f'{character_cap["capacitor_management_level"]}/5'
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-systems">—</b>',
+                '<b id="pilot-cap-systems">'
+                + escape(
+                    f'{character_cap["capacitor_systems_operation_level"]}/5'
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-capacity">—</b>',
+                '<b id="pilot-cap-capacity">'
+                + escape(
+                    format_engine_number(
+                        character_cap["capacity_gj"],
+                        "GJ",
+                    )
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-recharge">—</b>',
+                '<b id="pilot-cap-recharge">'
+                + escape(
+                    format_engine_number(
+                        character_cap["recharge_seconds"],
+                        "s",
+                    )
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-drain">—</b>',
+                '<b id="pilot-cap-drain">'
+                + escape(
+                    f'{character_cap["active_drain_gjs"]:.2f} GJ/s'
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-state">—</b>',
+                '<b id="pilot-cap-state">'
+                + escape(
+                    (
+                        (
+                            "Stable théorique "
+                            f'{character_cap["equilibrium_percent"]:.1f}%'
+                        )
+                        if character_cap["continuous_stable"] is True
+                        else (
+                            "Cap-out "
+                            + format_capacitor_duration(
+                                character_cap["cap_out_seconds"]
+                            )
+                        )
+                        if character_cap["continuous_stable"] is False
+                        else "Indéterminé"
+                    )
+                    if character_cap else "—"
                 )
                 + '</b>',
             )
@@ -9858,7 +10362,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-F</strong>
+            <strong>ALL V — VALIDATION 4O-G</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -9879,12 +10383,14 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           </div>
           <div class="allv-status">{all_v_compat}</div>
           <div class="allv-warning" style="margin-top:10px">
-            <strong>CAPACITEUR — AUDIT 4O-F</strong><br>
-            Pic recharge BASE : {capacitor_audit_peak} •
-            Drain cyclique détecté : {capacitor_audit_drain} •
-            Solde au pic : {capacitor_audit_net}<br>
+            <strong>CAPACITEUR — MOTEUR 4O-G</strong><br>
+            ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
+            pic {all_v_cap_peak} • drain continu {all_v_cap_drain}<br>
+            Projection all-active : {all_v_cap_state}.<br>
             Couverture : {escape(capacitor_audit_coverage)}.
-            La stabilité EVE finale reste volontairement non déclarée à ce stade.
+            Cette projection reste volontairement distincte d'un verdict EVE
+            final : Nosferatu, injections, charges, surchauffe et effets
+            conditionnels ne sont pas encore simulés.
           </div>
         </div>
         {pilot_panel_html}
@@ -9913,7 +10419,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-F</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-G</span>
   </footer>
 </main>
 
