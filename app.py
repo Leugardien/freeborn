@@ -323,6 +323,11 @@ fit_delete_signer = TimestampSigner(
     salt="freeborn-fit-delete",
 )
 
+fit_web_serializer = URLSafeTimedSerializer(
+    FLASK_SECRET_KEY,
+    salt="freeborn-fit-web",
+)
+
 
 # ============================================================
 # DATABASE INITIALIZATION
@@ -3571,19 +3576,48 @@ def build_fit_embed(fit):
     return embed
 
 
-def build_fit_components(fit_id):
+def create_fit_web_token(guild_id, fit_id):
+    return fit_web_serializer.dumps({
+        "guild_id": str(guild_id),
+        "fit_id": int(fit_id),
+    })
+
+
+def read_fit_web_token(token):
+    payload = fit_web_serializer.loads(str(token or ""))
+    return str(payload["guild_id"]), int(payload["fit_id"])
+
+
+def build_fit_web_url(guild_id, fit_id):
+    fit_ref = format_fit_reference(fit_id)
+    token = create_fit_web_token(guild_id, fit_id)
+    return f"{PUBLIC_BASE_URL}/fittings/{fit_ref}?token={token}"
+
+
+def build_fit_components(fit_id, guild_id=None):
+    components = [
+        {
+            "type": 2,
+            "style": 2,
+            "label": "Voir / copier l'EFT",
+            "emoji": {"name": "📋"},
+            "custom_id": f"fit_eft:{int(fit_id)}",
+        },
+    ]
+
+    if guild_id:
+        components.append({
+            "type": 2,
+            "style": 5,
+            "label": "Fiche Web Freeborn",
+            "emoji": {"name": "🌐"},
+            "url": build_fit_web_url(guild_id, fit_id),
+        })
+
     return [
         {
             "type": 1,
-            "components": [
-                {
-                    "type": 2,
-                    "style": 2,
-                    "label": "Voir / copier l'EFT",
-                    "emoji": {"name": "📋"},
-                    "custom_id": f"fit_eft:{int(fit_id)}",
-                },
-            ],
+            "components": components,
         },
     ]
 
@@ -3804,7 +3838,7 @@ def handle_fit_modal_submit(data):
                 "La fiche ci-dessous peut maintenant être partagée avec la corporation."
             ),
             "embeds": [build_fit_embed(fit)],
-            "components": build_fit_components(saved["fit_id"]),
+            "components": build_fit_components(saved["fit_id"], guild_id),
             "flags": 64,
         },
     })
@@ -7301,6 +7335,137 @@ def handle_message_component(
 
 
 # ============================================================
+# FREEBORN FITTINGS — WEB CARD PHASE 4A
+# ============================================================
+
+def freeborn_fitting_web_page(fit):
+    fit = ensure_fit_ship_type_id(dict(fit))
+
+    safe_ref = escape(format_fit_reference(fit["fit_id"]))
+    safe_name = escape(str(fit.get("name") or "Fitting Freeborn"))
+    safe_ship = escape(str(fit.get("ship_name") or "Vaisseau inconnu"))
+    safe_usage = escape(str(fit.get("usage") or "Non précisé"))
+    safe_notes = escape(str(fit.get("notes") or "Aucune note du créateur."))
+    safe_creator = escape(str(fit.get("created_by_discord_user_id") or "—"))
+    status = str(fit.get("status") or "proposed").lower()
+
+    status_map = {
+        "proposed": ("PROPOSÉ", "#d5a632"),
+        "approved": ("FREEBORN APPROVED", "#78c94a"),
+        "rejected": ("REFUSÉ", "#d94b4b"),
+        "archived": ("ARCHIVÉ", "#7f8791"),
+    }
+    status_label, status_color = status_map.get(status, (status.upper(), "#149cff"))
+
+    render_url = eve_type_render_url(fit.get("ship_type_id"), 512)
+    ship_html = (
+        f'<img class="ship" src="{escape(render_url)}" alt="{safe_ship}">'
+        if render_url
+        else '<div class="ship-placeholder">VISUEL EVE<br>INDISPONIBLE</div>'
+    )
+
+    return f'''<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#05080d">
+<link rel="icon" type="image/png" href="/assets/favicon.png">
+<title>{safe_name} — Freeborn Fittings</title>
+<style>
+:root {{
+  color-scheme:dark;
+  --gold:#d5a632; --gold2:#f0c45a; --blue:#149cff; --cyan:#38c7ff;
+  --panel:#090d13; --panel2:#0d1219; --text:#f4f1ea; --muted:#aeb6c0;
+  --status:{status_color};
+}}
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:linear-gradient(rgba(1,4,8,.72),rgba(1,4,8,.86)),url('/assets/bg-space.jpg') center/cover fixed no-repeat,#03060a;padding:20px}}
+.shell{{width:min(1180px,100%);margin:auto;border:1px solid rgba(213,166,50,.65);background:linear-gradient(145deg,rgba(7,10,15,.96),rgba(3,6,10,.98));box-shadow:0 0 35px rgba(0,0,0,.65),inset 0 0 45px rgba(20,156,255,.035)}}
+.top{{display:grid;grid-template-columns:150px 1fr auto;gap:24px;align-items:center;padding:24px 28px;border-bottom:1px solid rgba(213,166,50,.42)}}
+.logo{{width:138px;max-width:100%}}
+.brand h1{{margin:0;font-size:clamp(28px,5vw,54px);letter-spacing:.08em;line-height:.95;text-transform:uppercase;color:#e8e5df;text-shadow:0 2px 0 #31343b}}
+.brand h1 span{{color:var(--gold2)}}
+.brand p{{margin:10px 0 0;color:#d6d1c8;letter-spacing:.18em;text-transform:uppercase;font-size:12px}}
+.badge{{border:1px solid var(--status);color:var(--status);padding:12px 16px;font-weight:800;letter-spacing:.08em;white-space:nowrap;background:color-mix(in srgb,var(--status) 8%,#05080d);box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
+.content{{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,44%);gap:18px;padding:20px}}
+.panel{{border:1px solid rgba(213,166,50,.38);background:linear-gradient(180deg,rgba(13,18,25,.94),rgba(7,10,15,.96));padding:22px}}
+.kicker{{color:var(--gold2);font-size:12px;letter-spacing:.18em;text-transform:uppercase}}
+h2{{margin:7px 0 2px;font-size:clamp(30px,4vw,48px);text-transform:uppercase}}
+.ref{{color:var(--muted);font-family:Consolas,monospace;font-size:14px}}
+.meta{{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:24px}}
+.meta div{{padding:13px 14px;border-top:1px solid rgba(213,166,50,.26);background:rgba(0,0,0,.16)}}
+.meta small{{display:block;color:var(--gold2);text-transform:uppercase;letter-spacing:.13em;margin-bottom:5px}}
+.notes{{margin-top:20px;padding:18px;border-left:3px solid var(--gold);background:rgba(213,166,50,.055);line-height:1.55;white-space:pre-wrap}}
+.shipbox{{min-height:440px;display:grid;place-items:center;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(213,166,50,.12),rgba(0,0,0,.08) 45%,rgba(0,0,0,.55))}}
+.shipbox:before{{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent 49.8%,rgba(20,156,255,.12) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(213,166,50,.09) 50%,transparent 50.2%);pointer-events:none}}
+.ship{{width:100%;height:auto;max-height:520px;object-fit:contain;position:relative;filter:drop-shadow(0 16px 26px rgba(0,0,0,.75))}}
+.ship-placeholder{{color:var(--muted);letter-spacing:.18em;text-align:center}}
+.bottom{{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:16px 28px;border-top:1px solid rgba(213,166,50,.38);color:#aeb6c0;font-size:12px;letter-spacing:.12em;text-transform:uppercase}}
+.motto{{color:var(--gold2)}}
+@media(max-width:780px){{body{{padding:8px}}.top{{grid-template-columns:84px 1fr;gap:14px;padding:18px}}.logo{{width:80px}}.badge{{grid-column:1/-1;text-align:center}}.content{{grid-template-columns:1fr;padding:10px}}.shipbox{{min-height:300px}}.meta{{grid-template-columns:1fr}}.bottom{{display:block;text-align:center;line-height:1.8}}}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="top">
+    <img class="logo" src="/assets/logo-freeborn-legacy.png" alt="Freeborn Legacy">
+    <div class="brand"><h1>FREEBORN <span>FITTS</span></h1><p>Bibliothèque de fittings • par les FREE • pour les FREE</p></div>
+    <div class="badge">{escape(status_label)}</div>
+  </header>
+  <section class="content">
+    <article class="panel">
+      <div class="kicker">{safe_ref} • fiche corporate</div>
+      <h2>{safe_name}</h2>
+      <div class="ref">{safe_ship}</div>
+      <div class="meta">
+        <div><small>Usage</small><strong>{safe_usage}</strong></div>
+        <div><small>Créateur Discord</small><strong>{safe_creator}</strong></div>
+      </div>
+      <div class="notes"><div class="kicker">Notes du créateur</div><br>{safe_notes}</div>
+    </article>
+    <aside class="panel shipbox">{ship_html}</aside>
+  </section>
+  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Phase Web 4A</span></footer>
+</main>
+</body>
+</html>'''
+
+
+@app.route("/fittings/<fit_ref>")
+def fitting_web_card(fit_ref):
+    token = request.args.get("token", "")
+
+    try:
+        fit_id = parse_fit_reference(fit_ref)
+        token_guild_id, token_fit_id = read_fit_web_token(token)
+    except (ValueError, BadSignature, SignatureExpired, KeyError, TypeError):
+        return freeborn_web_page(
+            "Lien de fitting invalide",
+            "Ce lien Freeborn Fittings est invalide ou incomplet.",
+            status="error",
+        ), 403
+
+    if token_guild_id != str(DISCORD_GUILD_ID) or token_fit_id != fit_id:
+        return freeborn_web_page(
+            "Accès refusé",
+            "Ce lien ne correspond pas à ce fitting Freeborn.",
+            status="error",
+        ), 403
+
+    fit = get_fit(token_guild_id, fit_id)
+
+    if not fit:
+        return freeborn_web_page(
+            "Fitting introuvable",
+            f"{format_fit_reference(fit_id)} n'existe plus dans Freeborn.",
+            status="warning",
+        ), 404
+
+    return freeborn_fitting_web_page(fit)
+
+
+# ============================================================
 # HOME
 # ============================================================
 
@@ -7606,7 +7771,7 @@ def interactions():
             "type": 4,
             "data": {
                 "embeds": [build_fit_embed(fit)],
-                "components": build_fit_components(fit["fit_id"]),
+                "components": build_fit_components(fit["fit_id"], guild_id),
             },
         })
 
