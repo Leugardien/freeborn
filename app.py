@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import escape
 from urllib.parse import urlencode
 
@@ -3401,13 +3402,21 @@ def parse_eft_header(eft_text):
     }
 
 
+_eve_inventory_single_id_cache = {}
+
+
 def resolve_eve_inventory_type_id(type_name):
-    """Resolve an exact EVE inventory type name through public ESI."""
+    """Resolve an exact EVE inventory type name with process caching."""
 
     clean_name = str(type_name or "").strip()
 
     if not clean_name:
         return None
+
+    key = clean_name.casefold()
+
+    if key in _eve_inventory_single_id_cache:
+        return _eve_inventory_single_id_cache[key]
 
     try:
         response = requests.post(
@@ -3422,12 +3431,15 @@ def resolve_eve_inventory_type_id(type_name):
         payload = response.json()
 
         for item in payload.get("inventory_types", []):
-            if str(item.get("name", "")).casefold() == clean_name.casefold():
-                return int(item["id"])
+            if str(item.get("name", "")).casefold() == key:
+                type_id = int(item["id"])
+                _eve_inventory_single_id_cache[key] = type_id
+                return type_id
 
     except Exception as error:
         print("Freeborn Fittings ESI type resolution failed:", repr(error))
 
+    _eve_inventory_single_id_cache[key] = None
     return None
 
 
@@ -7606,15 +7618,20 @@ def normalize_eft_item_name(line):
 
 
 _eve_inventory_batch_id_cache = {}
+_eve_inventory_name_id_cache = {}
 
 
 def resolve_eve_inventory_type_ids(type_names):
-    """Resolve many exact EVE inventory names in one public ESI request."""
+    """
+    Resolve exact EVE inventory names, requesting only names not cached yet.
+    """
     names = []
     seen = set()
+
     for value in type_names:
         clean = normalize_eft_item_name(value)
         key = clean.casefold()
+
         if clean and key not in seen:
             names.append(clean)
             seen.add(key)
@@ -7622,24 +7639,41 @@ def resolve_eve_inventory_type_ids(type_names):
     if not names:
         return {}
 
+    result = {}
+    unresolved = []
+
+    for name in names:
+        key = name.casefold()
+
+        if key in _eve_inventory_name_id_cache:
+            cached = _eve_inventory_name_id_cache[key]
+            if cached is not None:
+                result[key] = int(cached)
+        else:
+            unresolved.append(name)
+
+    if not unresolved:
+        return result
+
     cache_key = tuple(
         sorted(
             value.casefold()
-            for value in names
+            for value in unresolved
         )
     )
 
-    cached = _eve_inventory_batch_id_cache.get(
+    cached_batch = _eve_inventory_batch_id_cache.get(
         cache_key
     )
 
-    if cached is not None:
-        return dict(cached)
+    if cached_batch is not None:
+        result.update(cached_batch)
+        return dict(result)
 
     try:
         response = requests.post(
             f"{ESI_BASE_URL}/universe/ids/",
-            json=names,
+            json=unresolved,
             headers={
                 "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
             },
@@ -7647,20 +7681,31 @@ def resolve_eve_inventory_type_ids(type_names):
         )
         response.raise_for_status()
         payload = response.json()
+
         resolved = {
             str(item.get("name", "")).casefold(): int(item["id"])
             for item in payload.get("inventory_types", [])
             if item.get("name") and item.get("id")
         }
 
+        for name in unresolved:
+            key = name.casefold()
+            value = resolved.get(key)
+            _eve_inventory_name_id_cache[key] = value
+
         _eve_inventory_batch_id_cache[
             cache_key
         ] = dict(resolved)
 
-        return resolved
+        result.update(resolved)
+        return dict(result)
+
     except Exception as error:
-        print("Freeborn Fittings ESI batch type resolution failed:", repr(error))
-        return {}
+        print(
+            "Freeborn Fittings ESI batch type resolution failed:",
+            repr(error),
+        )
+        return dict(result)
 
 
 def eve_type_icon_url(type_id, size=64):
@@ -7697,6 +7742,7 @@ DOGMA_DURATION = 73
 
 _eve_type_dogma_cache = {}
 _eve_dogma_attribute_metadata_cache = {}
+_eve_dogma_named_lookup_cache = {}
 
 _eve_type_category_cache = {}
 _eve_group_category_cache = {}
@@ -7809,6 +7855,103 @@ def get_eve_group_metadata(group_id):
         return {}
 
 
+def prefetch_eve_static_type_data(
+    type_ids,
+    *,
+    max_workers=8,
+):
+    """
+    Warm EVE static type/group payloads concurrently.
+
+    This converts the old sequential cold-load pattern into two parallel waves:
+    inventory types first, referenced groups second.
+    """
+    type_ids = sorted({
+        int(type_id)
+        for type_id in type_ids
+        if type_id
+    })
+
+    missing_types = [
+        type_id
+        for type_id in type_ids
+        if type_id not in _eve_type_metadata_cache
+    ]
+
+    if missing_types:
+        workers = min(
+            max(1, int(max_workers)),
+            len(missing_types),
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=workers
+        ) as executor:
+            futures = [
+                executor.submit(
+                    get_eve_type_metadata,
+                    type_id,
+                )
+                for type_id in missing_types
+            ]
+
+            for future in as_completed(
+                futures
+            ):
+                try:
+                    future.result()
+                except Exception:
+                    pass
+
+    group_ids = set()
+
+    for type_id in type_ids:
+        payload = _eve_type_metadata_cache.get(
+            type_id,
+            {},
+        )
+        group_id = payload.get(
+            "group_id"
+        )
+
+        if group_id:
+            try:
+                group_ids.add(int(group_id))
+            except (TypeError, ValueError):
+                pass
+
+    missing_groups = [
+        group_id
+        for group_id in sorted(group_ids)
+        if group_id not in _eve_group_metadata_cache
+    ]
+
+    if missing_groups:
+        workers = min(
+            max(1, int(max_workers)),
+            len(missing_groups),
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=workers
+        ) as executor:
+            futures = [
+                executor.submit(
+                    get_eve_group_metadata,
+                    group_id,
+                )
+                for group_id in missing_groups
+            ]
+
+            for future in as_completed(
+                futures
+            ):
+                try:
+                    future.result()
+                except Exception:
+                    pass
+
+
 def get_eve_type_group_name(type_id):
     """
     Resolve one inventory type's public group name.
@@ -7858,7 +8001,7 @@ def freeborn_is_weapon_fitting_group(type_id):
 
 
 def get_eve_group_category_id(group_id):
-    """Resolve one inventory group's category_id with a process cache."""
+    """Resolve category_id from the shared cached group metadata payload."""
     if not group_id:
         return None
 
@@ -7867,32 +8010,24 @@ def get_eve_group_category_id(group_id):
     if group_id in _eve_group_category_cache:
         return _eve_group_category_cache[group_id]
 
-    try:
-        response = requests.get(
-            f"{ESI_BASE_URL}/universe/groups/{group_id}/",
-            params={"datasource": "tranquility"},
-            headers={
-                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
-            },
-            timeout=15,
-        )
-        response.raise_for_status()
+    payload = get_eve_group_metadata(
+        group_id
+    )
+    category_id = payload.get(
+        "category_id"
+    )
 
-        category_id = response.json().get("category_id")
-
-        if category_id is not None:
+    if category_id is not None:
+        try:
             category_id = int(category_id)
+        except (TypeError, ValueError):
+            category_id = None
 
-        _eve_group_category_cache[group_id] = category_id
-        return category_id
+    _eve_group_category_cache[
+        group_id
+    ] = category_id
 
-    except Exception as error:
-        print(
-            "Freeborn Fittings ESI group lookup failed:",
-            group_id,
-            repr(error),
-        )
-        return None
+    return category_id
 
 
 def get_eve_type_category_id(type_id):
@@ -8379,9 +8514,28 @@ def find_dogma_attribute_by_names(
     Exact normalized metadata-name matches win. contains_names are fallback
     probes only; no guessed numeric attribute IDs are required.
     """
+    cache_key = (
+        int(type_id or 0),
+        tuple(sorted(
+            str(name).strip().casefold()
+            for name in exact_names
+            if str(name).strip()
+        )),
+        tuple(sorted(
+            str(name).strip().casefold()
+            for name in contains_names
+            if str(name).strip()
+        )),
+    )
+
+    if cache_key in _eve_dogma_named_lookup_cache:
+        cached = _eve_dogma_named_lookup_cache[cache_key]
+        return dict(cached) if isinstance(cached, dict) else None
+
     dogma = get_eve_type_dogma(type_id)
 
     if not dogma:
+        _eve_dogma_named_lookup_cache[cache_key] = None
         return None
 
     exact = {
@@ -8418,12 +8572,14 @@ def find_dogma_attribute_by_names(
             normalized_name in exact
             or normalized_display in exact
         ):
-            return {
+            result = {
                 "attribute_id": int(attribute_id),
                 "name": name,
                 "display_name": display_name,
                 "value": float(value),
             }
+            _eve_dogma_named_lookup_cache[cache_key] = dict(result)
+            return result
 
         haystack = (
             normalized_name
@@ -8446,8 +8602,11 @@ def find_dogma_attribute_by_names(
             })
 
     if len(fallback) == 1:
-        return fallback[0]
+        result = fallback[0]
+        _eve_dogma_named_lookup_cache[cache_key] = dict(result)
+        return result
 
+    _eve_dogma_named_lookup_cache[cache_key] = None
     return None
 
 
@@ -8994,6 +9153,7 @@ def calculate_skill_aware_velocity(
         "propulsion_off_velocity_ms": velocity_off,
         "propulsion_active_velocity_ms": active_velocity,
         "active_propulsion": active_propulsion,
+        "propulsion_rows": propulsion_rows,
         "effective_propulsion_bonus": effective_bonus,
         "effective_thrust_n": effective_thrust,
         "raw_propulsion_thrust": thrust_audit[
@@ -9118,6 +9278,34 @@ def format_propulsion_dogma_probe(rows):
 
 
 
+_freeborn_base_resource_cache = {}
+_freeborn_base_capacitor_cache = {}
+_freeborn_module_rows_cache = {}
+
+
+def freeborn_static_fitting_cache_key(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+):
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    return (
+        int(ship_type_id or 0),
+        tuple(sorted(
+            (
+                int(type_id),
+                int(quantity),
+            )
+            for type_id, quantity
+            in counts.items()
+        )),
+    )
+
+
 def calculate_base_fitting_resources(
     ship_type_id,
     eft_sections,
@@ -9134,6 +9322,16 @@ def calculate_base_fitting_resources(
     Returning explicit completeness flags lets the Web UI distinguish a
     usable base figure from missing ESI data.
     """
+    cache_key = freeborn_static_fitting_cache_key(
+        ship_type_id,
+        eft_sections,
+        type_ids,
+    )
+
+    cached = _freeborn_base_resource_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+
     result = {
         "cpu_output": None,
         "cpu_used": 0.0,
@@ -9178,6 +9376,7 @@ def calculate_base_fitting_resources(
     result["cpu_complete"] = cpu_ok
     result["power_complete"] = power_ok
 
+    _freeborn_base_resource_cache[cache_key] = dict(result)
     return result
 
 
@@ -9202,6 +9401,16 @@ def calculate_base_capacitor_engine(
     warfare/injection, charges, scripts, overheating, implants, fleet effects,
     or uncovered modifier chains can alter the result.
     """
+    cache_key = freeborn_static_fitting_cache_key(
+        ship_type_id,
+        eft_sections,
+        type_ids,
+    )
+
+    cached = _freeborn_base_capacitor_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+
     result = {
         "capacity_gj": None,
         "recharge_seconds": None,
@@ -9215,12 +9424,14 @@ def calculate_base_capacitor_engine(
 
     ship_dogma = get_eve_type_dogma(ship_type_id)
     if not ship_dogma:
+        _freeborn_base_capacitor_cache[cache_key] = dict(result)
         return result
 
     capacity = ship_dogma.get(DOGMA_CAPACITOR_CAPACITY)
     recharge_ms = ship_dogma.get(DOGMA_CAPACITOR_RECHARGE_TIME)
 
     if capacity is None or recharge_ms in (None, 0):
+        _freeborn_base_capacitor_cache[cache_key] = dict(result)
         return result
 
     capacity = float(capacity)
@@ -9263,6 +9474,7 @@ def calculate_base_capacitor_engine(
         result["net_peak_gjs"] = peak_recharge - result["active_drain_gjs"]
 
     result["complete"] = module_dogma_complete
+    _freeborn_base_capacitor_cache[cache_key] = dict(result)
     return result
 
 
@@ -9289,6 +9501,38 @@ def freeborn_skill_type_id(skill_name):
     type_id = resolve_eve_inventory_type_id(clean)
     _freeborn_skill_type_id_cache[key] = type_id
     return type_id
+
+
+FREEBORN_FITTING_NAMED_SKILLS = (
+    "Capacitor Management",
+    "Capacitor Systems Operation",
+    "High Speed Maneuvering",
+    "Afterburner",
+    "Shield Compensation",
+    "Navigation",
+    "Acceleration Control",
+)
+
+
+def prefetch_freeborn_fitting_skill_ids():
+    unresolved = [
+        name
+        for name in FREEBORN_FITTING_NAMED_SKILLS
+        if name.casefold() not in _freeborn_skill_type_id_cache
+    ]
+
+    if not unresolved:
+        return
+
+    resolved = resolve_eve_inventory_type_ids(
+        unresolved
+    )
+
+    for name in unresolved:
+        key = name.casefold()
+        _freeborn_skill_type_id_cache[
+            key
+        ] = resolved.get(key)
 
 
 def freeborn_context_named_skill_level(context, skill_name):
@@ -9729,6 +9973,16 @@ def freeborn_fitted_module_rows(
 
     Cargo, drones, charges and scripts are excluded.
     """
+    cache_key = freeborn_static_fitting_cache_key(
+        0,
+        eft_sections,
+        type_ids,
+    )
+
+    cached = _freeborn_module_rows_cache.get(cache_key)
+    if cached is not None:
+        return [dict(row) for row in cached]
+
     rows = []
     counts = _eft_fitted_module_counts(
         eft_sections,
@@ -9756,6 +10010,10 @@ def freeborn_fitted_module_rows(
                 freeborn_is_weapon_fitting_group(type_id),
         })
 
+    _freeborn_module_rows_cache[cache_key] = [
+        dict(row)
+        for row in rows
+    ]
     return rows
 
 
@@ -10297,7 +10555,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4R-A — FITTING / CAP / VITESSE</div>
+              <div class="pilot-engine-title">MOTEUR 4R-B — FITTING / CAP / VITESSE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -10438,6 +10696,15 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     )
     eft_type_ids = resolve_eve_inventory_type_ids(all_eft_items)
 
+    prefetch_eve_static_type_data(
+        list(eft_type_ids.values())
+        + [fit.get("ship_type_id")],
+        max_workers=8,
+    )
+
+    if pilot_profile:
+        prefetch_freeborn_fitting_skill_ids()
+
     base_resources = calculate_base_fitting_resources(
         fit.get("ship_type_id"),
         eft_sections,
@@ -10482,9 +10749,9 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         type_ids=eft_type_ids,
     )
 
-    propulsion_probe = find_fitted_propulsion_modules(
-        eft_sections,
-        eft_type_ids,
+    propulsion_probe = (
+        all_v_velocity.get("propulsion_rows")
+        or []
     )
 
     propulsion_probe_html = (
@@ -11763,7 +12030,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4R-A</strong>
+            <strong>ALL V — VALIDATION 4R-B</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -11871,7 +12138,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4R-A</span>
+    <span class="version">Freeborn Legacy • Fittings 4R-B</span>
   </footer>
 </main>
 
