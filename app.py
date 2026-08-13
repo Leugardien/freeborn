@@ -7619,19 +7619,20 @@ button{{font:inherit}}
   grid-template-columns:94px 1fr auto;
   gap:18px;
   align-items:center;
-  padding:8px 22px;
-  min-height:90px;
+  padding:7px 22px;
+  min-height:84px;
   border-bottom:1px solid var(--line2);
   background:linear-gradient(90deg,rgba(2,11,23,.94),rgba(5,21,40,.72),rgba(2,8,17,.92));
 }}
-.logo{{width:80px;filter:drop-shadow(0 0 13px rgba(44,187,255,.22))}}
-.brand h1{{margin:0;font-size:clamp(25px,3vw,42px);line-height:1;font-weight:560;letter-spacing:.08em;text-transform:uppercase;color:#eef6ff}}
+.logo{{width:74px;filter:drop-shadow(0 0 13px rgba(44,187,255,.22))}}
+.brand h1{{margin:0;font-size:clamp(23px,2.65vw,36px);line-height:1;font-weight:560;letter-spacing:.08em;text-transform:uppercase;color:#eef6ff}}
 .brand h1 span{{color:var(--gold2);font-weight:640}}
 .brand p{{margin:5px 0 0;color:#c6d8e8;font-size:10px;letter-spacing:.19em;text-transform:uppercase}}
 .status-badge{{border:1px solid var(--status);color:var(--status);background:color-mix(in srgb,var(--status) 9%,rgba(2,8,16,.96));padding:10px 15px;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;white-space:nowrap;box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
 .fit-ref-line{{padding:6px 18px 5px;color:var(--cyan2);border-bottom:1px solid rgba(49,185,255,.18);background:rgba(1,8,17,.74);font:10px/1.2 Consolas,monospace;letter-spacing:.16em;text-transform:uppercase}}
-.main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(360px,1.08fr) minmax(390px,1.15fr);gap:7px;padding:7px}}
-.stack{{display:flex;flex-direction:column;gap:6px;min-width:0}}
+.main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(360px,1.08fr) minmax(390px,1.15fr);gap:7px;padding:7px;align-items:stretch}}
+.stack{{display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}}
+.center-col > .hud-panel:last-child,.right-col > .hud-panel:last-child{{flex:1}}
 .hud-panel{{position:relative;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(5,20,38,.88),rgba(2,8,17,.94));box-shadow:inset 0 0 24px rgba(39,186,255,.025),0 0 10px rgba(0,0,0,.18)}}
 .hud-panel:before{{content:"";position:absolute;left:-1px;top:-1px;width:28px;height:2px;background:var(--cyan);box-shadow:0 0 8px rgba(53,199,255,.35)}}
 .panel-title{{display:flex;align-items:center;gap:9px;min-height:31px;padding:5px 9px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:11px;font-weight:780;letter-spacing:.12em;text-transform:uppercase}}
@@ -7650,7 +7651,7 @@ button{{font:inherit}}
 .identity-panel{{padding:10px 13px 11px}}
 .eyebrow{{color:var(--cyan2);font:10px Consolas,monospace;letter-spacing:.15em;text-transform:uppercase}}
 .ship-name{{margin:5px 0 0;color:#eef6ff;font-size:clamp(17px,1.8vw,25px);font-weight:650;letter-spacing:.10em;text-transform:uppercase}}
-.fit-name{{margin:4px 0 9px;color:var(--gold2);font-size:clamp(15px,1.7vw,22px);line-height:1.12;font-weight:600;letter-spacing:.055em;text-transform:uppercase}}
+.fit-name{{margin:4px 0 9px;color:var(--gold2);font-size:clamp(14px,1.45vw,19px);line-height:1.12;font-weight:600;letter-spacing:.055em;text-transform:uppercase}}
 .info-grid{{display:grid;grid-template-columns:1fr 1fr;gap:7px}}
 .info-cell{{border:1px solid rgba(49,185,255,.24);background:rgba(2,10,20,.45);padding:8px 10px}}
 .info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:9px;letter-spacing:.13em;text-transform:uppercase}}
@@ -7809,7 +7810,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4G</span>
+    <span class="version">Freeborn Legacy • Fittings 4H</span>
   </footer>
 </main>
 
