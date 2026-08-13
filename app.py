@@ -7338,6 +7338,53 @@ def handle_message_component(
 # FREEBORN FITTINGS — WEB CARD PHASE 4A
 # ============================================================
 
+def parse_eft_web_sections(eft_text):
+    """Parse standard EFT block order for the corporate Web card."""
+    text = str(eft_text or "").replace("\r\n", "\n").strip()
+    if not text:
+        return {"low": [], "mid": [], "high": [], "rigs": [], "extras": []}
+    lines = text.split("\n")
+    if lines and lines[0].strip().startswith("["):
+        lines = lines[1:]
+    blocks, current = [], []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        current.append(line)
+    if current:
+        blocks.append(current)
+    sections = {"low": [], "mid": [], "high": [], "rigs": [], "extras": []}
+    ordered = ["low", "mid", "high", "rigs"]
+    for index, block in enumerate(blocks):
+        if index < len(ordered):
+            sections[ordered[index]] = block
+        else:
+            sections["extras"].extend(block)
+    return sections
+
+
+def format_eft_web_items(items):
+    """Collapse identical EFT lines and return safe HTML rows."""
+    if not items:
+        return '<div class="slot-empty">Aucun module renseigné</div>'
+    collapsed = []
+    for line in items:
+        if collapsed and collapsed[-1][0] == line:
+            collapsed[-1][1] += 1
+        else:
+            collapsed.append([line, 1])
+    html = []
+    for line, count in collapsed:
+        html.append(
+            f'<div class="slot-item"><span class="slot-qty">{count}×</span><span>{escape(line)}</span></div>'
+        )
+    return "".join(html)
+
+
 def freeborn_fitting_web_page(fit):
     fit = ensure_fit_ship_type_id(dict(fit))
 
@@ -7381,68 +7428,90 @@ def freeborn_fitting_web_page(fit):
         else '<div class="ship-placeholder">VISUEL EVE<br>INDISPONIBLE</div>'
     )
 
+    eft_sections = parse_eft_web_sections(fit.get("eft_text"))
+    low_html = format_eft_web_items(eft_sections["low"])
+    mid_html = format_eft_web_items(eft_sections["mid"])
+    high_html = format_eft_web_items(eft_sections["high"])
+    rigs_html = format_eft_web_items(eft_sections["rigs"])
+    extras_html = format_eft_web_items(eft_sections["extras"])
+
     return f'''<!doctype html>
 <html lang="fr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#05080d">
+<meta name="theme-color" content="#02070d">
 <link rel="icon" type="image/png" href="/assets/favicon.png">
 <title>{safe_name} — Freeborn Fittings</title>
 <style>
 :root {{
   color-scheme:dark;
-  --gold:#d5a632; --gold2:#f0c45a; --blue:#149cff; --cyan:#38c7ff;
-  --panel:#050b12; --panel2:#07111c; --text:#f4f1ea; --muted:#aeb6c0;
-  --line:rgba(20,156,255,.72); --line-soft:rgba(20,156,255,.28);
-  --status:{status_color};
+  --gold:#d5a632; --gold2:#f1c75b; --blue:#149cff; --cyan:#27baff;
+  --panel:#030b13; --panel2:#06111d; --text:#f0eee8; --muted:#9db5c9;
+  --line:rgba(20,156,255,.82); --line-soft:rgba(20,156,255,.31); --status:{status_color};
 }}
 *{{box-sizing:border-box}}
 html{{scroll-behavior:smooth}}
-body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 72% 12%,rgba(0,123,255,.10),transparent 26%),linear-gradient(rgba(1,5,10,.58),rgba(1,5,10,.82)),url('/assets/bg-space.jpg') center/cover fixed no-repeat,#02070d;padding:10px}}
+body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 73% 9%,rgba(0,118,255,.15),transparent 27%),linear-gradient(rgba(1,5,10,.58),rgba(1,5,10,.84)),url('/assets/bg-space.jpg') center/cover fixed no-repeat,#02070d;padding:10px}}
 button{{font:inherit}}
-.shell{{width:min(1240px,100%);margin:auto;position:relative;border:1px solid var(--line);background:linear-gradient(145deg,rgba(4,11,19,.94),rgba(2,7,13,.98));box-shadow:0 0 38px rgba(0,0,0,.72),0 0 24px rgba(20,156,255,.08),inset 0 0 55px rgba(20,156,255,.035)}}
-.shell:before,.shell:after{{content:"";position:absolute;pointer-events:none;width:58px;height:58px;border-color:var(--cyan);opacity:.85}}
+.shell{{width:min(1500px,100%);margin:auto;position:relative;border:1px solid var(--line);background:linear-gradient(145deg,rgba(3,10,18,.95),rgba(1,6,12,.985));box-shadow:0 0 42px rgba(0,0,0,.72),0 0 28px rgba(20,156,255,.08),inset 0 0 70px rgba(20,156,255,.025)}}
+.shell:before,.shell:after{{content:"";position:absolute;pointer-events:none;width:62px;height:62px;border-color:var(--cyan);opacity:.9}}
 .shell:before{{left:8px;top:8px;border-left:2px solid;border-top:2px solid}}
 .shell:after{{right:8px;bottom:8px;border-right:2px solid;border-bottom:2px solid}}
-.top{{display:grid;grid-template-columns:108px 1fr auto;gap:18px;align-items:center;padding:12px 22px;border-bottom:1px solid var(--line-soft);min-height:112px}}
-.logo{{width:98px;max-width:100%;filter:drop-shadow(0 0 12px rgba(20,156,255,.18))}}
-.brand h1{{margin:0;font-size:clamp(25px,3.7vw,43px);letter-spacing:.08em;line-height:.95;text-transform:uppercase;color:#e8e5df;text-shadow:0 2px 0 #31343b}}
-.brand h1 span{{color:var(--gold2)}}
-.brand p{{margin:7px 0 0;color:#d6d1c8;letter-spacing:.16em;text-transform:uppercase;font-size:10px}}
-.badge{{border:1px solid var(--status);color:var(--status);padding:10px 14px;font-weight:800;letter-spacing:.08em;white-space:nowrap;background:color-mix(in srgb,var(--status) 8%,#05080d);box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
-.content{{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,42%);gap:14px;padding:14px 16px 10px}}
-.panel{{border:1px solid var(--line-soft);background:linear-gradient(180deg,rgba(5,14,24,.94),rgba(3,9,16,.97));padding:16px;box-shadow:inset 0 0 22px rgba(20,156,255,.025)}}
+.top{{display:grid;grid-template-columns:112px 1fr auto;gap:20px;align-items:center;padding:13px 28px;border-bottom:1px solid var(--line-soft);min-height:116px;background:linear-gradient(90deg,rgba(1,8,15,.72),rgba(3,12,23,.46),rgba(0,0,0,.24))}}
+.logo{{width:102px;max-width:100%;filter:drop-shadow(0 0 14px rgba(20,156,255,.18))}}
+.brand h1{{margin:0;font-size:clamp(27px,3.4vw,45px);font-weight:650;letter-spacing:.075em;line-height:.95;text-transform:uppercase;color:#e8e5df;text-shadow:0 2px 0 #31343b}}
+.brand h1 span{{color:var(--gold2);font-weight:700}}
+.brand p{{margin:8px 0 0;color:#d6d1c8;letter-spacing:.18em;text-transform:uppercase;font-size:10px}}
+.badge{{border:1px solid var(--status);color:var(--status);padding:11px 16px;font-weight:800;letter-spacing:.1em;white-space:nowrap;background:color-mix(in srgb,var(--status) 8%,#05080d);box-shadow:0 0 20px color-mix(in srgb,var(--status) 18%,transparent)}}
+.hero{{display:grid;grid-template-columns:minmax(0,1.22fr) minmax(350px,.88fr);gap:16px;padding:16px 18px 10px}}
+.panel{{border:1px solid var(--line-soft);background:linear-gradient(180deg,rgba(5,14,24,.95),rgba(2,8,15,.98));box-shadow:inset 0 0 26px rgba(20,156,255,.025)}}
+.identity{{padding:18px 20px}}
 .kicker{{color:var(--cyan);font-size:11px;letter-spacing:.18em;text-transform:uppercase}}
-.ship-title{{margin:7px 0 0;color:#e8e5df;font-size:clamp(17px,1.8vw,24px);font-weight:800;letter-spacing:.07em;text-transform:uppercase}}
-.fit-title{{margin:3px 0 5px;color:var(--gold2);font-size:clamp(19px,2.25vw,29px);line-height:1.08;font-weight:850;letter-spacing:.035em;text-transform:uppercase;text-shadow:0 0 18px rgba(213,166,50,.10)}}
-.techline{{color:#69bfff;font:10px/1.4 Consolas,monospace;letter-spacing:.13em;text-transform:uppercase;border-bottom:1px solid var(--line-soft);padding-bottom:10px}}
-.ref{{color:var(--muted);font-family:Consolas,monospace;font-size:13px}}
-.meta{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px}}
-.meta div{{padding:9px 12px;border:1px solid rgba(20,156,255,.22);background:linear-gradient(180deg,rgba(8,27,45,.48),rgba(0,0,0,.16))}}
-.meta small{{display:block;color:var(--cyan);text-transform:uppercase;letter-spacing:.13em;margin-bottom:4px;font-size:10px}}
-.notes{{margin-top:12px;padding:12px 14px;border:1px solid rgba(20,156,255,.25);border-left:3px solid var(--blue);background:linear-gradient(90deg,rgba(20,156,255,.07),rgba(0,0,0,.14));line-height:1.42;white-space:pre-wrap;min-height:76px}}
-.shipbox{{min-height:332px;display:grid;place-items:center;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,156,255,.10),rgba(0,0,0,.08) 45%,rgba(0,0,0,.58));padding:12px;box-shadow:inset 0 0 0 1px rgba(56,199,255,.12)}}
-.shipbox:before{{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent 49.8%,rgba(20,156,255,.12) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(213,166,50,.09) 50%,transparent 50.2%);pointer-events:none}}
-.ship{{width:100%;height:100%;max-height:360px;object-fit:contain;position:relative;filter:drop-shadow(0 16px 26px rgba(0,0,0,.75))}}
+.ship-title{{margin:9px 0 0;color:#e8e5df;font-size:clamp(18px,1.8vw,27px);font-weight:650;letter-spacing:.08em;text-transform:uppercase}}
+.fit-title{{margin:6px 0 8px;color:var(--gold2);font-size:clamp(20px,2.3vw,31px);line-height:1.07;font-weight:650;letter-spacing:.045em;text-transform:uppercase;text-shadow:0 0 18px rgba(213,166,50,.08)}}
+.techline{{color:#69bfff;font:10px/1.45 Consolas,monospace;letter-spacing:.14em;text-transform:uppercase;border-bottom:1px solid var(--line-soft);padding-bottom:11px}}
+.meta{{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:15px}}
+.meta div,.notes{{border:1px solid rgba(20,156,255,.36);background:linear-gradient(180deg,rgba(6,25,43,.60),rgba(0,0,0,.18))}}
+.meta div{{padding:11px 14px}}
+.meta small{{display:block;color:var(--cyan);text-transform:uppercase;letter-spacing:.14em;margin-bottom:5px;font-size:10px}}
+.notes{{margin-top:12px;padding:12px 16px;border-left:3px solid var(--blue);line-height:1.42;white-space:pre-wrap;min-height:78px}}
+.shipbox{{min-height:300px;display:grid;place-items:center;position:relative;overflow:hidden;padding:12px;background:radial-gradient(circle at 50% 45%,rgba(20,156,255,.11),rgba(0,0,0,.10) 45%,rgba(0,0,0,.64));box-shadow:inset 0 0 0 1px rgba(56,199,255,.12)}}
+.shipbox:before{{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent 49.8%,rgba(20,156,255,.11) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(20,156,255,.08) 50%,transparent 50.2%);pointer-events:none}}
+.ship{{width:100%;height:100%;max-height:310px;object-fit:contain;position:relative;filter:drop-shadow(0 18px 26px rgba(0,0,0,.8))}}
 .ship-placeholder{{color:var(--muted);letter-spacing:.18em;text-align:center}}
-.actions{{display:flex;flex-wrap:wrap;gap:9px;padding:0 16px 12px}}
-.action{{appearance:none;border:1px solid rgba(213,166,50,.62);background:linear-gradient(180deg,rgba(213,166,50,.11),rgba(213,166,50,.035));color:#f5d36f;padding:9px 14px;min-height:38px;text-transform:uppercase;letter-spacing:.08em;font-weight:800;font-size:11px;cursor:pointer;transition:.18s ease;display:inline-flex;align-items:center;gap:8px}}
-.action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 18px rgba(213,166,50,.13)}}
-.action.blue{{border-color:rgba(20,156,255,.82);color:#69c7ff;background:linear-gradient(180deg,rgba(20,156,255,.16),rgba(20,156,255,.045));box-shadow:inset 0 0 16px rgba(20,156,255,.035)}}
-.action.green{{border-color:rgba(120,201,74,.65);color:#9ce36d}}
-.action:disabled{{opacity:.42;cursor:not-allowed;transform:none;box-shadow:none}}
-.eft-wrap{{padding:0 16px 12px}}
-.eft-panel{{display:none;border:1px solid rgba(20,156,255,.38);background:linear-gradient(180deg,rgba(6,12,20,.98),rgba(3,7,12,.99));padding:12px}}
+.actions{{display:flex;flex-wrap:wrap;gap:10px;padding:0 18px 14px}}
+.action{{appearance:none;border:1px solid rgba(213,166,50,.74);background:linear-gradient(180deg,rgba(213,166,50,.13),rgba(213,166,50,.025));color:#f6d66f;padding:10px 16px;min-height:40px;text-transform:uppercase;letter-spacing:.085em;font-weight:800;font-size:11px;cursor:pointer;transition:.18s ease;display:inline-flex;align-items:center;gap:8px;box-shadow:inset 0 0 14px rgba(213,166,50,.025)}}
+.action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 18px rgba(213,166,50,.16)}}
+.action.blue{{border-color:rgba(20,156,255,.92);color:#63c8ff;background:linear-gradient(180deg,rgba(20,156,255,.17),rgba(20,156,255,.04))}}
+.action.green{{border-color:rgba(87,207,71,.75);color:#79df69;background:linear-gradient(180deg,rgba(87,207,71,.10),rgba(87,207,71,.025))}}
+.action:disabled{{opacity:.48;cursor:not-allowed;transform:none;box-shadow:none}}
+.tech-section{{padding:0 18px 14px}}
+.tech-title{{display:flex;align-items:center;gap:12px;margin:1px 0 10px;color:#d9e6f7;text-transform:uppercase;letter-spacing:.13em;font-size:12px}}
+.tech-title:before,.tech-title:after{{content:"";height:1px;background:linear-gradient(90deg,var(--blue),transparent);flex:1}}
+.tech-title:before{{max-width:56px}}
+.tech-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}}
+.slot-card{{position:relative;border:1px solid rgba(20,156,255,.40);background:linear-gradient(180deg,rgba(5,19,34,.88),rgba(2,8,15,.96));padding:13px 14px;min-height:120px;box-shadow:inset 0 0 24px rgba(20,156,255,.025)}}
+.slot-card.wide{{grid-column:span 2}}
+.slot-head{{display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid rgba(20,156,255,.24);padding-bottom:8px;margin-bottom:7px;color:var(--cyan);text-transform:uppercase;letter-spacing:.12em;font-weight:700;font-size:11px}}
+.slot-head span{{color:#6e8293;font:9px Consolas,monospace}}
+.slot-item{{display:grid;grid-template-columns:35px 1fr;gap:7px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;line-height:1.3}}
+.slot-item:last-child{{border-bottom:0}}
+.slot-qty{{color:var(--gold2);font-family:Consolas,monospace}}
+.slot-empty{{color:#647586;font-style:italic;font-size:12px;padding:7px 0}}
+.eft-wrap{{padding:0 18px 14px}}
+.eft-panel{{display:none;border:1px solid rgba(20,156,255,.40);background:linear-gradient(180deg,rgba(6,12,20,.98),rgba(3,7,12,.99));padding:12px}}
 .eft-panel.open{{display:block}}
 .eft-head{{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}}
 .eft-head strong{{color:var(--gold2);letter-spacing:.12em;text-transform:uppercase;font-size:11px}}
+.ref{{color:var(--muted);font-family:Consolas,monospace;font-size:11px}}
 pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;border:1px solid rgba(255,255,255,.06);color:#d9e6f7;font:12px/1.42 Consolas,"Courier New",monospace;white-space:pre-wrap}}
-.bottom{{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:10px 22px;border-top:1px solid var(--line-soft);color:#8ebde0;font-size:10px;letter-spacing:.12em;text-transform:uppercase}}
+.bottom{{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:11px 26px;border-top:1px solid var(--line-soft);color:#8ebde0;font-size:10px;letter-spacing:.13em;text-transform:uppercase}}
 .motto{{color:var(--cyan)}}
 .toast{{position:fixed;right:18px;bottom:18px;padding:10px 14px;border:1px solid rgba(120,201,74,.7);background:#07100a;color:#a9ee80;letter-spacing:.06em;font-weight:700;opacity:0;transform:translateY(8px);pointer-events:none;transition:.2s ease;z-index:50}}
 .toast.show{{opacity:1;transform:translateY(0)}}
-@media(max-width:820px){{body{{padding:6px}}.top{{grid-template-columns:72px 1fr;gap:10px;padding:12px}}.logo{{width:68px}}.badge{{grid-column:1/-1;text-align:center}}.content{{grid-template-columns:1fr;padding:8px}}.shipbox{{min-height:260px}}.meta{{grid-template-columns:1fr}}.actions,.eft-wrap{{padding-left:8px;padding-right:8px}}.action{{flex:1 1 145px;justify-content:center}}.bottom{{display:block;text-align:center;line-height:1.8}}}}
+@media(max-width:980px){{.hero{{grid-template-columns:1fr}}.shipbox{{min-height:250px}}.ship{{max-height:270px}}.tech-grid{{grid-template-columns:1fr 1fr}}.slot-card.wide{{grid-column:span 2}}}}
+@media(max-width:650px){{body{{padding:5px}}.top{{grid-template-columns:70px 1fr;gap:10px;padding:12px}}.logo{{width:66px}}.badge{{grid-column:1/-1;text-align:center}}.hero{{padding:8px}}.identity{{padding:14px}}.meta{{grid-template-columns:1fr}}.actions,.tech-section,.eft-wrap{{padding-left:8px;padding-right:8px}}.action{{flex:1 1 145px;justify-content:center}}.tech-grid{{grid-template-columns:1fr}}.slot-card.wide{{grid-column:auto}}.bottom{{display:block;text-align:center;line-height:1.8}}}}
 </style>
 </head>
 <body>
@@ -7450,11 +7519,11 @@ pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;bor
   <header class="top">
     <img class="logo" src="/assets/logo-freeborn-legacy.png" alt="Freeborn Legacy">
     <div class="brand"><h1>FREEBORN <span>FITTS</span></h1><p>Bibliothèque de fittings • par les FREE • pour les FREE</p></div>
-    <div class="badge">{escape(status_label)}</div>
+    <div class="badge">◉ {escape(status_label)}</div>
   </header>
 
-  <section class="content">
-    <article class="panel">
+  <section class="hero">
+    <article class="panel identity">
       <div class="kicker">{safe_ref} • fiche corporate</div>
       <div class="ship-title">{safe_ship}</div>
       <h2 class="fit-title">{safe_name}</h2>
@@ -7473,8 +7542,19 @@ pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;bor
     <button class="action" type="button" onclick="copyEft()">▤ Copier EFT</button>
     <button class="action blue" type="button" onclick="exportEft()">⇩ Exporter EFT</button>
     <button class="action blue" type="button" disabled title="Disponible après authentification Discord">✎ Modifier</button>
-    <button class="action green" type="button" disabled title="Validation Web prévue à la prochaine phase">✓ Approuver / Refuser</button>
+    <button class="action green" type="button" disabled title="Validation Web prévue après authentification Discord">✓ Approuver / Refuser</button>
   </nav>
+
+  <section class="tech-section">
+    <div class="tech-title"><strong>Configuration technique</strong></div>
+    <div class="tech-grid">
+      <article class="slot-card"><div class="slot-head">Emplacements hauts <span>HIGH</span></div>{high_html}</article>
+      <article class="slot-card"><div class="slot-head">Emplacements intermédiaires <span>MID</span></div>{mid_html}</article>
+      <article class="slot-card"><div class="slot-head">Emplacements bas <span>LOW</span></div>{low_html}</article>
+      <article class="slot-card"><div class="slot-head">Rigs <span>RIG</span></div>{rigs_html}</article>
+      <article class="slot-card wide"><div class="slot-head">Drones / Cargaison / Compléments <span>HOLD</span></div>{extras_html}</article>
+    </div>
+  </section>
 
   <section class="eft-wrap" id="eftWrap">
     <div class="eft-panel" id="eftPanel">
@@ -7483,7 +7563,7 @@ pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;bor
     </div>
   </section>
 
-  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Fittings 4D</span></footer>
+  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Fittings 4E</span></footer>
 </main>
 <div class="toast" id="toast">EFT copié</div>
 <script>
@@ -7516,7 +7596,6 @@ function showToast(message) {{
 </script>
 </body>
 </html>'''
-
 
 @app.route("/fittings/<fit_ref>")
 def fitting_web_card(fit_ref):
