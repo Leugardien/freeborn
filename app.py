@@ -9411,7 +9411,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4O-I — FITTING / CAPACITEUR</div>
+              <div class="pilot-engine-title">MOTEUR 4O-J — FITTING / CAPACITEUR</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -10740,7 +10740,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-I</strong>
+            <strong>ALL V — VALIDATION 4O-J</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -10761,7 +10761,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           </div>
           <div class="allv-status">{all_v_compat}</div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
-            <strong>CAPACITEUR — DOGMA 4O-I</strong><br>
+            <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
             ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
             pic {all_v_cap_peak} • drain continu {all_v_cap_drain}<br>
             Projection hors apports conditionnels : {all_v_cap_state}.<br>
@@ -10817,7 +10817,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-I</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-J</span>
   </footer>
 </main>
 
