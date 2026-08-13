@@ -8560,7 +8560,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4O-C
+    FREEBORN FITTINGS — Phase 4O-D
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -8629,80 +8629,109 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
         pilot_skill_count = len(pilot_skills)
 
-        # 4O-A values are filled later, after the EFT/type resolution pass.
+        pilot_updated_at = pilot_profile.get("skills_updated_at")
+        if pilot_updated_at:
+            try:
+                pilot_updated_display = pilot_updated_at.strftime(
+                    "%d/%m/%Y %H:%M"
+                )
+            except Exception:
+                pilot_updated_display = str(pilot_updated_at)
+        else:
+            pilot_updated_display = "Non disponible"
+
+        # Engine values are filled later, after EFT/type resolution.
         # Placeholders are replaced after the engine has calculated the fit.
         pilot_panel_html = f"""
         <div class="pilot-panel pilot-connected">
           <div class="pilot-panel-head">
             <span class="pilot-icon">◉</span>
-            <div>
+            <div class="pilot-heading-copy">
               <strong>MON PERSONNAGE — {pilot_name}</strong>
               <small>Profil ESI reconnu et actualisé</small>
             </div>
           </div>
+
           <div class="pilot-meta">
             <span><b>{pilot_total_sp:,}</b> SP</span>
             <span><b>{pilot_skill_count}</b> compétences</span>
             <span class="pilot-ready">✓ Profil prêt</span>
           </div>
+
           <div class="pilot-note">
-            Profil ESI chargé. Le moteur 4O-C applique les compétences
-            universelles CPU / Powergrid ainsi que Weapon Upgrades et
-            Advanced Weapon Upgrades aux groupes d'armes reconnus.
-            La télémétrie principale reste en BASE pendant cette validation
-            avant promotion définitive de la référence ALL V.
+            Comparaison directe avec la référence corporate ALL V.
+            Les valeurs ci-dessous utilisent les compétences réellement
+            remontées par ESI pour ce Main.
           </div>
-          <div class="pilot-engine-core">
-            <div class="pilot-engine-title">MOTEUR 4O-C — CPU / POWERGRID</div>
-            <div class="pilot-engine-row">
-              <span>CPU Management</span>
-              <b id="pilot-cpu-skill">—</b>
-            </div>
-            <div class="pilot-engine-row">
-              <span>Power Grid Management</span>
-              <b id="pilot-pg-skill">—</b>
-            </div>
-            <div class="pilot-engine-row">
-              <span>Weapon Upgrades</span>
-              <b id="pilot-wu-skill">—</b>
-            </div>
-            <div class="pilot-engine-row">
-              <span>Advanced Weapon Upgrades</span>
-              <b id="pilot-awu-skill">—</b>
-            </div>
-            <div class="pilot-engine-separator"></div>
-            <div class="pilot-engine-row">
-              <span>CPU — mon personnage</span>
-              <b id="pilot-cpu-pair">—</b>
-            </div>
-            <div class="pilot-engine-row">
-              <span>Marge CPU</span>
-              <b id="pilot-cpu-margin">—</b>
-            </div>
-            <div class="pilot-engine-row">
-              <span>Powergrid — mon personnage</span>
-              <b id="pilot-pg-pair">—</b>
-            </div>
-            <div class="pilot-engine-row">
-              <span>Marge Powergrid</span>
-              <b id="pilot-pg-margin">—</b>
-            </div>
-            <div class="pilot-engine-compat" id="pilot-compat">
-              ANALYSE EN COURS
-            </div>
-            <div class="pilot-compare" id="pilot-compare">
-              <div class="pilot-compare-title">ÉCART AVEC LA RÉFÉRENCE ALL V</div>
-              <div class="pilot-compare-grid">
-                <span>CPU utilisé</span><b id="pilot-delta-cpu-used">—</b>
-                <span>CPU disponible</span><b id="pilot-delta-cpu-out">—</b>
-                <span>PG utilisé</span><b id="pilot-delta-pg-used">—</b>
-                <span>PG disponible</span><b id="pilot-delta-pg-out">—</b>
+
+          <div class="pilot-tech-grid">
+            <div class="pilot-engine-core">
+              <div class="pilot-engine-title">MOTEUR 4O-D — CPU / POWERGRID</div>
+
+              <div class="pilot-engine-row">
+                <span>CPU Management</span>
+                <b id="pilot-cpu-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Power Grid Management</span>
+                <b id="pilot-pg-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Weapon Upgrades</span>
+                <b id="pilot-wu-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Advanced Weapon Upgrades</span>
+                <b id="pilot-awu-skill">—</b>
+              </div>
+
+              <div class="pilot-engine-separator"></div>
+
+              <div class="pilot-engine-row">
+                <span>CPU — mon personnage</span>
+                <b id="pilot-cpu-pair">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Marge CPU</span>
+                <b id="pilot-cpu-margin">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Powergrid — mon personnage</span>
+                <b id="pilot-pg-pair">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Marge Powergrid</span>
+                <b id="pilot-pg-margin">—</b>
+              </div>
+
+              <div class="pilot-engine-compat" id="pilot-compat">
+                ANALYSE EN COURS
               </div>
             </div>
+
+            <div class="pilot-side">
+              <div class="pilot-compare" id="pilot-compare">
+                <div class="pilot-compare-title">
+                  ÉCART AVEC LA RÉFÉRENCE ALL V
+                </div>
+                <div class="pilot-compare-grid">
+                  <span>CPU utilisé</span><b id="pilot-delta-cpu-used">—</b>
+                  <span>CPU disponible</span><b id="pilot-delta-cpu-out">—</b>
+                  <span>PG utilisé</span><b id="pilot-delta-pg-used">—</b>
+                  <span>PG disponible</span><b id="pilot-delta-pg-out">—</b>
+                </div>
+              </div>
+
+              <div class="pilot-update">
+                <small>Dernière mise à jour ESI</small>
+                <strong>{escape(pilot_updated_display)}</strong>
+              </div>
+
+              <a class="pilot-button pilot-refresh" href="{escape(pilot_start_url)}">
+                ↻ Actualiser mon profil EVE
+              </a>
+            </div>
           </div>
-          <a class="pilot-button pilot-refresh" href="{escape(pilot_start_url)}">
-            ↻ Actualiser mon profil EVE
-          </a>
         </div>
         """
     else:
@@ -9115,6 +9144,7 @@ button{{font:inherit}}
 .stack{{display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}}
 .center-col > .hud-panel:last-child,.right-col > .hud-panel:last-child{{flex:1}}
 .center-col .notes-body{{min-height:100%}}
+.center-col > .hud-panel:last-child{{min-height:170px}}
 .hud-panel{{position:relative;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(5,20,38,.88),rgba(2,8,17,.94));box-shadow:inset 0 0 24px rgba(39,186,255,.025),0 0 10px rgba(0,0,0,.18)}}
 .hud-panel:before{{content:"";position:absolute;left:-1px;top:-1px;width:28px;height:2px;background:var(--cyan);box-shadow:0 0 8px rgba(53,199,255,.35)}}
 .panel-title{{display:flex;align-items:center;gap:9px;min-height:31px;padding:5px 9px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:13px;font-weight:760;letter-spacing:.12em;text-transform:uppercase}}
@@ -9139,7 +9169,7 @@ button{{font:inherit}}
 .info-cell{{border:1px solid rgba(49,185,255,.24);background:rgba(2,10,20,.45);padding:8px 10px}}
 .info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:11px;letter-spacing:.11em;text-transform:uppercase}}
 .info-cell strong{{font-size:14px;color:#eef6ff}}
-.notes-body{{min-height:60px;padding:8px 10px;color:#d7e7f4;white-space:pre-wrap;font-size:14px;line-height:1.48}}
+.notes-body{{min-height:110px;padding:13px 15px;color:#dbeaf5;white-space:pre-wrap;font-size:16px;line-height:1.58}}
 .hold-panel .slot-body{{overflow:visible}}
 .drone-bay-panel .panel-title{{color:#a9e7ff}}
 .cargo-bay-panel .panel-title{{color:#d8e8f3}}
@@ -9247,8 +9277,8 @@ button{{font:inherit}}
 .telemetry-reference strong{{display:block;color:var(--gold2);font-size:11px;letter-spacing:.09em;text-transform:uppercase}}
 .telemetry-reference span{{display:block;margin-top:4px;color:#9bb4c7;font-size:11px;line-height:1.35}}
 .pilot-panel{{
-  margin:8px 7px 9px;
-  padding:11px 12px;
+  margin:9px 7px 10px;
+  padding:13px 14px;
   border:1px solid rgba(49,185,255,.38);
   background:
     linear-gradient(180deg,rgba(13,61,96,.18),rgba(2,12,23,.66));
@@ -9263,114 +9293,111 @@ button{{font:inherit}}
 .pilot-panel-head{{
   display:flex;
   align-items:center;
-  gap:9px;
+  gap:10px;
 }}
 .pilot-icon{{
-  width:28px;
-  height:28px;
-  flex:0 0 28px;
+  width:32px;
+  height:32px;
+  flex:0 0 32px;
   display:grid;
   place-items:center;
   border:1px solid var(--cyan);
   border-radius:50%;
   color:var(--cyan2);
   background:rgba(16,108,174,.18);
-  font-size:12px;
+  font-size:14px;
 }}
+.pilot-heading-copy{{min-width:0}}
 .pilot-panel-head strong{{
   display:block;
   color:#eef7ff;
-  font-size:13px;
-  letter-spacing:.07em;
+  font-size:16px;
+  line-height:1.15;
+  letter-spacing:.055em;
 }}
 .pilot-panel-head small{{
   display:block;
-  margin-top:2px;
-  color:#7ea6c2;
-  font-size:11px;
+  margin-top:3px;
+  color:#7fc8ef;
+  font-size:13px;
+  line-height:1.25;
 }}
 .pilot-meta{{
   display:flex;
   flex-wrap:wrap;
-  gap:7px;
-  margin-top:9px;
+  gap:8px;
+  margin-top:10px;
 }}
 .pilot-meta span{{
-  padding:5px 8px;
-  border:1px solid rgba(49,185,255,.19);
+  padding:6px 9px;
+  border:1px solid rgba(49,185,255,.22);
   background:rgba(0,0,0,.16);
-  color:#9db7ca;
-  font-size:11px;
+  color:#aac2d2;
+  font-size:13px;
 }}
 .pilot-meta b{{color:#edf6ff}}
 .pilot-meta .pilot-ready{{
   color:#9cec94;
-  border-color:rgba(121,221,115,.28);
+  border-color:rgba(121,221,115,.30);
 }}
 .pilot-note{{
-  margin-top:9px;
-  color:#a7bbca;
-  font-size:12px;
-  line-height:1.38;
-}}
-.pilot-button{{
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  min-height:37px;
   margin-top:10px;
-  padding:8px 13px;
-  border:1px solid rgba(49,185,255,.78);
-  background:
-    linear-gradient(180deg,rgba(21,156,255,.16),rgba(21,156,255,.035));
-  color:#72d3ff;
-  text-decoration:none;
-  font-size:12px;
-  font-weight:800;
-  letter-spacing:.06em;
-  text-transform:uppercase;
+  color:#bfd0dc;
+  font-size:14px;
+  line-height:1.42;
 }}
-.pilot-button:hover{{
-  border-color:var(--cyan2);
-  box-shadow:0 0 14px rgba(53,199,255,.13);
+.pilot-tech-grid{{
+  display:grid;
+  grid-template-columns:minmax(0,1.18fr) minmax(250px,.82fr);
+  gap:10px;
+  margin-top:11px;
+  align-items:stretch;
 }}
 .pilot-engine-core{{
-  margin-top:10px;
-  padding:8px 9px;
-  border:1px solid rgba(49,185,255,.18);
+  margin:0;
+  padding:10px 11px;
+  border:1px solid rgba(49,185,255,.21);
   background:rgba(0,0,0,.18);
 }}
 .pilot-engine-title{{
-  margin-bottom:6px;
+  margin-bottom:8px;
   color:#72d3ff;
-  font-size:10px;
-  font-weight:800;
-  letter-spacing:.08em;
+  font-size:13px;
+  font-weight:850;
+  line-height:1.2;
+  letter-spacing:.075em;
 }}
 .pilot-engine-row{{
   display:flex;
   align-items:center;
   justify-content:space-between;
-  gap:12px;
-  padding:3px 0;
-  border-bottom:1px solid rgba(255,255,255,.035);
-  color:#8faabd;
-  font-size:11px;
+  gap:14px;
+  padding:5px 0;
+  border-bottom:1px solid rgba(255,255,255,.045);
+  color:#a9c2d3;
+  font-size:13px;
+  line-height:1.25;
+}}
+.pilot-engine-row:last-child{{border-bottom:0}}
+.pilot-engine-row b{{
+  color:#f0f6fb;
+  font-size:13px;
+  white-space:nowrap;
 }}
 .pilot-engine-separator{{
   height:1px;
-  margin:6px 0;
-  background:rgba(49,185,255,.14);
+  margin:7px 0;
+  background:rgba(49,185,255,.17);
 }}
 .pilot-engine-compat{{
-  margin-top:7px;
-  padding:7px 8px;
+  margin-top:9px;
+  padding:9px 10px;
   border:1px solid rgba(49,185,255,.20);
   text-align:center;
   color:#9fb7c8;
-  font-size:11px;
-  font-weight:850;
-  letter-spacing:.07em;
+  font-size:14px;
+  font-weight:900;
+  letter-spacing:.075em;
 }}
 .pilot-engine-compat.ok{{
   color:#9cec94;
@@ -9382,30 +9409,85 @@ button{{font:inherit}}
   border-color:rgba(228,87,87,.40);
   background:rgba(228,87,87,.055);
 }}
+.pilot-side{{
+  display:flex;
+  flex-direction:column;
+  gap:9px;
+  min-width:0;
+}}
 .pilot-compare{{
-  margin-top:8px;
-  padding-top:8px;
-  border-top:1px solid rgba(49,185,255,.13);
+  margin:0;
+  padding:10px 11px;
+  border:1px solid rgba(49,185,255,.21);
+  background:rgba(0,0,0,.16);
 }}
 .pilot-compare-title{{
-  margin-bottom:5px;
+  margin-bottom:8px;
   color:#72d3ff;
-  font-size:10px;
-  font-weight:800;
-  letter-spacing:.08em;
+  font-size:13px;
+  font-weight:850;
+  line-height:1.2;
+  letter-spacing:.075em;
 }}
 .pilot-compare-grid{{
   display:grid;
-  grid-template-columns:1fr auto;
-  gap:4px 10px;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:7px 12px;
   align-items:center;
-  color:#8faabd;
-  font-size:10px;
+  color:#a9c2d3;
+  font-size:13px;
+  line-height:1.25;
 }}
 .pilot-compare-grid b{{
-  color:#dbe9f3;
+  color:#eef6fb;
   text-align:right;
   white-space:nowrap;
+  font-size:13px;
+}}
+.pilot-update{{
+  padding:9px 11px;
+  border:1px solid rgba(49,185,255,.14);
+  background:rgba(0,0,0,.12);
+}}
+.pilot-update small{{
+  display:block;
+  color:#7998ad;
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}}
+.pilot-update strong{{
+  display:block;
+  margin-top:3px;
+  color:#dbe8f1;
+  font-size:13px;
+}}
+.pilot-button{{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:42px;
+  margin-top:auto;
+  padding:9px 14px;
+  border:1px solid rgba(49,185,255,.78);
+  background:
+    linear-gradient(180deg,rgba(21,156,255,.16),rgba(21,156,255,.035));
+  color:#72d3ff;
+  text-decoration:none;
+  font-size:13px;
+  font-weight:850;
+  letter-spacing:.055em;
+  text-transform:uppercase;
+}}
+.pilot-button:hover{{
+  border-color:var(--cyan2);
+  box-shadow:0 0 14px rgba(53,199,255,.13);
+}}
+.pilot-refresh{{
+  border-color:rgba(121,221,115,.55);
+  color:#9cec94;
+  background:
+    linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.025));
 }}
 .allv-preview{{
   margin:8px 7px 0;
@@ -9423,12 +9505,12 @@ button{{font:inherit}}
 }}
 .allv-head strong{{
   color:var(--gold2);
-  font-size:11px;
+  font-size:13px;
   letter-spacing:.08em;
 }}
 .allv-head span{{
-  color:#8da2b2;
-  font-size:10px;
+  color:#9eb0bd;
+  font-size:12px;
 }}
 .allv-warning{{
   margin-top:7px;
@@ -9475,7 +9557,7 @@ button{{font:inherit}}
   border-top:1px solid rgba(214,168,60,.16);
   text-align:right;
   color:#d7b95e;
-  font-size:11px;
+  font-size:13px;
   font-weight:850;
   letter-spacing:.06em;
 }}
@@ -9526,6 +9608,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 .toast{{position:fixed;right:18px;bottom:18px;z-index:30;padding:9px 13px;border:1px solid rgba(121,221,115,.70);background:#061109;color:#a7eea0;font-size:11px;font-weight:700;opacity:0;transform:translateY(8px);pointer-events:none;transition:.18s ease}}
 .toast.show{{opacity:1;transform:translateY(0)}}
 @media(max-width:1180px){{
+  .pilot-tech-grid{{grid-template-columns:1fr}}
   .main-grid{{grid-template-columns:1fr 1fr}}
   .right-col{{grid-column:1/-1;display:grid;grid-template-columns:1.2fr .8fr}}
   .actionbar{{grid-template-columns:repeat(3,1fr)}}
@@ -9627,7 +9710,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-C</strong>
+            <strong>ALL V — VALIDATION 4O-D</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -9674,7 +9757,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-C</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-D</span>
   </footer>
 </main>
 
