@@ -7386,6 +7386,18 @@ def format_eft_web_items(items):
 
 
 def freeborn_fitting_web_page(fit):
+    """
+    FREEBORN FITTINGS — Phase 4F
+    EVE-like corporate technical layout.
+
+    The visual structure follows the final Freeborn target:
+    - slots on the left,
+    - fitting identity / cargo / creator notes in the centre,
+    - ship render / technical telemetry on the right,
+    - action bar and corporate footer at the bottom.
+
+    EFT stored in Neon remains the source of truth.
+    """
     fit = ensure_fit_ship_type_id(dict(fit))
 
     safe_ref = escape(format_fit_reference(fit["fit_id"]))
@@ -7399,7 +7411,10 @@ def freeborn_fitting_web_page(fit):
 
     creator_display = creator_id or "Créateur inconnu"
     try:
-        member = get_discord_member(str(fit.get("guild_id") or DISCORD_GUILD_ID), creator_id)
+        member = get_discord_member(
+            str(fit.get("guild_id") or DISCORD_GUILD_ID),
+            creator_id,
+        )
         if member:
             user = member.get("user") or {}
             creator_display = (
@@ -7414,130 +7429,280 @@ def freeborn_fitting_web_page(fit):
     safe_creator = escape(str(creator_display))
 
     status_map = {
-        "proposed": ("PROPOSÉ", "#d5a632"),
-        "approved": ("FREEBORN APPROVED", "#78c94a"),
-        "rejected": ("REFUSÉ", "#d94b4b"),
-        "archived": ("ARCHIVÉ", "#7f8791"),
+        "proposed": ("PROPOSÉ", "#d8aa42"),
+        "approved": ("FREEBORN APPROVED", "#79dd73"),
+        "rejected": ("REFUSÉ", "#e45757"),
+        "archived": ("ARCHIVÉ", "#8996a3"),
     }
-    status_label, status_color = status_map.get(status, (status.upper(), "#149cff"))
+    status_label, status_color = status_map.get(
+        status,
+        (status.upper(), "#29a9ff"),
+    )
 
-    render_url = eve_type_render_url(fit.get("ship_type_id"), 512)
+    render_url = eve_type_render_url(
+        fit.get("ship_type_id"),
+        512,
+    )
     ship_html = (
-        f'<img class="ship" src="{escape(render_url)}" alt="{safe_ship}">'
+        f'<img class="ship-render" src="{escape(render_url)}" alt="{safe_ship}">'
         if render_url
         else '<div class="ship-placeholder">VISUEL EVE<br>INDISPONIBLE</div>'
     )
 
-    eft_sections = parse_eft_web_sections(fit.get("eft_text"))
-    low_html = format_eft_web_items(eft_sections["low"])
-    mid_html = format_eft_web_items(eft_sections["mid"])
-    high_html = format_eft_web_items(eft_sections["high"])
-    rigs_html = format_eft_web_items(eft_sections["rigs"])
-    extras_html = format_eft_web_items(eft_sections["extras"])
+    eft_sections = parse_eft_web_sections(
+        fit.get("eft_text")
+    )
+    low_html = format_eft_web_items(
+        eft_sections["low"]
+    )
+    mid_html = format_eft_web_items(
+        eft_sections["mid"]
+    )
+    high_html = format_eft_web_items(
+        eft_sections["high"]
+    )
+    rigs_html = format_eft_web_items(
+        eft_sections["rigs"]
+    )
+    extras_html = format_eft_web_items(
+        eft_sections["extras"]
+    )
 
     return f'''<!doctype html>
 <html lang="fr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#02070d">
+<meta name="theme-color" content="#020812">
 <link rel="icon" type="image/png" href="/assets/favicon.png">
 <title>{safe_name} — Freeborn Fittings</title>
 <style>
 :root {{
   color-scheme:dark;
-  --gold:#d5a632; --gold2:#f1c75b; --blue:#149cff; --cyan:#27baff;
-  --panel:#030b13; --panel2:#06111d; --text:#f0eee8; --muted:#9db5c9;
-  --line:rgba(20,156,255,.82); --line-soft:rgba(20,156,255,.31); --status:{status_color};
+  --space:#020711;
+  --space2:#040d19;
+  --panel:rgba(3,12,24,.90);
+  --panel2:rgba(5,18,34,.84);
+  --blue:#159cff;
+  --cyan:#35c7ff;
+  --cyan2:#7ddcff;
+  --gold:#d6a83c;
+  --gold2:#f1cb67;
+  --green:#79dd73;
+  --red:#e45757;
+  --text:#edf5ff;
+  --muted:#91abc0;
+  --line:rgba(49,185,255,.72);
+  --line2:rgba(49,185,255,.30);
+  --status:{status_color};
 }}
 *{{box-sizing:border-box}}
 html{{scroll-behavior:smooth}}
-body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 73% 9%,rgba(0,118,255,.15),transparent 27%),linear-gradient(rgba(1,5,10,.58),rgba(1,5,10,.84)),url('/assets/bg-space.jpg') center/cover fixed no-repeat,#02070d;padding:10px}}
+body{{
+  margin:0;
+  min-height:100vh;
+  color:var(--text);
+  font-family:"Segoe UI",Arial,sans-serif;
+  background:
+    radial-gradient(circle at 72% 15%,rgba(16,118,220,.20),transparent 30%),
+    radial-gradient(circle at 18% 82%,rgba(0,72,150,.17),transparent 32%),
+    linear-gradient(rgba(1,5,12,.40),rgba(1,5,12,.72)),
+    url('/assets/bg-space.jpg') center/cover fixed no-repeat,
+    #020711;
+  padding:8px;
+}}
 button{{font:inherit}}
-.shell{{width:min(1500px,100%);margin:auto;position:relative;border:1px solid var(--line);background:linear-gradient(145deg,rgba(3,10,18,.95),rgba(1,6,12,.985));box-shadow:0 0 42px rgba(0,0,0,.72),0 0 28px rgba(20,156,255,.08),inset 0 0 70px rgba(20,156,255,.025)}}
-.shell:before,.shell:after{{content:"";position:absolute;pointer-events:none;width:62px;height:62px;border-color:var(--cyan);opacity:.9}}
-.shell:before{{left:8px;top:8px;border-left:2px solid;border-top:2px solid}}
-.shell:after{{right:8px;bottom:8px;border-right:2px solid;border-bottom:2px solid}}
-.top{{display:grid;grid-template-columns:112px 1fr auto;gap:20px;align-items:center;padding:13px 28px;border-bottom:1px solid var(--line-soft);min-height:116px;background:linear-gradient(90deg,rgba(1,8,15,.72),rgba(3,12,23,.46),rgba(0,0,0,.24))}}
-.logo{{width:102px;max-width:100%;filter:drop-shadow(0 0 14px rgba(20,156,255,.18))}}
-.brand h1{{margin:0;font-size:clamp(27px,3.4vw,45px);font-weight:650;letter-spacing:.075em;line-height:.95;text-transform:uppercase;color:#e8e5df;text-shadow:0 2px 0 #31343b}}
-.brand h1 span{{color:var(--gold2);font-weight:700}}
-.brand p{{margin:8px 0 0;color:#d6d1c8;letter-spacing:.18em;text-transform:uppercase;font-size:10px}}
-.badge{{border:1px solid var(--status);color:var(--status);padding:11px 16px;font-weight:800;letter-spacing:.1em;white-space:nowrap;background:color-mix(in srgb,var(--status) 8%,#05080d);box-shadow:0 0 20px color-mix(in srgb,var(--status) 18%,transparent)}}
-.hero{{display:grid;grid-template-columns:minmax(0,1.22fr) minmax(350px,.88fr);gap:16px;padding:16px 18px 10px}}
-.panel{{border:1px solid var(--line-soft);background:linear-gradient(180deg,rgba(5,14,24,.95),rgba(2,8,15,.98));box-shadow:inset 0 0 26px rgba(20,156,255,.025)}}
-.identity{{padding:18px 20px}}
-.kicker{{color:var(--cyan);font-size:11px;letter-spacing:.18em;text-transform:uppercase}}
-.ship-title{{margin:9px 0 0;color:#e8e5df;font-size:clamp(18px,1.8vw,27px);font-weight:650;letter-spacing:.08em;text-transform:uppercase}}
-.fit-title{{margin:6px 0 8px;color:var(--gold2);font-size:clamp(20px,2.3vw,31px);line-height:1.07;font-weight:650;letter-spacing:.045em;text-transform:uppercase;text-shadow:0 0 18px rgba(213,166,50,.08)}}
-.techline{{color:#69bfff;font:10px/1.45 Consolas,monospace;letter-spacing:.14em;text-transform:uppercase;border-bottom:1px solid var(--line-soft);padding-bottom:11px}}
-.meta{{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:15px}}
-.meta div,.notes{{border:1px solid rgba(20,156,255,.36);background:linear-gradient(180deg,rgba(6,25,43,.60),rgba(0,0,0,.18))}}
-.meta div{{padding:11px 14px}}
-.meta small{{display:block;color:var(--cyan);text-transform:uppercase;letter-spacing:.14em;margin-bottom:5px;font-size:10px}}
-.notes{{margin-top:12px;padding:12px 16px;border-left:3px solid var(--blue);line-height:1.42;white-space:pre-wrap;min-height:78px}}
-.shipbox{{min-height:300px;display:grid;place-items:center;position:relative;overflow:hidden;padding:12px;background:radial-gradient(circle at 50% 45%,rgba(20,156,255,.11),rgba(0,0,0,.10) 45%,rgba(0,0,0,.64));box-shadow:inset 0 0 0 1px rgba(56,199,255,.12)}}
-.shipbox:before{{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent 49.8%,rgba(20,156,255,.11) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(20,156,255,.08) 50%,transparent 50.2%);pointer-events:none}}
-.ship{{width:100%;height:100%;max-height:310px;object-fit:contain;position:relative;filter:drop-shadow(0 18px 26px rgba(0,0,0,.8))}}
-.ship-placeholder{{color:var(--muted);letter-spacing:.18em;text-align:center}}
-.actions{{display:flex;flex-wrap:wrap;gap:10px;padding:0 18px 14px}}
-.action{{appearance:none;border:1px solid rgba(213,166,50,.74);background:linear-gradient(180deg,rgba(213,166,50,.13),rgba(213,166,50,.025));color:#f6d66f;padding:10px 16px;min-height:40px;text-transform:uppercase;letter-spacing:.085em;font-weight:800;font-size:11px;cursor:pointer;transition:.18s ease;display:inline-flex;align-items:center;gap:8px;box-shadow:inset 0 0 14px rgba(213,166,50,.025)}}
-.action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 18px rgba(213,166,50,.16)}}
-.action.blue{{border-color:rgba(20,156,255,.92);color:#63c8ff;background:linear-gradient(180deg,rgba(20,156,255,.17),rgba(20,156,255,.04))}}
-.action.green{{border-color:rgba(87,207,71,.75);color:#79df69;background:linear-gradient(180deg,rgba(87,207,71,.10),rgba(87,207,71,.025))}}
-.action:disabled{{opacity:.48;cursor:not-allowed;transform:none;box-shadow:none}}
-.tech-section{{padding:0 18px 14px}}
-.tech-title{{display:flex;align-items:center;gap:12px;margin:1px 0 10px;color:#d9e6f7;text-transform:uppercase;letter-spacing:.13em;font-size:12px}}
-.tech-title:before,.tech-title:after{{content:"";height:1px;background:linear-gradient(90deg,var(--blue),transparent);flex:1}}
-.tech-title:before{{max-width:56px}}
-.tech-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}}
-.slot-card{{position:relative;border:1px solid rgba(20,156,255,.40);background:linear-gradient(180deg,rgba(5,19,34,.88),rgba(2,8,15,.96));padding:13px 14px;min-height:120px;box-shadow:inset 0 0 24px rgba(20,156,255,.025)}}
-.slot-card.wide{{grid-column:span 2}}
-.slot-head{{display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid rgba(20,156,255,.24);padding-bottom:8px;margin-bottom:7px;color:var(--cyan);text-transform:uppercase;letter-spacing:.12em;font-weight:700;font-size:11px}}
-.slot-head span{{color:#6e8293;font:9px Consolas,monospace}}
-.slot-item{{display:grid;grid-template-columns:35px 1fr;gap:7px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;line-height:1.3}}
+.app-shell{{
+  width:min(1680px,100%);
+  margin:auto;
+  position:relative;
+  overflow:hidden;
+  border:1px solid var(--line);
+  background:linear-gradient(135deg,rgba(3,12,24,.90),rgba(1,6,14,.96));
+  box-shadow:0 0 38px rgba(0,0,0,.78),0 0 34px rgba(21,156,255,.10),inset 0 0 70px rgba(21,156,255,.025);
+}}
+.app-shell:before,.app-shell:after{{
+  content:"";
+  position:absolute;
+  pointer-events:none;
+  width:76px;
+  height:76px;
+  z-index:5;
+}}
+.app-shell:before{{left:8px;top:8px;border-left:2px solid var(--cyan);border-top:2px solid var(--cyan)}}
+.app-shell:after{{right:8px;bottom:8px;border-right:2px solid var(--cyan);border-bottom:2px solid var(--cyan)}}
+.topbar{{
+  display:grid;
+  grid-template-columns:94px 1fr auto;
+  gap:18px;
+  align-items:center;
+  padding:10px 24px;
+  min-height:98px;
+  border-bottom:1px solid var(--line2);
+  background:linear-gradient(90deg,rgba(2,11,23,.94),rgba(5,21,40,.72),rgba(2,8,17,.92));
+}}
+.logo{{width:86px;filter:drop-shadow(0 0 13px rgba(44,187,255,.22))}}
+.brand h1{{margin:0;font-size:clamp(25px,3vw,42px);line-height:1;font-weight:560;letter-spacing:.08em;text-transform:uppercase;color:#eef6ff}}
+.brand h1 span{{color:var(--gold2);font-weight:640}}
+.brand p{{margin:7px 0 0;color:#c6d8e8;font-size:10px;letter-spacing:.19em;text-transform:uppercase}}
+.status-badge{{border:1px solid var(--status);color:var(--status);background:color-mix(in srgb,var(--status) 9%,rgba(2,8,16,.96));padding:10px 15px;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;white-space:nowrap;box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
+.fit-ref-line{{padding:8px 18px 7px;color:var(--cyan2);border-bottom:1px solid rgba(49,185,255,.18);background:rgba(1,8,17,.74);font:10px/1.2 Consolas,monospace;letter-spacing:.16em;text-transform:uppercase}}
+.main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(360px,1.08fr) minmax(390px,1.15fr);gap:9px;padding:9px}}
+.stack{{display:flex;flex-direction:column;gap:8px;min-width:0}}
+.hud-panel{{position:relative;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(5,20,38,.88),rgba(2,8,17,.94));box-shadow:inset 0 0 24px rgba(39,186,255,.025),0 0 10px rgba(0,0,0,.18)}}
+.hud-panel:before{{content:"";position:absolute;left:-1px;top:-1px;width:28px;height:2px;background:var(--cyan);box-shadow:0 0 8px rgba(53,199,255,.35)}}
+.panel-title{{display:flex;align-items:center;gap:9px;min-height:35px;padding:7px 10px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:11px;font-weight:780;letter-spacing:.12em;text-transform:uppercase}}
+.panel-code{{margin-left:auto;color:#6389a5;font:9px Consolas,monospace;letter-spacing:.12em}}
+.slot-symbol{{width:20px;height:20px;flex:0 0 20px;display:grid;place-items:center;border:1px solid var(--cyan);border-radius:50%;color:var(--cyan2);background:rgba(16,108,174,.20);font:800 10px Consolas,monospace;box-shadow:0 0 9px rgba(53,199,255,.12)}}
+.slot-symbol.low{{border-color:#9ab3c6;color:#d5e3ee}}
+.slot-symbol.rig{{border-radius:3px;border-color:#8bd9ff}}
+.slot-body{{padding:7px 10px 9px}}
+.slot-item{{display:grid;grid-template-columns:31px 1fr;gap:7px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.035);color:#dcecf8;font-size:11px;line-height:1.28}}
 .slot-item:last-child{{border-bottom:0}}
 .slot-qty{{color:var(--gold2);font-family:Consolas,monospace}}
-.slot-empty{{color:#647586;font-style:italic;font-size:12px;padding:7px 0}}
-.eft-wrap{{padding:0 18px 14px}}
-.eft-panel{{display:none;border:1px solid rgba(20,156,255,.40);background:linear-gradient(180deg,rgba(6,12,20,.98),rgba(3,7,12,.99));padding:12px}}
+.slot-empty{{color:#627c91;font-size:11px;font-style:italic;padding:5px 0}}
+.identity-panel{{padding:13px 15px 14px}}
+.eyebrow{{color:var(--cyan2);font:10px Consolas,monospace;letter-spacing:.15em;text-transform:uppercase}}
+.ship-name{{margin:7px 0 0;color:#eef6ff;font-size:clamp(17px,1.8vw,25px);font-weight:650;letter-spacing:.10em;text-transform:uppercase}}
+.fit-name{{margin:5px 0 12px;color:var(--gold2);font-size:clamp(15px,1.7vw,22px);line-height:1.12;font-weight:600;letter-spacing:.055em;text-transform:uppercase}}
+.info-grid{{display:grid;grid-template-columns:1fr 1fr;gap:7px}}
+.info-cell{{border:1px solid rgba(49,185,255,.24);background:rgba(2,10,20,.45);padding:8px 10px}}
+.info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:9px;letter-spacing:.13em;text-transform:uppercase}}
+.info-cell strong{{font-size:12px;color:#eef6ff}}
+.notes-body{{min-height:72px;padding:11px 12px;color:#d7e7f4;white-space:pre-wrap;font-size:12px;line-height:1.42}}
+.hold-panel .slot-body{{max-height:190px;overflow:auto}}
+.ship-panel{{min-height:294px;display:grid;grid-template-rows:auto 1fr}}
+.ship-stage{{position:relative;min-height:255px;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,145,255,.14),transparent 44%),linear-gradient(90deg,transparent 49.8%,rgba(49,185,255,.08) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(49,185,255,.06) 50%,transparent 50.2%)}}
+.ship-stage:before{{content:"";position:absolute;width:64%;aspect-ratio:1;border:1px solid rgba(49,185,255,.09);border-radius:50%;box-shadow:0 0 0 45px rgba(49,185,255,.018),0 0 0 90px rgba(49,185,255,.012)}}
+.ship-render{{width:96%;height:255px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 18px 26px rgba(0,0,0,.84))}}
+.ship-placeholder{{color:#6d879b;letter-spacing:.15em;text-align:center}}
+.telemetry{{display:grid;grid-template-columns:1fr 1fr;gap:7px;padding:8px}}
+.metric{{min-height:50px;border:1px solid rgba(49,185,255,.25);background:rgba(1,9,18,.55);padding:7px 9px}}
+.metric small{{display:block;color:#63c8ff;font-size:8px;letter-spacing:.12em;text-transform:uppercase}}
+.metric strong{{display:block;margin-top:4px;color:#e8f4fc;font:700 12px Consolas,monospace}}
+.metric .pending{{color:#71899d;font-weight:500}}
+.resists{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:6px}}
+.resist{{border:1px solid rgba(49,185,255,.18);background:rgba(2,10,19,.50);padding:6px 5px;text-align:center}}
+.resist span{{display:block;color:#6b879d;font-size:8px;text-transform:uppercase;letter-spacing:.08em}}
+.resist b{{display:block;margin-top:3px;color:#aebfcd;font:10px Consolas,monospace}}
+.actionbar{{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:7px;padding:0 9px 9px}}
+.action{{appearance:none;min-height:38px;border:1px solid rgba(214,168,60,.75);background:linear-gradient(180deg,rgba(214,168,60,.14),rgba(214,168,60,.025));color:#f4d576;padding:8px 11px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:.16s ease}}
+.action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 15px rgba(214,168,60,.14)}}
+.action.blue{{border-color:rgba(49,185,255,.80);background:linear-gradient(180deg,rgba(21,156,255,.15),rgba(21,156,255,.025));color:#71d2ff}}
+.action.green{{border-color:rgba(121,221,115,.70);background:linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.02));color:#9cec94}}
+.action:disabled{{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}}
+.eft-wrap{{padding:0 9px 9px}}
+.eft-panel{{display:none;border:1px solid var(--line2);background:rgba(2,8,15,.96);padding:9px}}
 .eft-panel.open{{display:block}}
-.eft-head{{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}}
-.eft-head strong{{color:var(--gold2);letter-spacing:.12em;text-transform:uppercase;font-size:11px}}
-.ref{{color:var(--muted);font-family:Consolas,monospace;font-size:11px}}
-pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;border:1px solid rgba(255,255,255,.06);color:#d9e6f7;font:12px/1.42 Consolas,"Courier New",monospace;white-space:pre-wrap}}
-.bottom{{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:11px 26px;border-top:1px solid var(--line-soft);color:#8ebde0;font-size:10px;letter-spacing:.13em;text-transform:uppercase}}
-.motto{{color:var(--cyan)}}
-.toast{{position:fixed;right:18px;bottom:18px;padding:10px 14px;border:1px solid rgba(120,201,74,.7);background:#07100a;color:#a9ee80;letter-spacing:.06em;font-weight:700;opacity:0;transform:translateY(8px);pointer-events:none;transition:.2s ease;z-index:50}}
+.eft-head{{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;color:var(--gold2);font-size:10px;letter-spacing:.11em;text-transform:uppercase}}
+.eft-source{{color:#7290a8;font:9px Consolas,monospace}}
+pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(255,255,255,.05);background:#040914;color:#d9e8f5;font:11px/1.40 Consolas,"Courier New",monospace;white-space:pre-wrap}}
+.footer{{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:center;padding:9px 18px;border-top:1px solid var(--line2);color:#7fa4be;background:rgba(1,7,14,.70);font-size:9px;letter-spacing:.12em;text-transform:uppercase}}
+.footer .motto{{color:var(--cyan2)}}
+.footer .id{{color:var(--gold2);font-family:Consolas,monospace}}
+.footer .version{{text-align:right}}
+.toast{{position:fixed;right:18px;bottom:18px;z-index:30;padding:9px 13px;border:1px solid rgba(121,221,115,.70);background:#061109;color:#a7eea0;font-size:11px;font-weight:700;opacity:0;transform:translateY(8px);pointer-events:none;transition:.18s ease}}
 .toast.show{{opacity:1;transform:translateY(0)}}
-@media(max-width:980px){{.hero{{grid-template-columns:1fr}}.shipbox{{min-height:250px}}.ship{{max-height:270px}}.tech-grid{{grid-template-columns:1fr 1fr}}.slot-card.wide{{grid-column:span 2}}}}
-@media(max-width:650px){{body{{padding:5px}}.top{{grid-template-columns:70px 1fr;gap:10px;padding:12px}}.logo{{width:66px}}.badge{{grid-column:1/-1;text-align:center}}.hero{{padding:8px}}.identity{{padding:14px}}.meta{{grid-template-columns:1fr}}.actions,.tech-section,.eft-wrap{{padding-left:8px;padding-right:8px}}.action{{flex:1 1 145px;justify-content:center}}.tech-grid{{grid-template-columns:1fr}}.slot-card.wide{{grid-column:auto}}.bottom{{display:block;text-align:center;line-height:1.8}}}}
+@media(max-width:1180px){{
+  .main-grid{{grid-template-columns:1fr 1fr}}
+  .right-col{{grid-column:1/-1;display:grid;grid-template-columns:1.2fr .8fr}}
+  .actionbar{{grid-template-columns:repeat(3,1fr)}}
+}}
+@media(max-width:780px){{
+  body{{padding:4px}}
+  .topbar{{grid-template-columns:64px 1fr;gap:10px;padding:9px 11px}}
+  .logo{{width:58px}}
+  .status-badge{{grid-column:1/-1;text-align:center}}
+  .main-grid{{grid-template-columns:1fr}}
+  .right-col{{grid-column:auto;display:flex}}
+  .info-grid{{grid-template-columns:1fr}}
+  .actionbar{{grid-template-columns:1fr 1fr}}
+  .footer{{grid-template-columns:1fr;text-align:center;line-height:1.7}}
+  .footer .version{{text-align:center}}
+}}
 </style>
 </head>
 <body>
-<main class="shell">
-  <header class="top">
+<main class="app-shell">
+  <header class="topbar">
     <img class="logo" src="/assets/logo-freeborn-legacy.png" alt="Freeborn Legacy">
-    <div class="brand"><h1>FREEBORN <span>FITTS</span></h1><p>Bibliothèque de fittings • par les FREE • pour les FREE</p></div>
-    <div class="badge">◉ {escape(status_label)}</div>
+    <div class="brand">
+      <h1>FREEBORN <span>FITTS</span></h1>
+      <p>Bibliothèque de fittings • par les FREE • pour les FREE</p>
+    </div>
+    <div class="status-badge">◉ {escape(status_label)}</div>
   </header>
 
-  <section class="hero">
-    <article class="panel identity">
-      <div class="kicker">{safe_ref} • fiche corporate</div>
-      <div class="ship-title">{safe_ship}</div>
-      <h2 class="fit-title">{safe_name}</h2>
-      <div class="techline">FREEBORN LEGACY // FITTING DATABASE // {safe_ref}</div>
-      <div class="meta">
-        <div><small>Usage</small><strong>{safe_usage}</strong></div>
-        <div><small>Créé par</small><strong>{safe_creator}</strong></div>
-      </div>
-      <div class="notes"><div class="kicker">Notes du créateur</div><br>{safe_notes}</div>
-    </article>
-    <aside class="panel shipbox">{ship_html}</aside>
+  <div class="fit-ref-line">
+    {safe_ref} // FREEBORN LEGACY // CORPORATE FITTING DATABASE
+  </div>
+
+  <section class="main-grid">
+    <div class="stack left-col">
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol">H</span>Emplacements hauts<span class="panel-code">HIGH</span></div>
+        <div class="slot-body">{high_html}</div>
+      </article>
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol">M</span>Emplacements intermédiaires<span class="panel-code">MID</span></div>
+        <div class="slot-body">{mid_html}</div>
+      </article>
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol low">L</span>Emplacements bas<span class="panel-code">LOW</span></div>
+        <div class="slot-body">{low_html}</div>
+      </article>
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol rig">R</span>Rigs<span class="panel-code">RIG</span></div>
+        <div class="slot-body">{rigs_html}</div>
+      </article>
+    </div>
+
+    <div class="stack center-col">
+      <article class="hud-panel identity-panel">
+        <div class="eyebrow">Fiche corporate // {safe_ref}</div>
+        <div class="ship-name">{safe_ship}</div>
+        <div class="fit-name">{safe_name}</div>
+        <div class="info-grid">
+          <div class="info-cell"><small>Usage</small><strong>{safe_usage}</strong></div>
+          <div class="info-cell"><small>Créé par</small><strong>{safe_creator}</strong></div>
+        </div>
+      </article>
+      <article class="hud-panel hold-panel">
+        <div class="panel-title"><span class="slot-symbol">C</span>Drones / Cargaison / Compléments<span class="panel-code">HOLD</span></div>
+        <div class="slot-body">{extras_html}</div>
+      </article>
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol">N</span>Notes du créateur<span class="panel-code">NOTES</span></div>
+        <div class="notes-body">{safe_notes}</div>
+      </article>
+    </div>
+
+    <div class="stack right-col">
+      <article class="hud-panel ship-panel">
+        <div class="panel-title"><span class="slot-symbol">S</span>{safe_ship}<span class="panel-code">SHIP</span></div>
+        <div class="ship-stage">{ship_html}</div>
+      </article>
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol">T</span>Télémétrie du fitting<span class="panel-code">STATS</span></div>
+        <div class="telemetry">
+          <div class="metric"><small>CPU</small><strong class="pending">— / — tf</strong></div>
+          <div class="metric"><small>Powergrid</small><strong class="pending">— / — MW</strong></div>
+          <div class="metric"><small>Capaciteur</small><strong class="pending">À calculer</strong></div>
+          <div class="metric"><small>Vitesse</small><strong class="pending">À calculer</strong></div>
+          <div class="metric"><small>DPS</small><strong class="pending">À calculer</strong></div>
+          <div class="metric"><small>EHP</small><strong class="pending">À calculer</strong></div>
+          <div class="resists">
+            <div class="resist"><span>EM</span><b>—</b></div>
+            <div class="resist"><span>Therm</span><b>—</b></div>
+            <div class="resist"><span>Kin</span><b>—</b></div>
+            <div class="resist"><span>Exp</span><b>—</b></div>
+          </div>
+        </div>
+      </article>
+    </div>
   </section>
 
-  <nav class="actions" aria-label="Actions du fitting">
+  <nav class="actionbar" aria-label="Actions du fitting">
     <button class="action" type="button" onclick="toggleEft()">▣ Afficher EFT</button>
     <button class="action" type="button" onclick="copyEft()">▤ Copier EFT</button>
     <button class="action blue" type="button" onclick="exportEft()">⇩ Exporter EFT</button>
@@ -7545,32 +7710,35 @@ pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;bor
     <button class="action green" type="button" disabled title="Validation Web prévue après authentification Discord">✓ Approuver / Refuser</button>
   </nav>
 
-  <section class="tech-section">
-    <div class="tech-title"><strong>Configuration technique</strong></div>
-    <div class="tech-grid">
-      <article class="slot-card"><div class="slot-head">Emplacements hauts <span>HIGH</span></div>{high_html}</article>
-      <article class="slot-card"><div class="slot-head">Emplacements intermédiaires <span>MID</span></div>{mid_html}</article>
-      <article class="slot-card"><div class="slot-head">Emplacements bas <span>LOW</span></div>{low_html}</article>
-      <article class="slot-card"><div class="slot-head">Rigs <span>RIG</span></div>{rigs_html}</article>
-      <article class="slot-card wide"><div class="slot-head">Drones / Cargaison / Compléments <span>HOLD</span></div>{extras_html}</article>
-    </div>
-  </section>
-
-  <section class="eft-wrap" id="eftWrap">
+  <section class="eft-wrap">
     <div class="eft-panel" id="eftPanel">
-      <div class="eft-head"><strong>EFT — {safe_ref} • {safe_ship}</strong><span class="ref">Source Neon</span></div>
+      <div class="eft-head">
+        <strong>EFT — {safe_ref} • {safe_ship}</strong>
+        <span class="eft-source">SOURCE NEON</span>
+      </div>
       <pre id="eftText">{safe_eft}</pre>
     </div>
   </section>
 
-  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Fittings 4E</span></footer>
+  <footer class="footer">
+    <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
+    <span class="id">{safe_ref}</span>
+    <span class="version">Freeborn Legacy • Fittings 4F</span>
+  </footer>
 </main>
+
 <div class="toast" id="toast">EFT copié</div>
+
 <script>
 const fitRef = "{safe_ref}";
 const shipName = "{safe_ship}";
-function getEft() {{ return document.getElementById('eftText').textContent; }}
-function toggleEft() {{ document.getElementById('eftPanel').classList.toggle('open'); }}
+
+function getEft() {{
+  return document.getElementById('eftText').textContent;
+}}
+function toggleEft() {{
+  document.getElementById('eftPanel').classList.toggle('open');
+}}
 async function copyEft() {{
   const text = getEft();
   try {{
@@ -7578,7 +7746,11 @@ async function copyEft() {{
     showToast('EFT copié dans le presse-papiers');
   }} catch (e) {{
     const ta = document.createElement('textarea');
-    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
     showToast('EFT copié dans le presse-papiers');
   }}
 }}
@@ -7586,16 +7758,24 @@ function exportEft() {{
   const blob = new Blob([getEft()], {{type:'text/plain;charset=utf-8'}});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = `${{fitRef}}-${{shipName}}.txt`.replace(/[^a-z0-9._-]+/gi,'-');
-  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  a.href = url;
+  a.download = `${{fitRef}}-${{shipName}}.txt`.replace(/[^a-z0-9._-]+/gi,'-');
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }}
 function showToast(message) {{
-  const toast = document.getElementById('toast'); toast.textContent = message; toast.classList.add('show');
-  window.clearTimeout(window.__fbToast); window.__fbToast = window.setTimeout(() => toast.classList.remove('show'), 1800);
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.classList.add('show');
+  window.clearTimeout(window.__fbToast);
+  window.__fbToast = window.setTimeout(() => toast.classList.remove('show'),1800);
 }}
 </script>
 </body>
 </html>'''
+
 
 @app.route("/fittings/<fit_ref>")
 def fitting_web_card(fit_ref):
