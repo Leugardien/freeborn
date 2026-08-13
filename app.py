@@ -7625,6 +7625,9 @@ DOGMA_POWER_OUTPUT = 11
 DOGMA_POWER_NEED = 30
 DOGMA_CPU_OUTPUT = 48
 DOGMA_CPU_NEED = 50
+# Ship capacitor telemetry (Dogma): 482 = capacitorCapacity, 55 = rechargeRate (ms).
+DOGMA_CAPACITOR_CAPACITY = 482
+DOGMA_CAPACITOR_RECHARGE_TIME = 55
 
 _eve_type_dogma_cache = {}
 
@@ -8666,7 +8669,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4O-D — CPU / POWERGRID</div>
+              <div class="pilot-engine-title">MOTEUR 4O-E — CPU / POWERGRID</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -8808,6 +8811,27 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             "MW",
         )
     )
+
+    # Phase 4O-E — capacitor BASE telemetry.
+    # We expose only values directly supported by ship Dogma here; module cycle
+    # drain, cap warfare and stability remain deliberately unclaimed until the
+    # effect engine covers them.
+    ship_dogma = get_eve_type_dogma(fit.get("ship_type_id"))
+    capacitor_capacity = ship_dogma.get(DOGMA_CAPACITOR_CAPACITY) if ship_dogma else None
+    capacitor_recharge_ms = ship_dogma.get(DOGMA_CAPACITOR_RECHARGE_TIME) if ship_dogma else None
+    if capacitor_capacity is not None and capacitor_recharge_ms is not None:
+        capacitor_recharge_seconds = float(capacitor_recharge_ms) / 1000.0
+        capacitor_value = escape(
+            f"{float(capacitor_capacity):,.0f} GJ • {capacitor_recharge_seconds:,.0f} s"
+            .replace(",", " ")
+        )
+        capacitor_title = escape(
+            "Capacité et temps de recharge BASE du vaisseau (Dogma). "
+            "Stabilité et consommation des modules : moteur à venir."
+        )
+    else:
+        capacitor_value = "À calculer"
+        capacitor_title = "Données Dogma capaciteur indisponibles."
 
     all_v_core = calculate_skill_aware_fitting_resources(
         fit.get("ship_type_id"),
@@ -9142,9 +9166,9 @@ button{{font:inherit}}
 .fit-ref-line{{padding:8px 18px 7px;color:var(--cyan2);border-bottom:1px solid rgba(49,185,255,.18);background:rgba(1,8,17,.74);font:11px/1.25 Consolas,monospace;letter-spacing:.16em;text-transform:uppercase}}
 .main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(360px,1.08fr) minmax(390px,1.15fr);gap:7px;padding:7px;align-items:stretch}}
 .stack{{display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}}
-.center-col > .hud-panel:last-child,.right-col > .hud-panel:last-child{{flex:1}}
-.center-col .notes-body{{min-height:100%}}
-.center-col > .hud-panel:last-child{{min-height:170px}}
+.right-col > .hud-panel:last-child{{flex:1}}
+.center-col{{align-self:start;height:auto}}
+.center-col > .hud-panel:last-child{{flex:0 0 auto}}
 .hud-panel{{position:relative;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(5,20,38,.88),rgba(2,8,17,.94));box-shadow:inset 0 0 24px rgba(39,186,255,.025),0 0 10px rgba(0,0,0,.18)}}
 .hud-panel:before{{content:"";position:absolute;left:-1px;top:-1px;width:28px;height:2px;background:var(--cyan);box-shadow:0 0 8px rgba(53,199,255,.35)}}
 .panel-title{{display:flex;align-items:center;gap:9px;min-height:31px;padding:5px 9px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:13px;font-weight:760;letter-spacing:.12em;text-transform:uppercase}}
@@ -9169,7 +9193,7 @@ button{{font:inherit}}
 .info-cell{{border:1px solid rgba(49,185,255,.24);background:rgba(2,10,20,.45);padding:8px 10px}}
 .info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:11px;letter-spacing:.11em;text-transform:uppercase}}
 .info-cell strong{{font-size:14px;color:#eef6ff}}
-.notes-body{{min-height:110px;padding:13px 15px;color:#dbeaf5;white-space:pre-wrap;font-size:16px;line-height:1.58}}
+.notes-body{{min-height:86px;padding:13px 15px;color:#dbeaf5;white-space:pre-wrap;font-size:16px;line-height:1.58}}
 .hold-panel .slot-body{{overflow:visible}}
 .drone-bay-panel .panel-title{{color:#a9e7ff}}
 .cargo-bay-panel .panel-title{{color:#d8e8f3}}
@@ -9697,7 +9721,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         <div class="telemetry">
           <div class="metric" title="Valeur Dogma de base — compétences et modificateurs avancés non appliqués"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU <em class="metric-mode">BASE</em></small><strong>{cpu_value}</strong></div>
           <div class="metric" title="Valeur Dogma de base — compétences et modificateurs avancés non appliqués"><span class="metric-icon" aria-hidden="true">ϟ</span><small>Powergrid <em class="metric-mode">BASE</em></small><strong>{power_value}</strong></div>
-          <div class="metric"><span class="metric-icon" aria-hidden="true">◫</span><small>Capaciteur</small><strong class="pending">À calculer</strong></div>
+          <div class="metric" title="{capacitor_title}"><span class="metric-icon" aria-hidden="true">◫</span><small>Capaciteur <em class="metric-mode">BASE</em></small><strong>{capacitor_value}</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">➤</span><small>Vitesse</small><strong class="pending">À calculer</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">À calculer</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP</small><strong class="pending">À calculer</strong></div>
@@ -9710,7 +9734,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-D</strong>
+            <strong>ALL V — VALIDATION 4O-E</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -9757,7 +9781,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-D</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-E</span>
   </footer>
 </main>
 
