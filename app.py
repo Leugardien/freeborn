@@ -3387,7 +3387,7 @@ def save_fit_phase1(
 
 
 def parse_fit_reference(value):
-    """Accept 1, "1", "FB-0001", "fb0001" or "FB 0001"."""
+    """Accept 1, "1", "FREE-0001", "free0001" or "FREE 0001"."""
 
     text = str(value or "").strip().upper()
 
@@ -3396,11 +3396,11 @@ def parse_fit_reference(value):
 
     compact = text.replace("-", "").replace(" ", "")
 
-    if compact.startswith("FB"):
-        compact = compact[2:]
+    if compact.startswith("FREE"):
+        compact = compact[4:]
 
     if not compact.isdigit():
-        raise ValueError("Identifiant de fit invalide. Utilise par exemple FB-0001.")
+        raise ValueError("Identifiant de fit invalide. Utilise par exemple FREE-0001.")
 
     fit_id = int(compact)
 
@@ -3411,7 +3411,7 @@ def parse_fit_reference(value):
 
 
 def format_fit_reference(fit_id):
-    return f"FB-{int(fit_id):04d}"
+    return f"FREE-{int(fit_id):04d}"
 
 
 def get_fit(guild_id, fit_id):
@@ -3648,7 +3648,7 @@ def build_fit_list_message(guild_id):
 
     lines.extend([
         "",
-        "Utilise **/fit-afficher ref:FB-0001** pour ouvrir une fiche.",
+        "Utilise **/fit-afficher ref:FREE-0001** pour ouvrir une fiche.",
     ])
 
     return "\n".join(lines)[:1900]
@@ -3834,7 +3834,7 @@ def handle_fit_modal_submit(data):
         "type": 4,
         "data": {
             "content": (
-                f"✅ **FB-{saved['fit_id']:04d} enregistré dans Freeborn.**\n"
+                f"✅ **{format_fit_reference(saved['fit_id'])} enregistré dans Freeborn.**\n"
                 "La fiche ci-dessous peut maintenant être partagée avec la corporation."
             ),
             "embeds": [build_fit_embed(fit)],
@@ -6899,7 +6899,7 @@ def handle_message_component(
             "type": 4,
             "data": {
                 "content": (
-                    f"📋 **EFT — FB-{fit_id:04d} • {fit['ship_name']}**\n"
+                    f"📋 **EFT — {format_fit_reference(fit_id)} • {fit['ship_name']}**\n"
                     f"```\n{safe_eft}\n```{suffix}"
                 ),
                 "flags": 64,
@@ -6938,7 +6938,7 @@ def handle_message_component(
             "type": 7,
             "data": {
                 "content": (
-                    f"🗑️ **FB-{fit_id:04d} supprimé définitivement**\n\n"
+                    f"🗑️ **{format_fit_reference(fit_id)} supprimé définitivement**\n\n"
                     f"**{deleted['ship_name']} — {deleted['name']}** a été retiré de Neon.\n"
                     "Les éventuels anciens messages Discord déjà publiés ne constituent pas la base de données."
                 ),
@@ -7393,39 +7393,43 @@ def freeborn_fitting_web_page(fit):
 :root {{
   color-scheme:dark;
   --gold:#d5a632; --gold2:#f0c45a; --blue:#149cff; --cyan:#38c7ff;
-  --panel:#090d13; --panel2:#0d1219; --text:#f4f1ea; --muted:#aeb6c0;
+  --panel:#050b12; --panel2:#07111c; --text:#f4f1ea; --muted:#aeb6c0;
+  --line:rgba(20,156,255,.72); --line-soft:rgba(20,156,255,.28);
   --status:{status_color};
 }}
 *{{box-sizing:border-box}}
 html{{scroll-behavior:smooth}}
-body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:linear-gradient(rgba(1,4,8,.72),rgba(1,4,8,.88)),url('/assets/bg-space.jpg') center/cover fixed no-repeat,#03060a;padding:10px}}
+body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 72% 12%,rgba(0,123,255,.10),transparent 26%),linear-gradient(rgba(1,5,10,.58),rgba(1,5,10,.82)),url('/assets/bg-space.jpg') center/cover fixed no-repeat,#02070d;padding:10px}}
 button{{font:inherit}}
-.shell{{width:min(1240px,100%);margin:auto;border:1px solid rgba(213,166,50,.66);background:linear-gradient(145deg,rgba(7,10,15,.97),rgba(3,6,10,.99));box-shadow:0 0 35px rgba(0,0,0,.65),inset 0 0 45px rgba(20,156,255,.035)}}
-.top{{display:grid;grid-template-columns:108px 1fr auto;gap:18px;align-items:center;padding:12px 22px;border-bottom:1px solid rgba(213,166,50,.42);min-height:112px}}
+.shell{{width:min(1240px,100%);margin:auto;position:relative;border:1px solid var(--line);background:linear-gradient(145deg,rgba(4,11,19,.94),rgba(2,7,13,.98));box-shadow:0 0 38px rgba(0,0,0,.72),0 0 24px rgba(20,156,255,.08),inset 0 0 55px rgba(20,156,255,.035)}}
+.shell:before,.shell:after{{content:"";position:absolute;pointer-events:none;width:58px;height:58px;border-color:var(--cyan);opacity:.85}}
+.shell:before{{left:8px;top:8px;border-left:2px solid;border-top:2px solid}}
+.shell:after{{right:8px;bottom:8px;border-right:2px solid;border-bottom:2px solid}}
+.top{{display:grid;grid-template-columns:108px 1fr auto;gap:18px;align-items:center;padding:12px 22px;border-bottom:1px solid var(--line-soft);min-height:112px}}
 .logo{{width:98px;max-width:100%;filter:drop-shadow(0 0 12px rgba(20,156,255,.18))}}
-.brand h1{{margin:0;font-size:clamp(28px,4.5vw,50px);letter-spacing:.08em;line-height:.95;text-transform:uppercase;color:#e8e5df;text-shadow:0 2px 0 #31343b}}
+.brand h1{{margin:0;font-size:clamp(25px,3.7vw,43px);letter-spacing:.08em;line-height:.95;text-transform:uppercase;color:#e8e5df;text-shadow:0 2px 0 #31343b}}
 .brand h1 span{{color:var(--gold2)}}
-.brand p{{margin:7px 0 0;color:#d6d1c8;letter-spacing:.16em;text-transform:uppercase;font-size:11px}}
+.brand p{{margin:7px 0 0;color:#d6d1c8;letter-spacing:.16em;text-transform:uppercase;font-size:10px}}
 .badge{{border:1px solid var(--status);color:var(--status);padding:10px 14px;font-weight:800;letter-spacing:.08em;white-space:nowrap;background:color-mix(in srgb,var(--status) 8%,#05080d);box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
 .content{{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,42%);gap:14px;padding:14px 16px 10px}}
-.panel{{border:1px solid rgba(213,166,50,.38);background:linear-gradient(180deg,rgba(13,18,25,.94),rgba(7,10,15,.97));padding:16px}}
-.kicker{{color:var(--gold2);font-size:11px;letter-spacing:.18em;text-transform:uppercase}}
-.ship-title{{margin:7px 0 0;color:#e8e5df;font-size:clamp(18px,2vw,26px);font-weight:800;letter-spacing:.07em;text-transform:uppercase}}
-.fit-title{{margin:3px 0 5px;color:var(--gold2);font-size:clamp(22px,2.9vw,34px);line-height:1.08;font-weight:850;letter-spacing:.025em;text-transform:uppercase;text-shadow:0 0 18px rgba(213,166,50,.10)}}
-.techline{{color:#71849a;font:10px/1.4 Consolas,monospace;letter-spacing:.13em;text-transform:uppercase}}
+.panel{{border:1px solid var(--line-soft);background:linear-gradient(180deg,rgba(5,14,24,.94),rgba(3,9,16,.97));padding:16px;box-shadow:inset 0 0 22px rgba(20,156,255,.025)}}
+.kicker{{color:var(--cyan);font-size:11px;letter-spacing:.18em;text-transform:uppercase}}
+.ship-title{{margin:7px 0 0;color:#e8e5df;font-size:clamp(17px,1.8vw,24px);font-weight:800;letter-spacing:.07em;text-transform:uppercase}}
+.fit-title{{margin:3px 0 5px;color:var(--gold2);font-size:clamp(19px,2.25vw,29px);line-height:1.08;font-weight:850;letter-spacing:.035em;text-transform:uppercase;text-shadow:0 0 18px rgba(213,166,50,.10)}}
+.techline{{color:#69bfff;font:10px/1.4 Consolas,monospace;letter-spacing:.13em;text-transform:uppercase;border-bottom:1px solid var(--line-soft);padding-bottom:10px}}
 .ref{{color:var(--muted);font-family:Consolas,monospace;font-size:13px}}
 .meta{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px}}
-.meta div{{padding:9px 12px;border-top:1px solid rgba(213,166,50,.26);background:rgba(0,0,0,.16)}}
-.meta small{{display:block;color:var(--gold2);text-transform:uppercase;letter-spacing:.13em;margin-bottom:4px;font-size:10px}}
-.notes{{margin-top:12px;padding:12px 14px;border-left:3px solid var(--gold);background:rgba(213,166,50,.055);line-height:1.42;white-space:pre-wrap;min-height:76px}}
-.shipbox{{min-height:332px;display:grid;place-items:center;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(213,166,50,.12),rgba(0,0,0,.08) 45%,rgba(0,0,0,.55));padding:12px}}
+.meta div{{padding:9px 12px;border:1px solid rgba(20,156,255,.22);background:linear-gradient(180deg,rgba(8,27,45,.48),rgba(0,0,0,.16))}}
+.meta small{{display:block;color:var(--cyan);text-transform:uppercase;letter-spacing:.13em;margin-bottom:4px;font-size:10px}}
+.notes{{margin-top:12px;padding:12px 14px;border:1px solid rgba(20,156,255,.25);border-left:3px solid var(--blue);background:linear-gradient(90deg,rgba(20,156,255,.07),rgba(0,0,0,.14));line-height:1.42;white-space:pre-wrap;min-height:76px}}
+.shipbox{{min-height:332px;display:grid;place-items:center;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,156,255,.10),rgba(0,0,0,.08) 45%,rgba(0,0,0,.58));padding:12px;box-shadow:inset 0 0 0 1px rgba(56,199,255,.12)}}
 .shipbox:before{{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent 49.8%,rgba(20,156,255,.12) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(213,166,50,.09) 50%,transparent 50.2%);pointer-events:none}}
 .ship{{width:100%;height:100%;max-height:360px;object-fit:contain;position:relative;filter:drop-shadow(0 16px 26px rgba(0,0,0,.75))}}
 .ship-placeholder{{color:var(--muted);letter-spacing:.18em;text-align:center}}
 .actions{{display:flex;flex-wrap:wrap;gap:9px;padding:0 16px 12px}}
 .action{{appearance:none;border:1px solid rgba(213,166,50,.62);background:linear-gradient(180deg,rgba(213,166,50,.11),rgba(213,166,50,.035));color:#f5d36f;padding:9px 14px;min-height:38px;text-transform:uppercase;letter-spacing:.08em;font-weight:800;font-size:11px;cursor:pointer;transition:.18s ease;display:inline-flex;align-items:center;gap:8px}}
 .action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 18px rgba(213,166,50,.13)}}
-.action.blue{{border-color:rgba(20,156,255,.72);color:#69c7ff;background:linear-gradient(180deg,rgba(20,156,255,.12),rgba(20,156,255,.035))}}
+.action.blue{{border-color:rgba(20,156,255,.82);color:#69c7ff;background:linear-gradient(180deg,rgba(20,156,255,.16),rgba(20,156,255,.045));box-shadow:inset 0 0 16px rgba(20,156,255,.035)}}
 .action.green{{border-color:rgba(120,201,74,.65);color:#9ce36d}}
 .action:disabled{{opacity:.42;cursor:not-allowed;transform:none;box-shadow:none}}
 .eft-wrap{{padding:0 16px 12px}}
@@ -7434,8 +7438,8 @@ button{{font:inherit}}
 .eft-head{{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px}}
 .eft-head strong{{color:var(--gold2);letter-spacing:.12em;text-transform:uppercase;font-size:11px}}
 pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;border:1px solid rgba(255,255,255,.06);color:#d9e6f7;font:12px/1.42 Consolas,"Courier New",monospace;white-space:pre-wrap}}
-.bottom{{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:10px 22px;border-top:1px solid rgba(213,166,50,.38);color:#aeb6c0;font-size:10px;letter-spacing:.12em;text-transform:uppercase}}
-.motto{{color:var(--gold2)}}
+.bottom{{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:10px 22px;border-top:1px solid var(--line-soft);color:#8ebde0;font-size:10px;letter-spacing:.12em;text-transform:uppercase}}
+.motto{{color:var(--cyan)}}
 .toast{{position:fixed;right:18px;bottom:18px;padding:10px 14px;border:1px solid rgba(120,201,74,.7);background:#07100a;color:#a9ee80;letter-spacing:.06em;font-weight:700;opacity:0;transform:translateY(8px);pointer-events:none;transition:.2s ease;z-index:50}}
 .toast.show{{opacity:1;transform:translateY(0)}}
 @media(max-width:820px){{body{{padding:6px}}.top{{grid-template-columns:72px 1fr;gap:10px;padding:12px}}.logo{{width:68px}}.badge{{grid-column:1/-1;text-align:center}}.content{{grid-template-columns:1fr;padding:8px}}.shipbox{{min-height:260px}}.meta{{grid-template-columns:1fr}}.actions,.eft-wrap{{padding-left:8px;padding-right:8px}}.action{{flex:1 1 145px;justify-content:center}}.bottom{{display:block;text-align:center;line-height:1.8}}}}
@@ -7468,7 +7472,7 @@ pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;bor
     <button class="action" type="button" onclick="toggleEft()">▣ Afficher EFT</button>
     <button class="action" type="button" onclick="copyEft()">▤ Copier EFT</button>
     <button class="action blue" type="button" onclick="exportEft()">⇩ Exporter EFT</button>
-    <button class="action" type="button" disabled title="Disponible après authentification Discord">✎ Modifier</button>
+    <button class="action blue" type="button" disabled title="Disponible après authentification Discord">✎ Modifier</button>
     <button class="action green" type="button" disabled title="Validation Web prévue à la prochaine phase">✓ Approuver / Refuser</button>
   </nav>
 
@@ -7479,7 +7483,7 @@ pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;bor
     </div>
   </section>
 
-  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Fittings 4C</span></footer>
+  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Fittings 4D</span></footer>
 </main>
 <div class="toast" id="toast">EFT copié</div>
 <script>
@@ -11872,7 +11876,7 @@ def register_commands():
                 {
                     "type": 3,
                     "name": "ref",
-                    "description": "Référence du fit (ex. FB-0001)",
+                    "description": "Référence du fit (ex. FREE-0001)",
                     "required": True,
                 }
             ],
@@ -11895,7 +11899,7 @@ def register_commands():
                 {
                     "type": 3,
                     "name": "ref",
-                    "description": "Référence du fit (ex. FB-0001)",
+                    "description": "Référence du fit (ex. FREE-0001)",
                     "required": True,
                 }
             ],
@@ -11918,7 +11922,7 @@ def register_commands():
                 {
                     "type": 3,
                     "name": "ref",
-                    "description": "Référence du fit (ex. FB-0001)",
+                    "description": "Référence du fit (ex. FREE-0001)",
                     "required": True,
                 }
             ],
@@ -11938,7 +11942,7 @@ def register_commands():
                 {
                     "type": 3,
                     "name": "ref",
-                    "description": "Référence du fit (ex. FB-0001)",
+                    "description": "Référence du fit (ex. FREE-0001)",
                     "required": True,
                 }
             ],
