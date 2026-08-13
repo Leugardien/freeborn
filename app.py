@@ -7428,6 +7428,31 @@ def parse_eft_web_sections(eft_text):
     return sections
 
 
+def parse_eft_display_quantity(line):
+    """
+    Split the standard EFT trailing quantity suffix.
+
+    Example:
+        "Legion Mjolnir Auto-Targeting Cruise Missile x2000"
+        -> ("Legion Mjolnir Auto-Targeting Cruise Missile", 2000)
+    """
+    clean = str(line or "").strip()
+
+    if not clean:
+        return "", 0
+
+    match = re.match(
+        r"^(.*?)\s+x(\d+)\s*$",
+        clean,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return clean, 1
+
+    return match.group(1).strip(), int(match.group(2))
+
+
 def normalize_eft_item_name(line):
     """Return the inventory type name represented by one EFT line."""
     clean = str(line or "").strip()
@@ -7503,6 +7528,111 @@ DOGMA_CPU_OUTPUT = 48
 DOGMA_CPU_NEED = 50
 
 _eve_type_dogma_cache = {}
+
+_eve_type_category_cache = {}
+_eve_group_category_cache = {}
+
+# EVE inventory category 18 = Drone.
+EVE_CATEGORY_DRONE = 18
+
+
+def get_eve_group_category_id(group_id):
+    """Resolve one inventory group's category_id with a process cache."""
+    if not group_id:
+        return None
+
+    group_id = int(group_id)
+
+    if group_id in _eve_group_category_cache:
+        return _eve_group_category_cache[group_id]
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/groups/{group_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+
+        category_id = response.json().get("category_id")
+
+        if category_id is not None:
+            category_id = int(category_id)
+
+        _eve_group_category_cache[group_id] = category_id
+        return category_id
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI group lookup failed:",
+            group_id,
+            repr(error),
+        )
+        return None
+
+
+def get_eve_type_category_id(type_id):
+    """Resolve an inventory type's category_id through public ESI."""
+    if not type_id:
+        return None
+
+    type_id = int(type_id)
+
+    if type_id in _eve_type_category_cache:
+        return _eve_type_category_cache[type_id]
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/types/{type_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+
+        group_id = response.json().get("group_id")
+        category_id = get_eve_group_category_id(group_id)
+
+        _eve_type_category_cache[type_id] = category_id
+        return category_id
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI type category lookup failed:",
+            type_id,
+            repr(error),
+        )
+        return None
+
+
+def split_eft_drone_and_cargo(extras, type_ids):
+    """
+    Separate post-rig EFT contents into Drone Bay and Cargo Bay.
+
+    Classification uses EVE inventory metadata, so sentry drones and other
+    drone families do not depend on fragile name heuristics. Unknown types
+    fall back to Cargo Bay so no item disappears from the fitting.
+    """
+    drones = []
+    cargo = []
+
+    for line in extras or []:
+        item_name = normalize_eft_item_name(line)
+        type_id = type_ids.get(item_name.casefold())
+        category_id = get_eve_type_category_id(type_id)
+
+        if category_id == EVE_CATEGORY_DRONE:
+            drones.append(line)
+        else:
+            cargo.append(line)
+
+    return drones, cargo
+
 
 
 def get_eve_type_dogma(type_id):
@@ -7677,40 +7807,66 @@ def format_fitting_resource_value(
 
 
 def format_eft_web_items(items, type_ids=None):
-    """Collapse identical EFT lines and render EVE inventory icons."""
+    """
+    Render EFT items with normalized quantities and EVE inventory icons.
+
+    - repeated fitted modules are collapsed;
+    - trailing EFT quantities such as `x2000` become the actual quantity;
+    - the suffix is removed from the displayed item name.
+    """
     if not items:
-        return '<div class="slot-empty">Aucun module renseigné</div>'
+        return '<div class="slot-empty">Aucun élément renseigné</div>'
 
     type_ids = type_ids or {}
     collapsed = []
-    for line in items:
-        if collapsed and collapsed[-1][0] == line:
-            collapsed[-1][1] += 1
+    index_by_key = {}
+
+    for raw_line in items:
+        display_line, quantity = parse_eft_display_quantity(raw_line)
+
+        if not display_line:
+            continue
+
+        item_name = normalize_eft_item_name(display_line)
+        key = display_line.casefold()
+
+        if key in index_by_key:
+            collapsed[index_by_key[key]]["quantity"] += quantity
         else:
-            collapsed.append([line, 1])
+            index_by_key[key] = len(collapsed)
+            collapsed.append({
+                "line": display_line,
+                "item_name": item_name,
+                "quantity": quantity,
+            })
 
     html = []
-    for line, count in collapsed:
-        item_name = normalize_eft_item_name(line)
-        type_id = type_ids.get(item_name.casefold())
+
+    for item in collapsed:
+        type_id = type_ids.get(item["item_name"].casefold())
         icon_url = eve_type_icon_url(type_id, 64)
+
         icon_html = (
-            f'<img class="item-icon" src="{escape(icon_url)}" alt="" loading="lazy">'
+            f'<img class="item-icon" src="{escape(icon_url)}" '
+            f'alt="" loading="lazy">'
             if icon_url
             else '<span class="item-icon item-icon-fallback">◆</span>'
         )
+
         html.append(
             '<div class="slot-item">'
             f'{icon_html}'
-            f'<span class="slot-qty">{count}×</span>'
-            f'<span class="slot-label">{escape(line)}</span>'
+            f'<span class="slot-qty">{int(item["quantity"])}×</span>'
+            f'<span class="slot-label">{escape(item["line"])}</span>'
             '</div>'
         )
+
     return "".join(html)
+
 
 def freeborn_fitting_web_page(fit):
     """
-    FREEBORN FITTINGS — Phase 4K
+    FREEBORN FITTINGS — Phase 4L
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -7818,8 +7974,18 @@ def freeborn_fitting_web_page(fit):
     rigs_html = format_eft_web_items(
         eft_sections["rigs"], eft_type_ids
     )
-    extras_html = format_eft_web_items(
-        eft_sections["extras"], eft_type_ids
+    drone_items, cargo_items = split_eft_drone_and_cargo(
+        eft_sections["extras"],
+        eft_type_ids,
+    )
+
+    drones_html = format_eft_web_items(
+        drone_items,
+        eft_type_ids,
+    )
+    cargo_html = format_eft_web_items(
+        cargo_items,
+        eft_type_ids,
     )
 
     return f'''<!doctype html>
@@ -7928,7 +8094,9 @@ button{{font:inherit}}
 .info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:11px;letter-spacing:.11em;text-transform:uppercase}}
 .info-cell strong{{font-size:14px;color:#eef6ff}}
 .notes-body{{min-height:60px;padding:8px 10px;color:#d7e7f4;white-space:pre-wrap;font-size:14px;line-height:1.48}}
-.hold-panel .slot-body{{max-height:190px;overflow:auto}}
+.hold-panel .slot-body{{max-height:300px;overflow:auto}}
+.drone-bay-panel .panel-title{{color:#a9e7ff}}
+.cargo-bay-panel .panel-title{{color:#d8e8f3}}
 .ship-panel{{min-height:270px;display:grid;grid-template-rows:auto 1fr}}
 .ship-stage{{position:relative;min-height:225px;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,145,255,.14),transparent 44%),linear-gradient(90deg,transparent 49.8%,rgba(49,185,255,.08) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(49,185,255,.06) 50%,transparent 50.2%)}}
 .ship-stage:before{{content:"";position:absolute;width:64%;aspect-ratio:1;border:1px solid rgba(49,185,255,.09);border-radius:50%;box-shadow:0 0 0 45px rgba(49,185,255,.018),0 0 0 90px rgba(49,185,255,.012)}}
@@ -8035,9 +8203,14 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           <div class="info-cell"><small>Créé par</small><strong>{safe_creator}</strong></div>
         </div>
       </article>
-      <article class="hud-panel hold-panel">
-        <div class="panel-title"><span class="slot-symbol">▦</span>Drones / Cargaison / Compléments<span class="panel-code">HOLD</span></div>
-        <div class="slot-body">{extras_html}</div>
+      <article class="hud-panel hold-panel drone-bay-panel">
+        <div class="panel-title"><span class="slot-symbol">◈</span>Drone Bay<span class="panel-code">DRONES</span></div>
+        <div class="slot-body">{drones_html}</div>
+      </article>
+
+      <article class="hud-panel hold-panel cargo-bay-panel">
+        <div class="panel-title"><span class="slot-symbol">▦</span>Cargo Bay<span class="panel-code">CARGO</span></div>
+        <div class="slot-body">{cargo_html}</div>
       </article>
       <article class="hud-panel">
         <div class="panel-title"><span class="slot-symbol">N</span>Notes du créateur<span class="panel-code">NOTES</span></div>
@@ -8091,7 +8264,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4K</span>
+    <span class="version">Freeborn Legacy • Fittings 4L</span>
   </footer>
 </main>
 
