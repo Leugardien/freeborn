@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import os
 import re
 from html import escape
@@ -678,6 +679,14 @@ def init_database():
                     ALTER TABLE guild_eve_characters
                     ADD COLUMN IF NOT EXISTS
                     skills_updated_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    skills_snapshot JSONB;
                     """
                 )
 
@@ -1729,6 +1738,7 @@ def save_main_character_v3(
     refresh_token=None,
     granted_scopes=None,
     total_skill_points=None,
+    skills_snapshot=None,
 ):
 
     guild_id = str(guild_id)
@@ -1745,6 +1755,15 @@ def save_main_character_v3(
     scopes_text = (
         " ".join(sorted(set(granted_scopes or [])))
         if granted_scopes
+        else None
+    )
+
+    skills_snapshot_json = (
+        json.dumps(
+            skills_snapshot,
+            separators=(",", ":"),
+        )
+        if skills_snapshot is not None
         else None
     )
 
@@ -1827,6 +1846,7 @@ def save_main_character_v3(
                         eve_scopes,
                         total_skill_points,
                         skills_updated_at,
+                        skills_snapshot,
                         sso_authorized_at
                     )
                     VALUES (
@@ -1834,6 +1854,7 @@ def save_main_character_v3(
                         %s, TRUE, NOW(), NOW(), NOW(), NULL,
                         %s, %s, %s,
                         CASE WHEN %s::BIGINT IS NULL THEN NULL ELSE NOW() END,
+                        %s::jsonb,
                         CASE WHEN %s::TEXT IS NULL THEN NULL ELSE NOW() END
                     )
                     ON CONFLICT (guild_id, character_id)
@@ -1870,6 +1891,10 @@ def save_main_character_v3(
                             EXCLUDED.skills_updated_at,
                             guild_eve_characters.skills_updated_at
                         ),
+                        skills_snapshot = COALESCE(
+                            EXCLUDED.skills_snapshot,
+                            guild_eve_characters.skills_snapshot
+                        ),
                         sso_authorized_at = COALESCE(
                             EXCLUDED.sso_authorized_at,
                             guild_eve_characters.sso_authorized_at
@@ -1893,6 +1918,7 @@ def save_main_character_v3(
                             if total_skill_points is not None
                             else None
                         ),
+                        skills_snapshot_json,
                         encrypted_refresh_token,
                     ),
                 )
@@ -4453,6 +4479,34 @@ def get_eve_character_skills(
             "ESI skills response does not contain total_sp"
         )
 
+    normalized_skills = []
+
+    for skill in data.get("skills", []) or []:
+
+        try:
+
+            normalized_skills.append({
+                "skill_id":
+                    int(skill["skill_id"]),
+
+                "active_skill_level":
+                    int(skill.get("active_skill_level", 0) or 0),
+
+                "trained_skill_level":
+                    int(skill.get("trained_skill_level", 0) or 0),
+
+                "skillpoints_in_skill":
+                    int(skill.get("skillpoints_in_skill", 0) or 0),
+            })
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+
+            continue
+
     return {
         "total_sp":
             int(data["total_sp"]),
@@ -4461,7 +4515,13 @@ def get_eve_character_skills(
             int(data.get("unallocated_sp", 0) or 0),
 
         "trained_skills":
-            len(data.get("skills", [])),
+            len(normalized_skills),
+
+        # Phase 4K foundation:
+        # keep the individual skill levels so Freeborn Fittings can later
+        # compare the corporate ALL-V reference with the real pilot.
+        "skills":
+            normalized_skills,
     }
 
 
@@ -7650,7 +7710,7 @@ def format_eft_web_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit):
     """
-    FREEBORN FITTINGS — Phase 4J
+    FREEBORN FITTINGS — Phase 4K
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -7838,48 +7898,51 @@ button{{font:inherit}}
 .logo{{width:74px;filter:drop-shadow(0 0 13px rgba(44,187,255,.22))}}
 .brand h1{{margin:0;font-size:clamp(23px,2.65vw,36px);line-height:1;font-weight:560;letter-spacing:.08em;text-transform:uppercase;color:#eef6ff}}
 .brand h1 span{{color:var(--gold2);font-weight:640}}
-.brand p{{margin:5px 0 0;color:#c6d8e8;font-size:10px;letter-spacing:.19em;text-transform:uppercase}}
+.brand p{{margin:5px 0 0;color:#c6d8e8;font-size:12px;letter-spacing:.16em;text-transform:uppercase}}
 .status-badge{{border:1px solid var(--status);color:var(--status);background:color-mix(in srgb,var(--status) 9%,rgba(2,8,16,.96));padding:10px 15px;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;white-space:nowrap;box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
-.fit-ref-line{{padding:6px 18px 5px;color:var(--cyan2);border-bottom:1px solid rgba(49,185,255,.18);background:rgba(1,8,17,.74);font:10px/1.2 Consolas,monospace;letter-spacing:.16em;text-transform:uppercase}}
+.fit-ref-line{{padding:8px 18px 7px;color:var(--cyan2);border-bottom:1px solid rgba(49,185,255,.18);background:rgba(1,8,17,.74);font:11px/1.25 Consolas,monospace;letter-spacing:.16em;text-transform:uppercase}}
 .main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(360px,1.08fr) minmax(390px,1.15fr);gap:7px;padding:7px;align-items:stretch}}
 .stack{{display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}}
 .center-col > .hud-panel:last-child,.right-col > .hud-panel:last-child{{flex:1}}
 .hud-panel{{position:relative;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(5,20,38,.88),rgba(2,8,17,.94));box-shadow:inset 0 0 24px rgba(39,186,255,.025),0 0 10px rgba(0,0,0,.18)}}
 .hud-panel:before{{content:"";position:absolute;left:-1px;top:-1px;width:28px;height:2px;background:var(--cyan);box-shadow:0 0 8px rgba(53,199,255,.35)}}
-.panel-title{{display:flex;align-items:center;gap:9px;min-height:31px;padding:5px 9px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:11px;font-weight:780;letter-spacing:.12em;text-transform:uppercase}}
-.panel-code{{margin-left:auto;color:#6389a5;font:9px Consolas,monospace;letter-spacing:.12em}}
-.slot-symbol{{width:20px;height:20px;flex:0 0 20px;display:grid;place-items:center;border:1px solid var(--cyan);border-radius:50%;color:var(--cyan2);background:rgba(16,108,174,.20);font:800 10px Consolas,monospace;box-shadow:0 0 9px rgba(53,199,255,.12)}}
+.panel-title{{display:flex;align-items:center;gap:9px;min-height:31px;padding:5px 9px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:13px;font-weight:760;letter-spacing:.12em;text-transform:uppercase}}
+.panel-code{{margin-left:auto;color:#6389a5;font:12px Consolas,monospace;letter-spacing:.12em}}
+.slot-symbol{{width:20px;height:20px;flex:0 0 20px;display:grid;place-items:center;border:1px solid var(--cyan);border-radius:50%;color:var(--cyan2);background:rgba(16,108,174,.20);font:800 11px Consolas,monospace;box-shadow:0 0 9px rgba(53,199,255,.12)}}
 .slot-symbol.low{{border-color:#9ab3c6;color:#d5e3ee}}
 .slot-symbol.rig{{border-radius:3px;border-color:#8bd9ff}}
 .slot-body{{padding:5px 9px 7px}}
-.slot-item{{display:grid;grid-template-columns:28px 27px 1fr;align-items:center;gap:5px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.035);color:#dcecf8;font-size:11px;line-height:1.28}}
+.slot-item{{display:grid;grid-template-columns:31px 31px 1fr;align-items:center;gap:5px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.035);color:#dcecf8;font-size:13px;line-height:1.34}}
 .slot-item:last-child{{border-bottom:0}}
 .slot-qty{{color:var(--gold2);font-family:Consolas,monospace}}
-.item-icon{{width:24px;height:24px;object-fit:cover;border:1px solid rgba(49,185,255,.26);background:#07101a;box-shadow:0 0 7px rgba(53,199,255,.08)}}
+.item-icon{{width:28px;height:28px;object-fit:cover;border:1px solid rgba(49,185,255,.26);background:#07101a;box-shadow:0 0 7px rgba(53,199,255,.08)}}
 .item-icon-fallback{{display:grid;place-items:center;color:#55758c;font-size:9px}}
 .slot-label{{min-width:0;overflow:hidden;text-overflow:ellipsis}}
-.slot-empty{{color:#627c91;font-size:11px;font-style:italic;padding:5px 0}}
+.slot-empty{{color:#627c91;font-size:12px;font-style:italic;padding:5px 0}}
 .identity-panel{{padding:10px 13px 11px}}
-.eyebrow{{color:var(--cyan2);font:10px Consolas,monospace;letter-spacing:.15em;text-transform:uppercase}}
+.eyebrow{{color:var(--cyan2);font:11px Consolas,monospace;letter-spacing:.14em;text-transform:uppercase}}
 .ship-name{{margin:5px 0 0;color:#eef6ff;font-size:clamp(17px,1.8vw,25px);font-weight:650;letter-spacing:.10em;text-transform:uppercase}}
-.fit-name{{margin:4px 0 9px;color:var(--gold2);font-size:clamp(14px,1.45vw,19px);line-height:1.12;font-weight:600;letter-spacing:.055em;text-transform:uppercase}}
+.fit-name{{margin:4px 0 9px;color:var(--gold2);font-size:clamp(16px,1.55vw,21px);line-height:1.12;font-weight:600;letter-spacing:.055em;text-transform:uppercase}}
 .info-grid{{display:grid;grid-template-columns:1fr 1fr;gap:7px}}
 .info-cell{{border:1px solid rgba(49,185,255,.24);background:rgba(2,10,20,.45);padding:8px 10px}}
-.info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:9px;letter-spacing:.13em;text-transform:uppercase}}
-.info-cell strong{{font-size:12px;color:#eef6ff}}
-.notes-body{{min-height:60px;padding:8px 10px;color:#d7e7f4;white-space:pre-wrap;font-size:12px;line-height:1.42}}
+.info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:11px;letter-spacing:.11em;text-transform:uppercase}}
+.info-cell strong{{font-size:14px;color:#eef6ff}}
+.notes-body{{min-height:60px;padding:8px 10px;color:#d7e7f4;white-space:pre-wrap;font-size:14px;line-height:1.48}}
 .hold-panel .slot-body{{max-height:190px;overflow:auto}}
 .ship-panel{{min-height:270px;display:grid;grid-template-rows:auto 1fr}}
 .ship-stage{{position:relative;min-height:225px;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,145,255,.14),transparent 44%),linear-gradient(90deg,transparent 49.8%,rgba(49,185,255,.08) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(49,185,255,.06) 50%,transparent 50.2%)}}
 .ship-stage:before{{content:"";position:absolute;width:64%;aspect-ratio:1;border:1px solid rgba(49,185,255,.09);border-radius:50%;box-shadow:0 0 0 45px rgba(49,185,255,.018),0 0 0 90px rgba(49,185,255,.012)}}
 .ship-render{{width:96%;height:225px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 18px 26px rgba(0,0,0,.84))}}
 .ship-placeholder{{color:#6d879b;letter-spacing:.15em;text-align:center}}
+.telemetry-reference{{margin:7px 7px 0;padding:9px 11px;border:1px solid rgba(214,168,60,.34);background:rgba(214,168,60,.045)}}
+.telemetry-reference strong{{display:block;color:var(--gold2);font-size:11px;letter-spacing:.09em;text-transform:uppercase}}
+.telemetry-reference span{{display:block;margin-top:4px;color:#9bb4c7;font-size:11px;line-height:1.35}}
 .telemetry{{display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:6px}}
 .metric{{min-height:43px;border:1px solid rgba(49,185,255,.25);background:rgba(1,9,18,.55);padding:6px 8px;display:grid;grid-template-columns:28px 1fr;grid-template-rows:auto auto;column-gap:8px;align-items:center}}
 .metric-icon{{grid-row:1/3;width:25px;height:25px;border:1px solid rgba(49,185,255,.40);display:grid;place-items:center;color:#6fd2ff;background:rgba(3,20,34,.72);font-size:16px;line-height:1;text-shadow:0 0 10px rgba(49,185,255,.35)}}
-.metric small{{display:block;color:#63c8ff;font-size:8px;letter-spacing:.12em;text-transform:uppercase;align-self:end}}
-.metric-mode{{font-style:normal;font-size:7px;color:#67859b;letter-spacing:.10em;margin-left:5px}}
-.metric strong{{display:block;margin-top:2px;color:#e8f4fc;font:700 12px Consolas,monospace;align-self:start}}
+.metric small{{display:block;color:#63c8ff;font-size:10px;letter-spacing:.10em;text-transform:uppercase;align-self:end}}
+.metric-mode{{font-style:normal;font-size:9px;color:#67859b;letter-spacing:.10em;margin-left:5px}}
+.metric strong{{display:block;margin-top:2px;color:#e8f4fc;font:700 14px Consolas,monospace;align-self:start}}
 .metric .pending{{color:#71899d;font-weight:500}}
 .resists{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:6px}}
 .resist{{border:1px solid rgba(49,185,255,.18);background:rgba(2,10,19,.50);padding:5px;text-align:center}}
@@ -7888,10 +7951,10 @@ button{{font:inherit}}
 .resist.therm .resist-icon{{color:#ff7b32}}
 .resist.kin .resist-icon{{color:#c6d0d8}}
 .resist.exp .resist-icon{{color:#ffc13b}}
-.resist span{{display:block;color:#6b879d;font-size:8px;text-transform:uppercase;letter-spacing:.08em}}
-.resist b{{display:block;margin-top:3px;color:#aebfcd;font:10px Consolas,monospace}}
+.resist span{{display:block;color:#6b879d;font-size:10px;text-transform:uppercase;letter-spacing:.08em}}
+.resist b{{display:block;margin-top:3px;color:#aebfcd;font:12px Consolas,monospace}}
 .actionbar{{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:6px;padding:0 7px 7px}}
-.action{{appearance:none;min-height:34px;border:1px solid rgba(214,168,60,.75);background:linear-gradient(180deg,rgba(214,168,60,.14),rgba(214,168,60,.025));color:#f4d576;padding:8px 11px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:.16s ease}}
+.action{{appearance:none;min-height:34px;border:1px solid rgba(214,168,60,.75);background:linear-gradient(180deg,rgba(214,168,60,.14),rgba(214,168,60,.025));color:#f4d576;padding:8px 11px;font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:.16s ease}}
 .action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 15px rgba(214,168,60,.14)}}
 .action.blue{{border-color:rgba(49,185,255,.80);background:linear-gradient(180deg,rgba(21,156,255,.15),rgba(21,156,255,.025));color:#71d2ff}}
 .action.green{{border-color:rgba(121,221,115,.70);background:linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.02));color:#9cec94}}
@@ -7899,10 +7962,10 @@ button{{font:inherit}}
 .eft-wrap{{padding:0 9px 9px}}
 .eft-panel{{display:none;border:1px solid var(--line2);background:rgba(2,8,15,.96);padding:9px}}
 .eft-panel.open{{display:block}}
-.eft-head{{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;color:var(--gold2);font-size:10px;letter-spacing:.11em;text-transform:uppercase}}
-.eft-source{{color:#7290a8;font:9px Consolas,monospace}}
-pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(255,255,255,.05);background:#040914;color:#d9e8f5;font:11px/1.40 Consolas,"Courier New",monospace;white-space:pre-wrap}}
-.footer{{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:center;padding:7px 16px;border-top:1px solid var(--line2);color:#7fa4be;background:rgba(1,7,14,.70);font-size:9px;letter-spacing:.12em;text-transform:uppercase}}
+.eft-head{{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;color:var(--gold2);font-size:11px;letter-spacing:.10em;text-transform:uppercase}}
+.eft-source{{color:#7290a8;font:12px Consolas,monospace}}
+pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(255,255,255,.05);background:#040914;color:#d9e8f5;font:13px/1.48 Consolas,"Courier New",monospace;white-space:pre-wrap}}
+.footer{{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:center;padding:7px 16px;border-top:1px solid var(--line2);color:#7fa4be;background:rgba(1,7,14,.70);font-size:10px;letter-spacing:.11em;text-transform:uppercase}}
 .footer .motto{{color:var(--cyan2)}}
 .footer .id{{color:var(--gold2);font-family:Consolas,monospace}}
 .footer .version{{text-align:right}}
@@ -8028,7 +8091,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4J</span>
+    <span class="version">Freeborn Legacy • Fittings 4K</span>
   </footer>
 </main>
 
@@ -11956,6 +12019,7 @@ def callback():
                 refresh_token=refresh_token,
                 granted_scopes=granted_scopes,
                 total_skill_points=skill_summary["total_sp"],
+                skills_snapshot=skill_summary["skills"],
             )
 
             if str(guild_id) == str(DISCORD_GUILD_ID):
