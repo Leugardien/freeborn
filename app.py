@@ -9059,6 +9059,536 @@ def freeborn_render_dogma_rows(rows):
     return "<br>".join(rendered)
 
 
+
+def parse_eft_item_quantity(line):
+    """
+    Return (normalized inventory type name, quantity) for an EFT cargo/drone row.
+    EFT cargo quantities are normally written as `Type Name x2000`.
+    """
+    raw = str(line or "").strip()
+    if not raw:
+        return "", 0
+
+    quantity = 1
+    match = re.search(
+        r"\s+x(\d+)$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
+        try:
+            quantity = max(
+                1,
+                int(match.group(1)),
+            )
+        except (TypeError, ValueError):
+            quantity = 1
+
+    return (
+        normalize_eft_item_name(raw),
+        quantity,
+    )
+
+
+def freeborn_damage_profile(type_id):
+    """
+    Read the four direct damage attributes of a charge/ammo type from Dogma.
+    No damage type is inferred from the item name.
+    """
+    result = {
+        "em": 0.0,
+        "therm": 0.0,
+        "kin": 0.0,
+        "exp": 0.0,
+        "resolved": False,
+        "attributes": [],
+    }
+
+    aliases = {
+        "em": (
+            "em damage",
+            "emdamage",
+        ),
+        "therm": (
+            "thermal damage",
+            "thermaldamage",
+        ),
+        "kin": (
+            "kinetic damage",
+            "kineticdamage",
+        ),
+        "exp": (
+            "explosive damage",
+            "explosivedamage",
+        ),
+    }
+
+    dogma = get_eve_type_dogma(
+        type_id
+    )
+
+    if not dogma:
+        return result
+
+    for attribute_id, value in dogma.items():
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or ""
+        ).strip()
+        display_name = str(
+            metadata.get("display_name")
+            or ""
+        ).strip()
+
+        normalized = (
+            name
+            + " "
+            + display_name
+        ).casefold()
+
+        for key, names in aliases.items():
+            if any(
+                alias in normalized
+                for alias in names
+            ):
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    numeric = 0.0
+
+                result[key] = numeric
+                result["attributes"].append({
+                    "attribute_id": int(attribute_id),
+                    "name": (
+                        display_name
+                        or name
+                        or f"attribute {attribute_id}"
+                    ),
+                    "value": numeric,
+                })
+
+    result["resolved"] = any(
+        float(result[key]) > 0
+        for key in (
+            "em",
+            "therm",
+            "kin",
+            "exp",
+        )
+    )
+
+    return result
+
+
+def freeborn_launcher_cycle_seconds(type_id):
+    """
+    Read the launcher's normal rate-of-fire / duration attribute in seconds.
+
+    Overheat bonus attributes are deliberately excluded.
+    """
+    dogma = get_eve_type_dogma(
+        type_id
+    )
+
+    if not dogma:
+        return None
+
+    candidates = []
+
+    for attribute_id, value in dogma.items():
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or ""
+        ).strip()
+        display_name = str(
+            metadata.get("display_name")
+            or ""
+        ).strip()
+
+        normalized = (
+            name
+            + " "
+            + display_name
+        ).casefold()
+
+        if "overload" in normalized:
+            continue
+
+        score = 0
+
+        if "rate of fire" in normalized:
+            score += 10
+        if "duration" in normalized:
+            score += 6
+        if "speed" in normalized:
+            score -= 6
+        if "bonus" in normalized:
+            score -= 6
+
+        if score <= 0:
+            continue
+
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+
+        if numeric <= 0:
+            continue
+
+        candidates.append({
+            "attribute_id": int(attribute_id),
+            "name": (
+                display_name
+                or name
+                or f"attribute {attribute_id}"
+            ),
+            "value": numeric,
+            "score": score,
+        })
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda row: row["score"],
+        reverse=True,
+    )
+
+    # Launcher duration / ROF Dogma values are milliseconds.
+    return float(
+        candidates[0]["value"]
+    ) / 1000.0
+
+
+def freeborn_launcher_charge_groups(type_id):
+    """
+    Resolve the inventory group IDs accepted by one launcher from its actual
+    Dogma attributes (`Used with (Charge Group)` family).
+    """
+    groups = set()
+
+    dogma = get_eve_type_dogma(
+        type_id
+    )
+
+    if not dogma:
+        return groups
+
+    for attribute_id, value in dogma.items():
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or ""
+        )
+        display_name = str(
+            metadata.get("display_name")
+            or ""
+        )
+
+        normalized = (
+            name
+            + " "
+            + display_name
+        ).casefold()
+
+        if (
+            "charge group" not in normalized
+            and "chargegroup" not in normalized
+        ):
+            continue
+
+        try:
+            group_id = int(
+                round(float(value))
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if group_id > 0:
+            groups.add(group_id)
+
+    return groups
+
+
+def freeborn_cargo_charge_candidates(
+    eft_sections,
+    type_ids,
+    compatible_group_ids,
+):
+    """
+    Return compatible launcher charges actually carried by the fit.
+
+    Drone Bay is excluded through the existing EVE category classifier.
+    """
+    _, cargo_lines = split_eft_drone_and_cargo(
+        eft_sections.get("extras", []),
+        type_ids,
+    )
+
+    rows = []
+
+    for line in cargo_lines:
+        item_name, cargo_quantity = (
+            parse_eft_item_quantity(line)
+        )
+
+        type_id = type_ids.get(
+            item_name.casefold()
+        )
+
+        if not type_id:
+            continue
+
+        metadata = get_eve_type_metadata(
+            type_id
+        )
+
+        try:
+            group_id = int(
+                metadata.get("group_id")
+                or 0
+            )
+        except (TypeError, ValueError):
+            group_id = 0
+
+        if (
+            compatible_group_ids
+            and group_id not in compatible_group_ids
+        ):
+            continue
+
+        damage = freeborn_damage_profile(
+            type_id
+        )
+
+        # A compatible-group item without direct damage can be a script or
+        # support charge; do not call it DPS ammunition.
+        if not damage["resolved"]:
+            continue
+
+        rows.append({
+            "type_id": int(type_id),
+            "name": item_name,
+            "cargo_quantity": int(cargo_quantity),
+            "group_id": group_id,
+            "damage": damage,
+            "total_damage": (
+                float(damage["em"])
+                + float(damage["therm"])
+                + float(damage["kin"])
+                + float(damage["exp"])
+            ),
+        })
+
+    return rows
+
+
+def freeborn_launcher_ammo_dps_audit(
+    weapon_audit,
+    eft_sections,
+    type_ids,
+):
+    """
+    Build raw launcher DPS candidates from actual fitted launchers and cargo.
+
+    Each launcher family is evaluated separately. The result is a BASE weapon
+    layer only — no hull, skill or BCS modifiers are applied in 4Q-B.
+    """
+    launchers = []
+
+    for weapon in weapon_audit.get(
+        "weapons",
+        []
+    ):
+        name = str(
+            weapon.get("name")
+            or ""
+        )
+        group = str(
+            weapon.get("group")
+            or ""
+        )
+
+        if (
+            "launcher" not in name.casefold()
+            and "launcher" not in group.casefold()
+        ):
+            continue
+
+        type_id = int(
+            weapon["type_id"]
+        )
+        quantity = int(
+            weapon.get("quantity", 1)
+            or 1
+        )
+
+        cycle_seconds = (
+            freeborn_launcher_cycle_seconds(
+                type_id
+            )
+        )
+
+        charge_groups = (
+            freeborn_launcher_charge_groups(
+                type_id
+            )
+        )
+
+        charges = (
+            freeborn_cargo_charge_candidates(
+                eft_sections,
+                type_ids,
+                charge_groups,
+            )
+        )
+
+        charge_rows = []
+
+        for charge in charges:
+            raw_volley = (
+                float(charge["total_damage"])
+                * quantity
+            )
+
+            raw_dps = (
+                raw_volley
+                / float(cycle_seconds)
+                if (
+                    cycle_seconds is not None
+                    and cycle_seconds > 0
+                )
+                else None
+            )
+
+            row = dict(charge)
+            row.update({
+                "launcher_quantity": quantity,
+                "raw_volley": raw_volley,
+                "raw_dps": raw_dps,
+            })
+            charge_rows.append(row)
+
+        launchers.append({
+            "type_id": type_id,
+            "name": name,
+            "quantity": quantity,
+            "cycle_seconds": cycle_seconds,
+            "compatible_group_ids": sorted(
+                charge_groups
+            ),
+            "charges": charge_rows,
+        })
+
+    return {
+        "launchers": launchers,
+    }
+
+
+def freeborn_render_launcher_ammo_dps_audit(
+    audit,
+):
+    chunks = []
+
+    launchers = audit.get(
+        "launchers",
+        []
+    )
+
+    if not launchers:
+        return (
+            '<strong>LAUNCHER / MUNITION :</strong> '
+            'aucun launcher exploitable détecté.'
+        )
+
+    for launcher in launchers:
+        chunks.append(
+            '<strong>LAUNCHER</strong><br>'
+            + f'<span class="cap-audit-key">'
+            + f'{launcher["quantity"]}× '
+            + escape(launcher["name"])
+            + '</span><br>'
+            + 'Cycle BASE : '
+            + (
+                f'{launcher["cycle_seconds"]:.3f} s'
+                if launcher["cycle_seconds"] is not None
+                else 'non résolu'
+            )
+            + ' • groupes de charges : '
+            + escape(
+                ", ".join(
+                    str(value)
+                    for value in launcher[
+                        "compatible_group_ids"
+                    ]
+                )
+                or "non résolus"
+            )
+        )
+
+        if not launcher["charges"]:
+            chunks.append(
+                '<br><span class="cap-audit-muted">'
+                'Aucune munition de dégâts compatible trouvée dans le Cargo Bay.'
+                '</span>'
+            )
+            continue
+
+        chunks.append(
+            '<br><strong>MUNITIONS COMPATIBLES PRÉSENTES</strong>'
+        )
+
+        for charge in launcher["charges"]:
+            damage = charge["damage"]
+
+            chunks.append(
+                '<br>'
+                + f'<span class="cap-audit-key">'
+                + escape(charge["name"])
+                + '</span>'
+                + f' ×{charge["cargo_quantity"]}'
+                + '<br>'
+                + 'Dégâts BASE / missile : '
+                + f'EM {damage["em"]:.1f} • '
+                + f'THERM {damage["therm"]:.1f} • '
+                + f'KIN {damage["kin"]:.1f} • '
+                + f'EXP {damage["exp"]:.1f}'
+                + f' = {charge["total_damage"]:.1f}'
+                + '<br>'
+                + f'Volée BASE ({charge["launcher_quantity"]} launchers) : '
+                + f'{charge["raw_volley"]:.1f}'
+                + ' • DPS launcher BASE : '
+                + (
+                    f'{charge["raw_dps"]:.2f}'
+                    if charge["raw_dps"] is not None
+                    else 'non résolu'
+                )
+            )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">IMPORTANT :</span> '
+        '4Q-B est le socle launcher/munition uniquement. '
+        'Bonus du Golem, Marauders, compétences missile, '
+        'Ballistic Control Systems et stacking penalties '
+        'ne sont PAS encore appliqués.'
+    )
+
+    return "<br>".join(chunks)
+
+
 def freeborn_render_weapon_audit(audit):
     chunks = []
 
@@ -10266,7 +10796,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4Q-A
+    FREEBORN FITTINGS — Phase 4Q-B
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -10372,7 +10902,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4Q-A2 — FITTING / CAP / VITESSE / DPS</div>
+              <div class="pilot-engine-title">MOTEUR 4Q-B — FITTING / CAP / VITESSE / DPS</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -10591,6 +11121,20 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     )
     weapon_dogma_audit_html = freeborn_render_weapon_audit(
         weapon_dogma_audit
+    )
+
+    launcher_ammo_dps_audit = (
+        freeborn_launcher_ammo_dps_audit(
+            weapon_dogma_audit,
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
+    launcher_ammo_dps_audit_html = (
+        freeborn_render_launcher_ammo_dps_audit(
+            launcher_ammo_dps_audit
+        )
     )
 
     # Phase 4O-F — capacitor engine.
@@ -11847,7 +12391,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4Q-A2</strong>
+            <strong>ALL V — VALIDATION 4Q-B</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -11936,6 +12480,11 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             <span class="cap-audit-key">État :</span>
             calcul DPS volontairement non déclaré en 4Q-A.
           </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            <strong>DPS — LAUNCHER / MUNITIONS 4Q-B</strong><br>
+            {launcher_ammo_dps_audit_html}
+          </div>
         </div>
         {pilot_panel_html}
       </article>
@@ -11963,7 +12512,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4Q-A2</span>
+    <span class="version">Freeborn Legacy • Fittings 4Q-B</span>
   </footer>
 </main>
 
