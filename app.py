@@ -7427,6 +7427,195 @@ def eve_type_icon_url(type_id, size=64):
     )
 
 
+# ============================================================
+# FREEBORN FITTINGS — PHASE 4J DOGMA TELEMETRY
+# ============================================================
+
+# Core Dogma attribute IDs used by EVE fitting calculations.
+# These four values are stable legacy Dogma identifiers:
+#   11 = powerOutput
+#   30 = power (module powergrid requirement)
+#   48 = cpuOutput
+#   50 = cpu (module CPU requirement)
+DOGMA_POWER_OUTPUT = 11
+DOGMA_POWER_NEED = 30
+DOGMA_CPU_OUTPUT = 48
+DOGMA_CPU_NEED = 50
+
+_eve_type_dogma_cache = {}
+
+
+def get_eve_type_dogma(type_id):
+    """
+    Return one inventory type's Dogma attribute map from public ESI.
+
+    Result format:
+        {
+            attribute_id: float_value,
+            ...
+        }
+
+    A small in-process cache avoids repeating the same public ESI request
+    every time one fitting page is refreshed.
+    """
+    if not type_id:
+        return {}
+
+    type_id = int(type_id)
+
+    if type_id in _eve_type_dogma_cache:
+        return _eve_type_dogma_cache[type_id]
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/types/{type_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        dogma = {}
+        for row in payload.get("dogma_attributes", []) or []:
+            attribute_id = row.get("attribute_id")
+            value = row.get("value")
+            if attribute_id is None or value is None:
+                continue
+            try:
+                dogma[int(attribute_id)] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+        _eve_type_dogma_cache[type_id] = dogma
+        return dogma
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI Dogma type lookup failed:",
+            type_id,
+            repr(error),
+        )
+        return {}
+
+
+def _eft_fitted_module_counts(eft_sections, type_ids):
+    """
+    Return {type_id: quantity} for fitted modules only.
+
+    Cargo, drones, charges and scripts are intentionally excluded from
+    fitting-resource usage. Low/Mid/High/Rig sections are included.
+    """
+    counts = {}
+
+    fitted_lines = (
+        eft_sections.get("low", [])
+        + eft_sections.get("mid", [])
+        + eft_sections.get("high", [])
+        + eft_sections.get("rigs", [])
+    )
+
+    for line in fitted_lines:
+        item_name = normalize_eft_item_name(line)
+        type_id = type_ids.get(item_name.casefold())
+
+        if not type_id:
+            continue
+
+        type_id = int(type_id)
+        counts[type_id] = counts.get(type_id, 0) + 1
+
+    return counts
+
+
+def calculate_base_fitting_resources(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+):
+    """
+    Calculate static/base CPU and Powergrid telemetry.
+
+    This deliberately does NOT pretend to be a complete EVE Dogma engine.
+    It uses the raw ship outputs and raw module fitting requirements exposed
+    by ESI. Character skills, implants, fleet effects, modules that alter
+    fitting resources, and other Dogma modifiers are not applied yet.
+
+    Returning explicit completeness flags lets the Web UI distinguish a
+    usable base figure from missing ESI data.
+    """
+    result = {
+        "cpu_output": None,
+        "cpu_used": 0.0,
+        "cpu_complete": False,
+        "power_output": None,
+        "power_used": 0.0,
+        "power_complete": False,
+    }
+
+    ship_dogma = get_eve_type_dogma(ship_type_id)
+
+    if DOGMA_CPU_OUTPUT in ship_dogma:
+        result["cpu_output"] = ship_dogma[DOGMA_CPU_OUTPUT]
+
+    if DOGMA_POWER_OUTPUT in ship_dogma:
+        result["power_output"] = ship_dogma[DOGMA_POWER_OUTPUT]
+
+    module_counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    cpu_ok = result["cpu_output"] is not None
+    power_ok = result["power_output"] is not None
+
+    for type_id, quantity in module_counts.items():
+        dogma = get_eve_type_dogma(type_id)
+
+        # A module can legitimately have no CPU or PG requirement.
+        # Missing Dogma entirely is treated as incomplete resolution.
+        if not dogma:
+            cpu_ok = False
+            power_ok = False
+            continue
+
+        cpu_need = dogma.get(DOGMA_CPU_NEED, 0.0)
+        power_need = dogma.get(DOGMA_POWER_NEED, 0.0)
+
+        result["cpu_used"] += float(cpu_need) * int(quantity)
+        result["power_used"] += float(power_need) * int(quantity)
+
+    result["cpu_complete"] = cpu_ok
+    result["power_complete"] = power_ok
+
+    return result
+
+
+def format_fitting_resource_value(
+    used,
+    output,
+    complete,
+    unit,
+):
+    """Render one compact base fitting-resource value for the HUD."""
+    if output is None:
+        return "— / — " + unit
+
+    # Keep one decimal only when it carries information.
+    def _fmt(value):
+        value = float(value)
+        if abs(value - round(value)) < 0.0001:
+            return f"{int(round(value)):,}".replace(",", " ")
+        return f"{value:,.1f}".replace(",", " ").replace(".", ",")
+
+    prefix = "" if complete else "≈ "
+    return (
+        f"{prefix}{_fmt(used)} / {_fmt(output)} {unit}"
+    )
+
+
 def format_eft_web_items(items, type_ids=None):
     """Collapse identical EFT lines and render EVE inventory icons."""
     if not items:
@@ -7461,7 +7650,7 @@ def format_eft_web_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit):
     """
-    FREEBORN FITTINGS — Phase 4G
+    FREEBORN FITTINGS — Phase 4J
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -7534,6 +7723,28 @@ def freeborn_fitting_web_page(fit):
         + eft_sections["extras"]
     )
     eft_type_ids = resolve_eve_inventory_type_ids(all_eft_items)
+
+    base_resources = calculate_base_fitting_resources(
+        fit.get("ship_type_id"),
+        eft_sections,
+        eft_type_ids,
+    )
+    cpu_value = escape(
+        format_fitting_resource_value(
+            base_resources["cpu_used"],
+            base_resources["cpu_output"],
+            base_resources["cpu_complete"],
+            "tf",
+        )
+    )
+    power_value = escape(
+        format_fitting_resource_value(
+            base_resources["power_used"],
+            base_resources["power_output"],
+            base_resources["power_complete"],
+            "MW",
+        )
+    )
 
     low_html = format_eft_web_items(
         eft_sections["low"], eft_type_ids
@@ -7667,6 +7878,7 @@ button{{font:inherit}}
 .metric{{min-height:43px;border:1px solid rgba(49,185,255,.25);background:rgba(1,9,18,.55);padding:6px 8px;display:grid;grid-template-columns:28px 1fr;grid-template-rows:auto auto;column-gap:8px;align-items:center}}
 .metric-icon{{grid-row:1/3;width:25px;height:25px;border:1px solid rgba(49,185,255,.40);display:grid;place-items:center;color:#6fd2ff;background:rgba(3,20,34,.72);font-size:16px;line-height:1;text-shadow:0 0 10px rgba(49,185,255,.35)}}
 .metric small{{display:block;color:#63c8ff;font-size:8px;letter-spacing:.12em;text-transform:uppercase;align-self:end}}
+.metric-mode{{font-style:normal;font-size:7px;color:#67859b;letter-spacing:.10em;margin-left:5px}}
 .metric strong{{display:block;margin-top:2px;color:#e8f4fc;font:700 12px Consolas,monospace;align-self:start}}
 .metric .pending{{color:#71899d;font-weight:500}}
 .resists{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:6px}}
@@ -7778,8 +7990,8 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
       <article class="hud-panel">
         <div class="panel-title"><span class="slot-symbol">T</span>Télémétrie du fitting<span class="panel-code">STATS</span></div>
         <div class="telemetry">
-          <div class="metric"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU</small><strong class="pending">— / — tf</strong></div>
-          <div class="metric"><span class="metric-icon" aria-hidden="true">ϟ</span><small>Powergrid</small><strong class="pending">— / — MW</strong></div>
+          <div class="metric" title="Valeur Dogma de base — compétences et modificateurs avancés non appliqués"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU <em class="metric-mode">BASE</em></small><strong>{cpu_value}</strong></div>
+          <div class="metric" title="Valeur Dogma de base — compétences et modificateurs avancés non appliqués"><span class="metric-icon" aria-hidden="true">ϟ</span><small>Powergrid <em class="metric-mode">BASE</em></small><strong>{power_value}</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">◫</span><small>Capaciteur</small><strong class="pending">À calculer</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">➤</span><small>Vitesse</small><strong class="pending">À calculer</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">À calculer</strong></div>
@@ -7816,7 +8028,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4H</span>
+    <span class="version">Freeborn Legacy • Fittings 4J</span>
   </footer>
 </main>
 
