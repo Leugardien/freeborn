@@ -7864,9 +7864,80 @@ def format_eft_web_items(items, type_ids=None):
     return "".join(html)
 
 
+# NOTE — specialized ship holds:
+# The official EFT clipboard format explicitly separates drone/fighter bay
+# from cargo bay, but it does not encode Fuel/Ore/Gas/PI/etc. hold assignment.
+# This renderer is intentionally generic so future specialized holds can reuse
+# exactly the same icon-grid/tooltip UI when Freeborn has a trustworthy source
+# for those hold contents/capacities.
+def format_eft_bay_items(items, type_ids=None):
+    """
+    Render Drone/Cargo-style bays as an EVE-like icon grid.
+
+    Each tile shows:
+      - the EVE inventory icon when available,
+      - the quantity below the icon,
+      - complete item name + quantity on hover/focus.
+    """
+    if not items:
+        return '<div class="bay-empty">Aucun élément renseigné</div>'
+
+    type_ids = type_ids or {}
+    collapsed = []
+    index_by_key = {}
+
+    for raw_line in items:
+        display_line, quantity = parse_eft_display_quantity(raw_line)
+
+        if not display_line:
+            continue
+
+        item_name = normalize_eft_item_name(display_line)
+        key = display_line.casefold()
+
+        if key in index_by_key:
+            collapsed[index_by_key[key]]["quantity"] += quantity
+        else:
+            index_by_key[key] = len(collapsed)
+            collapsed.append({
+                "line": display_line,
+                "item_name": item_name,
+                "quantity": quantity,
+            })
+
+    tiles = []
+
+    for item in collapsed:
+        type_id = type_ids.get(item["item_name"].casefold())
+        icon_url = eve_type_icon_url(type_id, 64)
+
+        icon_html = (
+            f'<img class="bay-item-icon" src="{escape(icon_url)}" '
+            f'alt="" loading="lazy">'
+            if icon_url
+            else '<span class="bay-item-icon bay-item-fallback">◆</span>'
+        )
+
+        quantity = int(item["quantity"])
+        quantity_text = f"{quantity:,}".replace(",", " ")
+        tooltip = escape(f'{item["line"]} ×{quantity_text}')
+
+        tiles.append(
+            '<div class="bay-item" tabindex="0" '
+            f'aria-label="{tooltip}">'
+            f'{icon_html}'
+            f'<span class="bay-qty">{quantity_text}×</span>'
+            f'<span class="bay-tooltip">{tooltip}</span>'
+            '</div>'
+        )
+
+    return "".join(tiles)
+
+
+
 def freeborn_fitting_web_page(fit):
     """
-    FREEBORN FITTINGS — Phase 4L
+    FREEBORN FITTINGS — Phase 4M
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -7979,11 +8050,11 @@ def freeborn_fitting_web_page(fit):
         eft_type_ids,
     )
 
-    drones_html = format_eft_web_items(
+    drones_html = format_eft_bay_items(
         drone_items,
         eft_type_ids,
     )
-    cargo_html = format_eft_web_items(
+    cargo_html = format_eft_bay_items(
         cargo_items,
         eft_type_ids,
     )
@@ -8070,6 +8141,7 @@ button{{font:inherit}}
 .main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(360px,1.08fr) minmax(390px,1.15fr);gap:7px;padding:7px;align-items:stretch}}
 .stack{{display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}}
 .center-col > .hud-panel:last-child,.right-col > .hud-panel:last-child{{flex:1}}
+.center-col .notes-body{{min-height:100%}}
 .hud-panel{{position:relative;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(5,20,38,.88),rgba(2,8,17,.94));box-shadow:inset 0 0 24px rgba(39,186,255,.025),0 0 10px rgba(0,0,0,.18)}}
 .hud-panel:before{{content:"";position:absolute;left:-1px;top:-1px;width:28px;height:2px;background:var(--cyan);box-shadow:0 0 8px rgba(53,199,255,.35)}}
 .panel-title{{display:flex;align-items:center;gap:9px;min-height:31px;padding:5px 9px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:13px;font-weight:760;letter-spacing:.12em;text-transform:uppercase}}
@@ -8079,6 +8151,7 @@ button{{font:inherit}}
 .slot-symbol.rig{{border-radius:3px;border-color:#8bd9ff}}
 .slot-body{{padding:5px 9px 7px}}
 .slot-item{{display:grid;grid-template-columns:31px 31px 1fr;align-items:center;gap:5px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.035);color:#dcecf8;font-size:13px;line-height:1.34}}
+.slot-item,.panel-title,.panel-code,.info-cell,.notes-body,.metric,.resist,.action,.eft-head,pre,.fit-ref-line,.bay-item{{font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif}}
 .slot-item:last-child{{border-bottom:0}}
 .slot-qty{{color:var(--gold2);font-family:Consolas,monospace}}
 .item-icon{{width:28px;height:28px;object-fit:cover;border:1px solid rgba(49,185,255,.26);background:#07101a;box-shadow:0 0 7px rgba(53,199,255,.08)}}
@@ -8094,9 +8167,104 @@ button{{font:inherit}}
 .info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:11px;letter-spacing:.11em;text-transform:uppercase}}
 .info-cell strong{{font-size:14px;color:#eef6ff}}
 .notes-body{{min-height:60px;padding:8px 10px;color:#d7e7f4;white-space:pre-wrap;font-size:14px;line-height:1.48}}
-.hold-panel .slot-body{{max-height:300px;overflow:auto}}
+.hold-panel .slot-body{{overflow:visible}}
 .drone-bay-panel .panel-title{{color:#a9e7ff}}
 .cargo-bay-panel .panel-title{{color:#d8e8f3}}
+.bay-grid{{
+  display:flex;
+  flex-wrap:wrap;
+  align-content:flex-start;
+  gap:8px;
+  min-height:74px;
+  padding:10px 11px 12px;
+}}
+.bay-item{{
+  position:relative;
+  width:58px;
+  min-height:70px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:flex-start;
+  gap:4px;
+  outline:none;
+}}
+.bay-item-icon{{
+  width:44px;
+  height:44px;
+  object-fit:cover;
+  border:1px solid rgba(49,185,255,.30);
+  background:#07101a;
+  box-shadow:0 0 0 1px rgba(0,0,0,.55),0 0 8px rgba(53,199,255,.08);
+}}
+.bay-item:hover .bay-item-icon,
+.bay-item:focus .bay-item-icon{{
+  border-color:rgba(241,203,103,.70);
+  box-shadow:0 0 0 1px rgba(0,0,0,.55),0 0 12px rgba(241,203,103,.16);
+}}
+.bay-item-fallback{{
+  display:grid;
+  place-items:center;
+  color:#58788f;
+  font-size:15px;
+}}
+.bay-qty{{
+  color:#d9e7f3;
+  font-size:13px;
+  line-height:1;
+  font-weight:650;
+  letter-spacing:.02em;
+  white-space:nowrap;
+}}
+.bay-tooltip{{
+  position:absolute;
+  z-index:60;
+  left:50%;
+  bottom:calc(100% + 7px);
+  width:max-content;
+  max-width:360px;
+  transform:translate(-50%,4px);
+  padding:7px 9px;
+  border:1px solid rgba(180,194,207,.25);
+  border-radius:4px;
+  background:rgba(56,59,68,.97);
+  color:#f2f4f7;
+  box-shadow:0 8px 24px rgba(0,0,0,.45);
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-size:12px;
+  font-weight:650;
+  line-height:1.25;
+  text-align:center;
+  white-space:normal;
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+  transition:opacity .12s ease,transform .12s ease;
+}}
+.bay-tooltip:after{{
+  content:"";
+  position:absolute;
+  top:100%;
+  left:50%;
+  transform:translateX(-50%);
+  border:6px solid transparent;
+  border-top-color:rgba(56,59,68,.97);
+}}
+.bay-item:hover .bay-tooltip,
+.bay-item:focus .bay-tooltip{{
+  opacity:1;
+  visibility:visible;
+  transform:translate(-50%,0);
+}}
+.bay-empty{{
+  width:100%;
+  min-height:48px;
+  display:grid;
+  place-items:center start;
+  color:#627c91;
+  font-size:12px;
+  font-style:italic;
+}}
 .ship-panel{{min-height:270px;display:grid;grid-template-rows:auto 1fr}}
 .ship-stage{{position:relative;min-height:225px;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,145,255,.14),transparent 44%),linear-gradient(90deg,transparent 49.8%,rgba(49,185,255,.08) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(49,185,255,.06) 50%,transparent 50.2%)}}
 .ship-stage:before{{content:"";position:absolute;width:64%;aspect-ratio:1;border:1px solid rgba(49,185,255,.09);border-radius:50%;box-shadow:0 0 0 45px rgba(49,185,255,.018),0 0 0 90px rgba(49,185,255,.012)}}
@@ -8205,12 +8373,12 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
       </article>
       <article class="hud-panel hold-panel drone-bay-panel">
         <div class="panel-title"><span class="slot-symbol">◈</span>Drone Bay<span class="panel-code">DRONES</span></div>
-        <div class="slot-body">{drones_html}</div>
+        <div class="slot-body bay-grid">{drones_html}</div>
       </article>
 
       <article class="hud-panel hold-panel cargo-bay-panel">
         <div class="panel-title"><span class="slot-symbol">▦</span>Cargo Bay<span class="panel-code">CARGO</span></div>
-        <div class="slot-body">{cargo_html}</div>
+        <div class="slot-body bay-grid">{cargo_html}</div>
       </article>
       <article class="hud-panel">
         <div class="panel-title"><span class="slot-symbol">N</span>Notes du créateur<span class="panel-code">NOTES</span></div>
@@ -8264,7 +8432,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4L</span>
+    <span class="version">Freeborn Legacy • Fittings 4M</span>
   </footer>
 </main>
 
