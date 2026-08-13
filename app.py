@@ -8336,16 +8336,112 @@ def get_ship_base_max_velocity(ship_type_id):
     )
 
 
+def freeborn_propulsion_kind(
+    type_id,
+):
+    """
+    Resolve whether an EVE type is an Afterburner or Microwarpdrive.
+
+    Do not depend on one metadata field only. EVE group naming can be broader
+    than the marketed type name, so Freeborn checks type name, group name,
+    then the actual propulsion Dogma signature.
+    """
+    metadata = get_eve_type_metadata(
+        type_id
+    )
+    type_name = str(
+        metadata.get("name")
+        or ""
+    ).strip()
+
+    group_name = get_eve_type_group_name(
+        type_id
+    ).strip()
+
+    haystack = (
+        type_name
+        + " "
+        + group_name
+    ).casefold()
+
+    if (
+        "microwarpdrive" in haystack
+        or "micro warp drive" in haystack
+        or "mwd" in haystack
+    ):
+        return "MWD"
+
+    if "afterburner" in haystack:
+        return "AB"
+
+    # Final fallback: detect the characteristic propulsion attributes.
+    speed_factor = find_dogma_attribute_by_names(
+        type_id,
+        exact_names=(
+            "speedFactor",
+            "Speed Factor",
+            "maxVelocityBonus",
+            "Maximum Velocity Bonus",
+        ),
+        contains_names=(
+            "speed factor",
+            "velocity bonus",
+        ),
+    )
+
+    mass_addition = find_dogma_attribute_by_names(
+        type_id,
+        exact_names=(
+            "massAddition",
+            "Mass Addition",
+        ),
+        contains_names=(
+            "mass addition",
+        ),
+    )
+
+    thrust = find_dogma_attribute_by_names(
+        type_id,
+        exact_names=(
+            "thrust",
+            "Thrust",
+        ),
+        contains_names=(
+            "thrust",
+        ),
+    )
+
+    # Requiring at least two propulsion-specific attributes avoids treating
+    # unrelated modules as prop mods.
+    signature_count = sum(
+        value is not None
+        for value in (
+            speed_factor,
+            mass_addition,
+            thrust,
+        )
+    )
+
+    if signature_count >= 2:
+        return "PROP"
+
+    return None
+
+
 def find_fitted_propulsion_modules(
     eft_sections,
     type_ids,
 ):
     """
-    Find fitted Afterburner/Microwarpdrive modules and expose the relevant
-    propulsion Dogma attributes.
+    Find fitted propulsion modules and expose their actual Dogma attributes.
 
-    4P-A is intentionally a probe: it does NOT yet claim an active-module
-    velocity until thrust/mass application has been validated.
+    4P-B fixes 4P-A's group-name-only classifier. Detection now uses:
+      - type name;
+      - group name;
+      - Dogma propulsion signature.
+
+    Active velocity remains deliberately unclaimed until the exact thrust /
+    mass application is validated against EVE.
     """
     rows = []
     counts = _eft_fitted_module_counts(
@@ -8354,14 +8450,11 @@ def find_fitted_propulsion_modules(
     )
 
     for type_id, quantity in counts.items():
-        group_name = get_eve_type_group_name(
+        kind = freeborn_propulsion_kind(
             type_id
-        ).casefold()
+        )
 
-        if (
-            "microwarpdrive" not in group_name
-            and "afterburner" not in group_name
-        ):
+        if not kind:
             continue
 
         metadata = get_eve_type_metadata(
@@ -8411,6 +8504,7 @@ def find_fitted_propulsion_modules(
                 or f"Type {type_id}"
             ),
             "quantity": int(quantity),
+            "kind": kind,
             "group_name": get_eve_type_group_name(
                 type_id
             ),
@@ -8419,13 +8513,31 @@ def find_fitted_propulsion_modules(
                 if speed_factor
                 else None
             ),
+            "speed_factor_attribute": (
+                speed_factor.get("display_name")
+                or speed_factor.get("name")
+                if speed_factor
+                else None
+            ),
             "mass_addition": (
                 mass_addition["value"]
                 if mass_addition
                 else None
             ),
+            "mass_addition_attribute": (
+                mass_addition.get("display_name")
+                or mass_addition.get("name")
+                if mass_addition
+                else None
+            ),
             "thrust": (
                 thrust["value"]
+                if thrust
+                else None
+            ),
+            "thrust_attribute": (
+                thrust.get("display_name")
+                or thrust.get("name")
                 if thrust
                 else None
             ),
@@ -8504,29 +8616,70 @@ def format_velocity(value):
 
 def format_propulsion_dogma_probe(rows):
     if not rows:
-        return "Aucun propulseur équipé"
+        return (
+            "Aucun propulseur reconnu — anomalie de détection à investiguer"
+        )
 
     parts = []
 
     for row in rows:
         details = []
 
-        if row.get("speed_factor") is not None:
+        details.append(
+            "type "
+            + escape(
+                str(
+                    row.get("kind")
+                    or "PROP"
+                )
+            )
+        )
+
+        group_name = str(
+            row.get("group_name")
+            or ""
+        ).strip()
+
+        if group_name:
             details.append(
-                "speedFactor "
+                "groupe "
+                + escape(group_name)
+            )
+
+        if row.get("speed_factor") is not None:
+            label = escape(
+                str(
+                    row.get("speed_factor_attribute")
+                    or "speedFactor"
+                )
+            )
+            details.append(
+                f"{label} "
                 + f'{row["speed_factor"]:.2f}'
             )
 
         if row.get("mass_addition") is not None:
+            label = escape(
+                str(
+                    row.get("mass_addition_attribute")
+                    or "massAddition"
+                )
+            )
             details.append(
-                "massAddition "
+                f"{label} "
                 + f'{row["mass_addition"]:,.0f} kg'
                 .replace(",", " ")
             )
 
         if row.get("thrust") is not None:
+            label = escape(
+                str(
+                    row.get("thrust_attribute")
+                    or "thrust"
+                )
+            )
             details.append(
-                "thrust "
+                f"{label} "
                 + f'{row["thrust"]:,.0f}'
                 .replace(",", " ")
             )
@@ -8534,15 +8687,12 @@ def format_propulsion_dogma_probe(rows):
         parts.append(
             f'{int(row["quantity"])}× '
             + escape(row["name"])
-            + (
-                " — "
-                + " • ".join(details)
-                if details
-                else " — attributs propulsion à compléter"
-            )
+            + " — "
+            + " • ".join(details)
         )
 
     return "<br>".join(parts)
+
 
 
 
@@ -9619,7 +9769,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4P-A
+    FREEBORN FITTINGS — Phase 4P-B
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -9725,7 +9875,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4P-A — FITTING / CAP / VITESSE</div>
+              <div class="pilot-engine-title">MOTEUR 4P-B — FITTING / CAP / VITESSE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -11146,7 +11296,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4P-A</strong>
+            <strong>ALL V — VALIDATION 4P-B</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -11197,15 +11347,16 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             par le fitting seul.
           </div>
           <div class="allv-warning" style="margin-top:10px">
-            <strong>VITESSE — MOTEUR 4P-A</strong><br>
+            <strong>VITESSE — MOTEUR 4P-B</strong><br>
             Hull BASE : {velocity_value} •
             ALL V, propulsion OFF : {all_v_velocity_value} •
             Navigation ALL V : 5/5<br>
             <span class="cap-audit-key">Propulsion équipée :</span><br>
             {propulsion_probe_html}<br>
             La vitesse AB/MWD active reste volontairement non déclarée dans
-            4P-A : Freeborn a maintenant les attributs Dogma du propulseur,
-            mais la formule thrust / masse doit être validée avant promotion.
+            4P-B. La détection a été durcie (nom du type + groupe + signature
+            Dogma) afin de valider d'abord les attributs réels du propulseur
+            avant d'appliquer la formule thrust / masse.
           </div>
         </div>
         {pilot_panel_html}
@@ -11234,7 +11385,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4P-A</span>
+    <span class="version">Freeborn Legacy • Fittings 4P-B</span>
   </footer>
 </main>
 
