@@ -8874,6 +8874,184 @@ def calculate_skill_aware_velocity(
     }
 
 
+
+def freeborn_dogma_rows_matching(
+    type_id,
+    *,
+    contains_names=(),
+):
+    """Return Dogma attributes whose normalized names match any fragment."""
+    rows = []
+
+    for row in get_type_dogma_attributes(type_id) or []:
+        name = str(
+            row.get("name")
+            or row.get("attribute_name")
+            or ""
+        )
+        normalized = name.lower()
+
+        if any(
+            fragment.lower() in normalized
+            for fragment in contains_names
+        ):
+            rows.append({
+                "name": name,
+                "value": row.get("value"),
+                "attribute_id": row.get("attribute_id"),
+            })
+
+    return rows
+
+
+def freeborn_weapon_dogma_audit(
+    eft_sections,
+    type_ids,
+):
+    """
+    Phase 4Q-A: discover weapon and damage-support Dogma data from the actual
+    fit. No final DPS is asserted yet.
+    """
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    weapons = []
+    upgrades = []
+
+    weapon_fragments = (
+        "damage multiplier",
+        "rate of fire",
+        "duration",
+        "launcher",
+        "missile",
+        "charge group",
+    )
+
+    upgrade_fragments = (
+        "missile damage",
+        "rate of fire bonus",
+        "speed multiplier",
+        "damage multiplier",
+    )
+
+    for type_id, quantity in counts.items():
+        metadata = get_eve_type_metadata(type_id)
+        name = str(
+            metadata.get("name")
+            or f"Type {type_id}"
+        )
+        group_name = str(
+            metadata.get("group_name")
+            or metadata.get("group")
+            or ""
+        )
+
+        low_name = name.lower()
+        low_group = group_name.lower()
+
+        is_weapon = any(token in low_name for token in (
+            "launcher",
+            "turret",
+            "blaster",
+            "railgun",
+            "autocannon",
+            "artillery",
+            "laser",
+        )) or any(token in low_group for token in (
+            "launcher",
+            "turret",
+        ))
+
+        is_upgrade = any(token in low_name for token in (
+            "ballistic control",
+            "heat sink",
+            "gyrostabilizer",
+            "magnetic field stabilizer",
+        ))
+
+        if is_weapon:
+            weapons.append({
+                "type_id": int(type_id),
+                "name": name,
+                "group": group_name,
+                "quantity": int(quantity),
+                "dogma": freeborn_dogma_rows_matching(
+                    type_id,
+                    contains_names=weapon_fragments,
+                ),
+            })
+
+        if is_upgrade:
+            upgrades.append({
+                "type_id": int(type_id),
+                "name": name,
+                "group": group_name,
+                "quantity": int(quantity),
+                "dogma": freeborn_dogma_rows_matching(
+                    type_id,
+                    contains_names=upgrade_fragments,
+                ),
+            })
+
+    return {
+        "weapons": weapons,
+        "upgrades": upgrades,
+    }
+
+
+def freeborn_render_dogma_rows(rows):
+    if not rows:
+        return '<span class="cap-audit-muted">Aucun attribut correspondant détecté</span>'
+
+    rendered = []
+    for row in rows:
+        rendered.append(
+            f'<span class="cap-audit-key">{escape(str(row["name"]))}</span>'
+            f' = {escape(str(row["value"]))}'
+            + (
+                f' <span class="cap-audit-muted">[#{escape(str(row["attribute_id"]))}]</span>'
+                if row.get("attribute_id") is not None
+                else ''
+            )
+        )
+    return "<br>".join(rendered)
+
+
+def freeborn_render_weapon_audit(audit):
+    chunks = []
+
+    if audit["weapons"]:
+        chunks.append('<strong>ARMES DÉTECTÉES</strong>')
+        for row in audit["weapons"]:
+            chunks.append(
+                f'<span class="cap-audit-key">{row["quantity"]}× {escape(row["name"])}</span>'
+                + (
+                    f' — {escape(row["group"])}'
+                    if row["group"] else ''
+                )
+                + '<br>'
+                + freeborn_render_dogma_rows(row["dogma"])
+            )
+    else:
+        chunks.append('<strong>ARMES DÉTECTÉES :</strong> aucune')
+
+    chunks.append('<br><strong>AMPLIFICATEURS DE DÉGÂTS DÉTECTÉS</strong>')
+
+    if audit["upgrades"]:
+        for row in audit["upgrades"]:
+            chunks.append(
+                f'<span class="cap-audit-key">{row["quantity"]}× {escape(row["name"])}</span>'
+                + '<br>'
+                + freeborn_render_dogma_rows(row["dogma"])
+            )
+    else:
+        chunks.append('Aucun')
+
+    return "<br>".join(chunks)
+
+
 def format_velocity(value):
     if value is None:
         return "—"
@@ -10048,7 +10226,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4P-D
+    FREEBORN FITTINGS — Phase 4Q-A
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -10154,7 +10332,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4P-D — FITTING / CAP / VITESSE</div>
+              <div class="pilot-engine-title">MOTEUR 4Q-A — FITTING / CAP / VITESSE / DPS</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -10364,6 +10542,15 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                 "propulsion_active_velocity_ms"
             ]
         )
+    )
+
+    # Phase 4Q-A — weapon / DPS Dogma discovery.
+    weapon_dogma_audit = freeborn_weapon_dogma_audit(
+        eft_sections,
+        eft_type_ids,
+    )
+    weapon_dogma_audit_html = freeborn_render_weapon_audit(
+        weapon_dogma_audit
     )
 
     # Phase 4O-F — capacitor engine.
@@ -11620,7 +11807,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4P-D</strong>
+            <strong>ALL V — VALIDATION 4Q-A</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -11700,6 +11887,15 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             restent hors couverture tant que leurs modificateurs Dogma
             spécifiques ne sont pas intégrés.
           </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            <strong>DPS — AUDIT DOGMA 4Q-A</strong><br>
+            Cette étape inventorie les armes et amplificateurs réellement
+            présents dans l'EFT avant tout calcul numérique de DPS.<br>
+            {weapon_dogma_audit_html}<br>
+            <span class="cap-audit-key">État :</span>
+            calcul DPS volontairement non déclaré en 4Q-A.
+          </div>
         </div>
         {pilot_panel_html}
       </article>
@@ -11727,7 +11923,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4P-D</span>
+    <span class="version">Freeborn Legacy • Fittings 4Q-A</span>
   </footer>
 </main>
 
