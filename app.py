@@ -7664,12 +7664,18 @@ button{{font:inherit}}
 .ship-render{{width:96%;height:225px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 18px 26px rgba(0,0,0,.84))}}
 .ship-placeholder{{color:#6d879b;letter-spacing:.15em;text-align:center}}
 .telemetry{{display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:6px}}
-.metric{{min-height:43px;border:1px solid rgba(49,185,255,.25);background:rgba(1,9,18,.55);padding:7px 9px}}
-.metric small{{display:block;color:#63c8ff;font-size:8px;letter-spacing:.12em;text-transform:uppercase}}
-.metric strong{{display:block;margin-top:4px;color:#e8f4fc;font:700 12px Consolas,monospace}}
+.metric{{min-height:43px;border:1px solid rgba(49,185,255,.25);background:rgba(1,9,18,.55);padding:6px 8px;display:grid;grid-template-columns:28px 1fr;grid-template-rows:auto auto;column-gap:8px;align-items:center}}
+.metric-icon{{grid-row:1/3;width:25px;height:25px;border:1px solid rgba(49,185,255,.40);display:grid;place-items:center;color:#6fd2ff;background:rgba(3,20,34,.72);font-size:16px;line-height:1;text-shadow:0 0 10px rgba(49,185,255,.35)}}
+.metric small{{display:block;color:#63c8ff;font-size:8px;letter-spacing:.12em;text-transform:uppercase;align-self:end}}
+.metric strong{{display:block;margin-top:2px;color:#e8f4fc;font:700 12px Consolas,monospace;align-self:start}}
 .metric .pending{{color:#71899d;font-weight:500}}
 .resists{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:6px}}
-.resist{{border:1px solid rgba(49,185,255,.18);background:rgba(2,10,19,.50);padding:6px 5px;text-align:center}}
+.resist{{border:1px solid rgba(49,185,255,.18);background:rgba(2,10,19,.50);padding:5px;text-align:center}}
+.resist-icon{{display:block;font-size:14px;line-height:1;margin-bottom:3px}}
+.resist.em .resist-icon{{color:#36b8ff}}
+.resist.therm .resist-icon{{color:#ff7b32}}
+.resist.kin .resist-icon{{color:#c6d0d8}}
+.resist.exp .resist-icon{{color:#ffc13b}}
 .resist span{{display:block;color:#6b879d;font-size:8px;text-transform:uppercase;letter-spacing:.08em}}
 .resist b{{display:block;margin-top:3px;color:#aebfcd;font:10px Consolas,monospace}}
 .actionbar{{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:6px;padding:0 7px 7px}}
@@ -7772,17 +7778,17 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
       <article class="hud-panel">
         <div class="panel-title"><span class="slot-symbol">T</span>Télémétrie du fitting<span class="panel-code">STATS</span></div>
         <div class="telemetry">
-          <div class="metric"><small>CPU</small><strong class="pending">— / — tf</strong></div>
-          <div class="metric"><small>Powergrid</small><strong class="pending">— / — MW</strong></div>
-          <div class="metric"><small>Capaciteur</small><strong class="pending">À calculer</strong></div>
-          <div class="metric"><small>Vitesse</small><strong class="pending">À calculer</strong></div>
-          <div class="metric"><small>DPS</small><strong class="pending">À calculer</strong></div>
-          <div class="metric"><small>EHP</small><strong class="pending">À calculer</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU</small><strong class="pending">— / — tf</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">ϟ</span><small>Powergrid</small><strong class="pending">— / — MW</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">◫</span><small>Capaciteur</small><strong class="pending">À calculer</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">➤</span><small>Vitesse</small><strong class="pending">À calculer</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">À calculer</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP</small><strong class="pending">À calculer</strong></div>
           <div class="resists">
-            <div class="resist"><span>EM</span><b>—</b></div>
-            <div class="resist"><span>Therm</span><b>—</b></div>
-            <div class="resist"><span>Kin</span><b>—</b></div>
-            <div class="resist"><span>Exp</span><b>—</b></div>
+            <div class="resist em"><i class="resist-icon" aria-hidden="true">✦</i><span>EM</span><b>—</b></div>
+            <div class="resist therm"><i class="resist-icon" aria-hidden="true">♨</i><span>Therm</span><b>—</b></div>
+            <div class="resist kin"><i class="resist-icon" aria-hidden="true">◈</i><span>Kin</span><b>—</b></div>
+            <div class="resist exp"><i class="resist-icon" aria-hidden="true">✹</i><span>Exp</span><b>—</b></div>
           </div>
         </div>
       </article>
