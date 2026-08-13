@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import os
+import re
 from html import escape
 from urllib.parse import urlencode
 
@@ -7367,27 +7368,100 @@ def parse_eft_web_sections(eft_text):
     return sections
 
 
-def format_eft_web_items(items):
-    """Collapse identical EFT lines and return safe HTML rows."""
+def normalize_eft_item_name(line):
+    """Return the inventory type name represented by one EFT line."""
+    clean = str(line or "").strip()
+    if not clean:
+        return ""
+
+    # Fitted charges/scripts follow the module after a comma. The icon we
+    # want for the slot row is the fitted module itself.
+    clean = clean.split(",", 1)[0].strip()
+
+    # Cargo/drone EFT exports may append quantities as `x1234`.
+    clean = re.sub(r"\s+x\d+$", "", clean, flags=re.IGNORECASE).strip()
+    return clean
+
+
+def resolve_eve_inventory_type_ids(type_names):
+    """Resolve many exact EVE inventory names in one public ESI request."""
+    names = []
+    seen = set()
+    for value in type_names:
+        clean = normalize_eft_item_name(value)
+        key = clean.casefold()
+        if clean and key not in seen:
+            names.append(clean)
+            seen.add(key)
+
+    if not names:
+        return {}
+
+    try:
+        response = requests.post(
+            f"{ESI_BASE_URL}/universe/ids/",
+            json=names,
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return {
+            str(item.get("name", "")).casefold(): int(item["id"])
+            for item in payload.get("inventory_types", [])
+            if item.get("name") and item.get("id")
+        }
+    except Exception as error:
+        print("Freeborn Fittings ESI batch type resolution failed:", repr(error))
+        return {}
+
+
+def eve_type_icon_url(type_id, size=64):
+    if not type_id:
+        return None
+    return (
+        f"https://images.evetech.net/types/{int(type_id)}/icon"
+        f"?size={int(size)}&tenant=tranquility"
+    )
+
+
+def format_eft_web_items(items, type_ids=None):
+    """Collapse identical EFT lines and render EVE inventory icons."""
     if not items:
         return '<div class="slot-empty">Aucun module renseigné</div>'
+
+    type_ids = type_ids or {}
     collapsed = []
     for line in items:
         if collapsed and collapsed[-1][0] == line:
             collapsed[-1][1] += 1
         else:
             collapsed.append([line, 1])
+
     html = []
     for line, count in collapsed:
+        item_name = normalize_eft_item_name(line)
+        type_id = type_ids.get(item_name.casefold())
+        icon_url = eve_type_icon_url(type_id, 64)
+        icon_html = (
+            f'<img class="item-icon" src="{escape(icon_url)}" alt="" loading="lazy">'
+            if icon_url
+            else '<span class="item-icon item-icon-fallback">◆</span>'
+        )
         html.append(
-            f'<div class="slot-item"><span class="slot-qty">{count}×</span><span>{escape(line)}</span></div>'
+            '<div class="slot-item">'
+            f'{icon_html}'
+            f'<span class="slot-qty">{count}×</span>'
+            f'<span class="slot-label">{escape(line)}</span>'
+            '</div>'
         )
     return "".join(html)
 
-
 def freeborn_fitting_web_page(fit):
     """
-    FREEBORN FITTINGS — Phase 4F
+    FREEBORN FITTINGS — Phase 4G
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -7452,20 +7526,29 @@ def freeborn_fitting_web_page(fit):
     eft_sections = parse_eft_web_sections(
         fit.get("eft_text")
     )
-    low_html = format_eft_web_items(
+    all_eft_items = (
         eft_sections["low"]
+        + eft_sections["mid"]
+        + eft_sections["high"]
+        + eft_sections["rigs"]
+        + eft_sections["extras"]
+    )
+    eft_type_ids = resolve_eve_inventory_type_ids(all_eft_items)
+
+    low_html = format_eft_web_items(
+        eft_sections["low"], eft_type_ids
     )
     mid_html = format_eft_web_items(
-        eft_sections["mid"]
+        eft_sections["mid"], eft_type_ids
     )
     high_html = format_eft_web_items(
-        eft_sections["high"]
+        eft_sections["high"], eft_type_ids
     )
     rigs_html = format_eft_web_items(
-        eft_sections["rigs"]
+        eft_sections["rigs"], eft_type_ids
     )
     extras_html = format_eft_web_items(
-        eft_sections["extras"]
+        eft_sections["extras"], eft_type_ids
     )
 
     return f'''<!doctype html>
@@ -7509,7 +7592,7 @@ body{{
     linear-gradient(rgba(1,5,12,.40),rgba(1,5,12,.72)),
     url('/assets/bg-space.jpg') center/cover fixed no-repeat,
     #020711;
-  padding:8px;
+  padding:5px;
 }}
 button{{font:inherit}}
 .app-shell{{
@@ -7536,48 +7619,51 @@ button{{font:inherit}}
   grid-template-columns:94px 1fr auto;
   gap:18px;
   align-items:center;
-  padding:10px 24px;
-  min-height:98px;
+  padding:8px 22px;
+  min-height:90px;
   border-bottom:1px solid var(--line2);
   background:linear-gradient(90deg,rgba(2,11,23,.94),rgba(5,21,40,.72),rgba(2,8,17,.92));
 }}
-.logo{{width:86px;filter:drop-shadow(0 0 13px rgba(44,187,255,.22))}}
+.logo{{width:80px;filter:drop-shadow(0 0 13px rgba(44,187,255,.22))}}
 .brand h1{{margin:0;font-size:clamp(25px,3vw,42px);line-height:1;font-weight:560;letter-spacing:.08em;text-transform:uppercase;color:#eef6ff}}
 .brand h1 span{{color:var(--gold2);font-weight:640}}
-.brand p{{margin:7px 0 0;color:#c6d8e8;font-size:10px;letter-spacing:.19em;text-transform:uppercase}}
+.brand p{{margin:5px 0 0;color:#c6d8e8;font-size:10px;letter-spacing:.19em;text-transform:uppercase}}
 .status-badge{{border:1px solid var(--status);color:var(--status);background:color-mix(in srgb,var(--status) 9%,rgba(2,8,16,.96));padding:10px 15px;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;white-space:nowrap;box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
-.fit-ref-line{{padding:8px 18px 7px;color:var(--cyan2);border-bottom:1px solid rgba(49,185,255,.18);background:rgba(1,8,17,.74);font:10px/1.2 Consolas,monospace;letter-spacing:.16em;text-transform:uppercase}}
-.main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(360px,1.08fr) minmax(390px,1.15fr);gap:9px;padding:9px}}
-.stack{{display:flex;flex-direction:column;gap:8px;min-width:0}}
+.fit-ref-line{{padding:6px 18px 5px;color:var(--cyan2);border-bottom:1px solid rgba(49,185,255,.18);background:rgba(1,8,17,.74);font:10px/1.2 Consolas,monospace;letter-spacing:.16em;text-transform:uppercase}}
+.main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(360px,1.08fr) minmax(390px,1.15fr);gap:7px;padding:7px}}
+.stack{{display:flex;flex-direction:column;gap:6px;min-width:0}}
 .hud-panel{{position:relative;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(5,20,38,.88),rgba(2,8,17,.94));box-shadow:inset 0 0 24px rgba(39,186,255,.025),0 0 10px rgba(0,0,0,.18)}}
 .hud-panel:before{{content:"";position:absolute;left:-1px;top:-1px;width:28px;height:2px;background:var(--cyan);box-shadow:0 0 8px rgba(53,199,255,.35)}}
-.panel-title{{display:flex;align-items:center;gap:9px;min-height:35px;padding:7px 10px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:11px;font-weight:780;letter-spacing:.12em;text-transform:uppercase}}
+.panel-title{{display:flex;align-items:center;gap:9px;min-height:31px;padding:5px 9px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:11px;font-weight:780;letter-spacing:.12em;text-transform:uppercase}}
 .panel-code{{margin-left:auto;color:#6389a5;font:9px Consolas,monospace;letter-spacing:.12em}}
 .slot-symbol{{width:20px;height:20px;flex:0 0 20px;display:grid;place-items:center;border:1px solid var(--cyan);border-radius:50%;color:var(--cyan2);background:rgba(16,108,174,.20);font:800 10px Consolas,monospace;box-shadow:0 0 9px rgba(53,199,255,.12)}}
 .slot-symbol.low{{border-color:#9ab3c6;color:#d5e3ee}}
 .slot-symbol.rig{{border-radius:3px;border-color:#8bd9ff}}
-.slot-body{{padding:7px 10px 9px}}
-.slot-item{{display:grid;grid-template-columns:31px 1fr;gap:7px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.035);color:#dcecf8;font-size:11px;line-height:1.28}}
+.slot-body{{padding:5px 9px 7px}}
+.slot-item{{display:grid;grid-template-columns:28px 27px 1fr;align-items:center;gap:5px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.035);color:#dcecf8;font-size:11px;line-height:1.28}}
 .slot-item:last-child{{border-bottom:0}}
 .slot-qty{{color:var(--gold2);font-family:Consolas,monospace}}
+.item-icon{{width:24px;height:24px;object-fit:cover;border:1px solid rgba(49,185,255,.26);background:#07101a;box-shadow:0 0 7px rgba(53,199,255,.08)}}
+.item-icon-fallback{{display:grid;place-items:center;color:#55758c;font-size:9px}}
+.slot-label{{min-width:0;overflow:hidden;text-overflow:ellipsis}}
 .slot-empty{{color:#627c91;font-size:11px;font-style:italic;padding:5px 0}}
-.identity-panel{{padding:13px 15px 14px}}
+.identity-panel{{padding:10px 13px 11px}}
 .eyebrow{{color:var(--cyan2);font:10px Consolas,monospace;letter-spacing:.15em;text-transform:uppercase}}
-.ship-name{{margin:7px 0 0;color:#eef6ff;font-size:clamp(17px,1.8vw,25px);font-weight:650;letter-spacing:.10em;text-transform:uppercase}}
-.fit-name{{margin:5px 0 12px;color:var(--gold2);font-size:clamp(15px,1.7vw,22px);line-height:1.12;font-weight:600;letter-spacing:.055em;text-transform:uppercase}}
+.ship-name{{margin:5px 0 0;color:#eef6ff;font-size:clamp(17px,1.8vw,25px);font-weight:650;letter-spacing:.10em;text-transform:uppercase}}
+.fit-name{{margin:4px 0 9px;color:var(--gold2);font-size:clamp(15px,1.7vw,22px);line-height:1.12;font-weight:600;letter-spacing:.055em;text-transform:uppercase}}
 .info-grid{{display:grid;grid-template-columns:1fr 1fr;gap:7px}}
 .info-cell{{border:1px solid rgba(49,185,255,.24);background:rgba(2,10,20,.45);padding:8px 10px}}
 .info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:9px;letter-spacing:.13em;text-transform:uppercase}}
 .info-cell strong{{font-size:12px;color:#eef6ff}}
-.notes-body{{min-height:72px;padding:11px 12px;color:#d7e7f4;white-space:pre-wrap;font-size:12px;line-height:1.42}}
+.notes-body{{min-height:60px;padding:8px 10px;color:#d7e7f4;white-space:pre-wrap;font-size:12px;line-height:1.42}}
 .hold-panel .slot-body{{max-height:190px;overflow:auto}}
-.ship-panel{{min-height:294px;display:grid;grid-template-rows:auto 1fr}}
-.ship-stage{{position:relative;min-height:255px;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,145,255,.14),transparent 44%),linear-gradient(90deg,transparent 49.8%,rgba(49,185,255,.08) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(49,185,255,.06) 50%,transparent 50.2%)}}
+.ship-panel{{min-height:270px;display:grid;grid-template-rows:auto 1fr}}
+.ship-stage{{position:relative;min-height:225px;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,145,255,.14),transparent 44%),linear-gradient(90deg,transparent 49.8%,rgba(49,185,255,.08) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(49,185,255,.06) 50%,transparent 50.2%)}}
 .ship-stage:before{{content:"";position:absolute;width:64%;aspect-ratio:1;border:1px solid rgba(49,185,255,.09);border-radius:50%;box-shadow:0 0 0 45px rgba(49,185,255,.018),0 0 0 90px rgba(49,185,255,.012)}}
-.ship-render{{width:96%;height:255px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 18px 26px rgba(0,0,0,.84))}}
+.ship-render{{width:96%;height:225px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 18px 26px rgba(0,0,0,.84))}}
 .ship-placeholder{{color:#6d879b;letter-spacing:.15em;text-align:center}}
-.telemetry{{display:grid;grid-template-columns:1fr 1fr;gap:7px;padding:8px}}
-.metric{{min-height:50px;border:1px solid rgba(49,185,255,.25);background:rgba(1,9,18,.55);padding:7px 9px}}
+.telemetry{{display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:6px}}
+.metric{{min-height:43px;border:1px solid rgba(49,185,255,.25);background:rgba(1,9,18,.55);padding:7px 9px}}
 .metric small{{display:block;color:#63c8ff;font-size:8px;letter-spacing:.12em;text-transform:uppercase}}
 .metric strong{{display:block;margin-top:4px;color:#e8f4fc;font:700 12px Consolas,monospace}}
 .metric .pending{{color:#71899d;font-weight:500}}
@@ -7585,8 +7671,8 @@ button{{font:inherit}}
 .resist{{border:1px solid rgba(49,185,255,.18);background:rgba(2,10,19,.50);padding:6px 5px;text-align:center}}
 .resist span{{display:block;color:#6b879d;font-size:8px;text-transform:uppercase;letter-spacing:.08em}}
 .resist b{{display:block;margin-top:3px;color:#aebfcd;font:10px Consolas,monospace}}
-.actionbar{{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:7px;padding:0 9px 9px}}
-.action{{appearance:none;min-height:38px;border:1px solid rgba(214,168,60,.75);background:linear-gradient(180deg,rgba(214,168,60,.14),rgba(214,168,60,.025));color:#f4d576;padding:8px 11px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:.16s ease}}
+.actionbar{{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:6px;padding:0 7px 7px}}
+.action{{appearance:none;min-height:34px;border:1px solid rgba(214,168,60,.75);background:linear-gradient(180deg,rgba(214,168,60,.14),rgba(214,168,60,.025));color:#f4d576;padding:8px 11px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:.16s ease}}
 .action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 15px rgba(214,168,60,.14)}}
 .action.blue{{border-color:rgba(49,185,255,.80);background:linear-gradient(180deg,rgba(21,156,255,.15),rgba(21,156,255,.025));color:#71d2ff}}
 .action.green{{border-color:rgba(121,221,115,.70);background:linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.02));color:#9cec94}}
@@ -7597,7 +7683,7 @@ button{{font:inherit}}
 .eft-head{{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;color:var(--gold2);font-size:10px;letter-spacing:.11em;text-transform:uppercase}}
 .eft-source{{color:#7290a8;font:9px Consolas,monospace}}
 pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(255,255,255,.05);background:#040914;color:#d9e8f5;font:11px/1.40 Consolas,"Courier New",monospace;white-space:pre-wrap}}
-.footer{{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:center;padding:9px 18px;border-top:1px solid var(--line2);color:#7fa4be;background:rgba(1,7,14,.70);font-size:9px;letter-spacing:.12em;text-transform:uppercase}}
+.footer{{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:center;padding:7px 16px;border-top:1px solid var(--line2);color:#7fa4be;background:rgba(1,7,14,.70);font-size:9px;letter-spacing:.12em;text-transform:uppercase}}
 .footer .motto{{color:var(--cyan2)}}
 .footer .id{{color:var(--gold2);font-family:Consolas,monospace}}
 .footer .version{{text-align:right}}
@@ -7640,19 +7726,19 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <section class="main-grid">
     <div class="stack left-col">
       <article class="hud-panel">
-        <div class="panel-title"><span class="slot-symbol">H</span>Emplacements hauts<span class="panel-code">HIGH</span></div>
+        <div class="panel-title"><span class="slot-symbol">▲</span>Emplacements hauts<span class="panel-code">HIGH</span></div>
         <div class="slot-body">{high_html}</div>
       </article>
       <article class="hud-panel">
-        <div class="panel-title"><span class="slot-symbol">M</span>Emplacements intermédiaires<span class="panel-code">MID</span></div>
+        <div class="panel-title"><span class="slot-symbol">◆</span>Emplacements intermédiaires<span class="panel-code">MID</span></div>
         <div class="slot-body">{mid_html}</div>
       </article>
       <article class="hud-panel">
-        <div class="panel-title"><span class="slot-symbol low">L</span>Emplacements bas<span class="panel-code">LOW</span></div>
+        <div class="panel-title"><span class="slot-symbol low">▼</span>Emplacements bas<span class="panel-code">LOW</span></div>
         <div class="slot-body">{low_html}</div>
       </article>
       <article class="hud-panel">
-        <div class="panel-title"><span class="slot-symbol rig">R</span>Rigs<span class="panel-code">RIG</span></div>
+        <div class="panel-title"><span class="slot-symbol rig">◇</span>Rigs<span class="panel-code">RIG</span></div>
         <div class="slot-body">{rigs_html}</div>
       </article>
     </div>
@@ -7668,7 +7754,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
       </article>
       <article class="hud-panel hold-panel">
-        <div class="panel-title"><span class="slot-symbol">C</span>Drones / Cargaison / Compléments<span class="panel-code">HOLD</span></div>
+        <div class="panel-title"><span class="slot-symbol">▦</span>Drones / Cargaison / Compléments<span class="panel-code">HOLD</span></div>
         <div class="slot-body">{extras_html}</div>
       </article>
       <article class="hud-panel">
@@ -7723,7 +7809,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4F</span>
+    <span class="version">Freeborn Legacy • Fittings 4G</span>
   </footer>
 </main>
 
