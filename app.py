@@ -8232,6 +8232,320 @@ def _eft_fitted_module_counts(eft_sections, type_ids):
     return counts
 
 
+
+def find_dogma_attribute_by_names(
+    type_id,
+    exact_names=(),
+    contains_names=(),
+):
+    """
+    Resolve one Dogma attribute from the actual type attributes + public ESI
+    attribute metadata.
+
+    Exact normalized metadata-name matches win. contains_names are fallback
+    probes only; no guessed numeric attribute IDs are required.
+    """
+    dogma = get_eve_type_dogma(type_id)
+
+    if not dogma:
+        return None
+
+    exact = {
+        str(name).strip().casefold()
+        for name in exact_names
+        if str(name).strip()
+    }
+    contains = tuple(
+        str(name).strip().casefold()
+        for name in contains_names
+        if str(name).strip()
+    )
+
+    fallback = []
+
+    for attribute_id, value in dogma.items():
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or ""
+        ).strip()
+        display_name = str(
+            metadata.get("display_name")
+            or ""
+        ).strip()
+
+        normalized_name = name.casefold()
+        normalized_display = display_name.casefold()
+
+        if (
+            normalized_name in exact
+            or normalized_display in exact
+        ):
+            return {
+                "attribute_id": int(attribute_id),
+                "name": name,
+                "display_name": display_name,
+                "value": float(value),
+            }
+
+        haystack = (
+            normalized_name
+            + " "
+            + normalized_display
+        )
+
+        if (
+            contains
+            and any(
+                token in haystack
+                for token in contains
+            )
+        ):
+            fallback.append({
+                "attribute_id": int(attribute_id),
+                "name": name,
+                "display_name": display_name,
+                "value": float(value),
+            })
+
+    if len(fallback) == 1:
+        return fallback[0]
+
+    return None
+
+
+def get_ship_base_max_velocity(ship_type_id):
+    """
+    Return the hull's raw maxVelocity Dogma attribute in m/s.
+    """
+    row = find_dogma_attribute_by_names(
+        ship_type_id,
+        exact_names=(
+            "maxVelocity",
+            "Max Velocity",
+        ),
+    )
+
+    return (
+        float(row["value"])
+        if row
+        else None
+    )
+
+
+def find_fitted_propulsion_modules(
+    eft_sections,
+    type_ids,
+):
+    """
+    Find fitted Afterburner/Microwarpdrive modules and expose the relevant
+    propulsion Dogma attributes.
+
+    4P-A is intentionally a probe: it does NOT yet claim an active-module
+    velocity until thrust/mass application has been validated.
+    """
+    rows = []
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    for type_id, quantity in counts.items():
+        group_name = get_eve_type_group_name(
+            type_id
+        ).casefold()
+
+        if (
+            "microwarpdrive" not in group_name
+            and "afterburner" not in group_name
+        ):
+            continue
+
+        metadata = get_eve_type_metadata(
+            type_id
+        )
+
+        speed_factor = find_dogma_attribute_by_names(
+            type_id,
+            exact_names=(
+                "speedFactor",
+                "Speed Factor",
+                "maxVelocityBonus",
+                "Maximum Velocity Bonus",
+            ),
+            contains_names=(
+                "speed factor",
+                "velocity bonus",
+            ),
+        )
+
+        mass_addition = find_dogma_attribute_by_names(
+            type_id,
+            exact_names=(
+                "massAddition",
+                "Mass Addition",
+            ),
+            contains_names=(
+                "mass addition",
+            ),
+        )
+
+        thrust = find_dogma_attribute_by_names(
+            type_id,
+            exact_names=(
+                "thrust",
+                "Thrust",
+            ),
+            contains_names=(
+                "thrust",
+            ),
+        )
+
+        rows.append({
+            "type_id": int(type_id),
+            "name": str(
+                metadata.get("name")
+                or f"Type {type_id}"
+            ),
+            "quantity": int(quantity),
+            "group_name": get_eve_type_group_name(
+                type_id
+            ),
+            "speed_factor": (
+                speed_factor["value"]
+                if speed_factor
+                else None
+            ),
+            "mass_addition": (
+                mass_addition["value"]
+                if mass_addition
+                else None
+            ),
+            "thrust": (
+                thrust["value"]
+                if thrust
+                else None
+            ),
+        })
+
+    return rows
+
+
+def calculate_skill_aware_velocity(
+    ship_type_id,
+    *,
+    mode="all_v",
+    skills_snapshot=None,
+):
+    """
+    Phase 4P-A propulsion-OFF velocity.
+
+    Navigation:
+        +5% maximum sub-warp velocity per skill level.
+
+    Active AB/MWD velocity is intentionally not included yet. That next layer
+    will use the propulsion module's actual Dogma thrust/mass attributes.
+    """
+    base_velocity = get_ship_base_max_velocity(
+        ship_type_id
+    )
+
+    context = freeborn_fitting_skill_context(
+        mode=mode,
+        skills_snapshot=skills_snapshot,
+    )
+
+    navigation_level = (
+        freeborn_context_named_skill_level(
+            context,
+            "Navigation",
+        )
+    )
+
+    velocity = (
+        float(base_velocity)
+        * (
+            1.0
+            + (0.05 * navigation_level)
+        )
+        if base_velocity is not None
+        else None
+    )
+
+    return {
+        "mode": context["mode"],
+        "navigation_level": navigation_level,
+        "base_velocity_ms": base_velocity,
+        "propulsion_off_velocity_ms": velocity,
+    }
+
+
+def format_velocity(value):
+    if value is None:
+        return "—"
+
+    value = float(value)
+
+    if abs(value - round(value)) < 0.05:
+        return (
+            f"{int(round(value)):,} m/s"
+            .replace(",", " ")
+        )
+
+    return (
+        f"{value:,.1f} m/s"
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+
+def format_propulsion_dogma_probe(rows):
+    if not rows:
+        return "Aucun propulseur équipé"
+
+    parts = []
+
+    for row in rows:
+        details = []
+
+        if row.get("speed_factor") is not None:
+            details.append(
+                "speedFactor "
+                + f'{row["speed_factor"]:.2f}'
+            )
+
+        if row.get("mass_addition") is not None:
+            details.append(
+                "massAddition "
+                + f'{row["mass_addition"]:,.0f} kg'
+                .replace(",", " ")
+            )
+
+        if row.get("thrust") is not None:
+            details.append(
+                "thrust "
+                + f'{row["thrust"]:,.0f}'
+                .replace(",", " ")
+            )
+
+        parts.append(
+            f'{int(row["quantity"])}× '
+            + escape(row["name"])
+            + (
+                " — "
+                + " • ".join(details)
+                if details
+                else " — attributs propulsion à compléter"
+            )
+        )
+
+    return "<br>".join(parts)
+
+
+
 def calculate_base_fitting_resources(
     ship_type_id,
     eft_sections,
@@ -9305,7 +9619,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4O-D
+    FREEBORN FITTINGS — Phase 4P-A
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -9411,7 +9725,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4O-J — FITTING / CAPACITEUR</div>
+              <div class="pilot-engine-title">MOTEUR 4P-A — FITTING / CAP / VITESSE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -9436,6 +9750,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
               <div class="pilot-engine-row">
                 <span>Capacitor Systems Operation</span>
                 <b id="pilot-cap-systems">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Navigation</span>
+                <b id="pilot-navigation">—</b>
               </div>
 
               <div class="pilot-engine-separator"></div>
@@ -9476,6 +9794,8 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                   <span>Recharge capacitor</span><b id="pilot-cap-recharge">—</b>
                   <span>Drain continu</span><b id="pilot-cap-drain">—</b>
                   <span>Projection</span><b id="pilot-cap-state">—</b>
+                  <span>Vitesse prop. OFF</span><b id="pilot-velocity-off">—</b>
+                  <span>Écart vitesse ALL V</span><b id="pilot-delta-velocity">—</b>
                 </div>
               </div>
 
@@ -9563,6 +9883,45 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             base_resources["power_output"],
             base_resources["power_complete"],
             "MW",
+        )
+    )
+
+    base_velocity = get_ship_base_max_velocity(
+        fit.get("ship_type_id")
+    )
+
+    velocity_value = escape(
+        format_velocity(
+            base_velocity
+        )
+    )
+
+    velocity_title = escape(
+        "Vitesse maximale BASE du hull, propulsion désactivée. "
+        "Navigation et effets AB/MWD ne sont pas appliqués à cette valeur."
+    )
+
+    all_v_velocity = calculate_skill_aware_velocity(
+        fit.get("ship_type_id"),
+        mode="all_v",
+    )
+
+    propulsion_probe = find_fitted_propulsion_modules(
+        eft_sections,
+        eft_type_ids,
+    )
+
+    propulsion_probe_html = (
+        format_propulsion_dogma_probe(
+            propulsion_probe
+        )
+    )
+
+    all_v_velocity_value = escape(
+        format_velocity(
+            all_v_velocity[
+                "propulsion_off_velocity_ms"
+            ]
         )
     )
 
@@ -9798,7 +10157,15 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     )
 
 
+    character_velocity = None
+
     if pilot_profile:
+        character_velocity = calculate_skill_aware_velocity(
+            fit.get("ship_type_id"),
+            mode="character",
+            skills_snapshot=pilot_profile.get("skills_snapshot") or [],
+        )
+
         character_core = calculate_skill_aware_fitting_resources(
             fit.get("ship_type_id"),
             eft_sections,
@@ -10023,6 +10390,45 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                         else "Indéterminé"
                     )
                     if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-navigation">—</b>',
+                '<b id="pilot-navigation">'
+                + escape(
+                    f'{character_velocity["navigation_level"]}/5'
+                    if character_velocity else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-velocity-off">—</b>',
+                '<b id="pilot-velocity-off">'
+                + escape(
+                    format_velocity(
+                        character_velocity[
+                            "propulsion_off_velocity_ms"
+                        ]
+                    )
+                    if character_velocity else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-velocity">—</b>',
+                '<b id="pilot-delta-velocity">'
+                + escape(
+                    format_engine_delta(
+                        character_velocity[
+                            "propulsion_off_velocity_ms"
+                        ],
+                        all_v_velocity[
+                            "propulsion_off_velocity_ms"
+                        ],
+                        "m/s",
+                    )
+                    if character_velocity else "—"
                 )
                 + '</b>',
             )
@@ -10728,7 +11134,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           <div class="metric" title="Valeur Dogma de base — compétences et modificateurs avancés non appliqués"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU <em class="metric-mode">BASE</em></small><strong>{cpu_value}</strong></div>
           <div class="metric" title="Valeur Dogma de base — compétences et modificateurs avancés non appliqués"><span class="metric-icon" aria-hidden="true">ϟ</span><small>Powergrid <em class="metric-mode">BASE</em></small><strong>{power_value}</strong></div>
           <div class="metric" title="{capacitor_title}"><span class="metric-icon" aria-hidden="true">◫</span><small>Capaciteur <em class="metric-mode">BASE</em></small><strong>{capacitor_value}</strong></div>
-          <div class="metric"><span class="metric-icon" aria-hidden="true">➤</span><small>Vitesse</small><strong class="pending">À calculer</strong></div>
+          <div class="metric" title="{velocity_title}"><span class="metric-icon" aria-hidden="true">➤</span><small>Vitesse <em class="metric-mode">BASE</em></small><strong>{velocity_value}</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">À calculer</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP</small><strong class="pending">À calculer</strong></div>
           <div class="resists">
@@ -10740,7 +11146,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4O-J</strong>
+            <strong>ALL V — VALIDATION 4P-A</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -10790,6 +11196,17 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             disponibilité dépend de la cible et ne peut pas être garantie
             par le fitting seul.
           </div>
+          <div class="allv-warning" style="margin-top:10px">
+            <strong>VITESSE — MOTEUR 4P-A</strong><br>
+            Hull BASE : {velocity_value} •
+            ALL V, propulsion OFF : {all_v_velocity_value} •
+            Navigation ALL V : 5/5<br>
+            <span class="cap-audit-key">Propulsion équipée :</span><br>
+            {propulsion_probe_html}<br>
+            La vitesse AB/MWD active reste volontairement non déclarée dans
+            4P-A : Freeborn a maintenant les attributs Dogma du propulseur,
+            mais la formule thrust / masse doit être validée avant promotion.
+          </div>
         </div>
         {pilot_panel_html}
       </article>
@@ -10817,7 +11234,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4O-J</span>
+    <span class="version">Freeborn Legacy • Fittings 4P-A</span>
   </footer>
 </main>
 
