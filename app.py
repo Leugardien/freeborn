@@ -235,6 +235,22 @@ STAFF_ROLE_IDS = SYSTEM_ADMIN_ROLE_IDS
 
 
 # ============================================================
+# FREEBORN FITTINGS — ACCESS
+# ============================================================
+
+FITTING_CREATOR_ROLE_IDS = configured_role_ids(
+    DISCORD_MEMBER_ROLE_ID,
+    DISCORD_VETERAN_ROLE_ID,
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+    DISCORD_OFFICER_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+
+# ============================================================
 # URLS
 # ============================================================
 
@@ -537,6 +553,46 @@ def init_database():
                             REFERENCES discord_guilds (guild_id)
                             ON DELETE CASCADE
                     );
+                    """
+                )
+
+                # ====================================================
+                # FREEBORN FITTINGS — PHASE 1
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS fits (
+                        fit_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        ship_name TEXT NOT NULL,
+                        usage TEXT NOT NULL,
+                        eft_text TEXT NOT NULL,
+                        notes TEXT,
+                        status TEXT NOT NULL DEFAULT 'proposed'
+                            CHECK (status IN ('proposed', 'testing', 'approved')),
+                        created_by_discord_user_id TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_fits_guild_ship
+                    ON fits (guild_id, ship_name);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_fits_guild_status
+                    ON fits (guild_id, status);
                     """
                 )
 
@@ -3151,6 +3207,222 @@ def build_member_list_message():
     return "\n".join(
         output_lines
     )
+
+
+# ============================================================
+# FREEBORN FITTINGS — PHASE 1 HELPERS
+# ============================================================
+
+def parse_eft_header(eft_text):
+    """Extract ship and optional fit name from the first EFT header line."""
+
+    normalized = str(eft_text or "").strip()
+
+    if not normalized:
+        raise ValueError("Le champ EFT est vide.")
+
+    first_line = normalized.splitlines()[0].strip()
+
+    if not (first_line.startswith("[") and first_line.endswith("]")):
+        raise ValueError(
+            "Le format EFT doit commencer par une ligne du type "
+            "[Vaisseau, Nom du fit]."
+        )
+
+    header = first_line[1:-1].strip()
+
+    if not header:
+        raise ValueError("Le nom du vaisseau est introuvable dans l'EFT.")
+
+    parts = [part.strip() for part in header.split(",", 1)]
+    ship_name = parts[0]
+    eft_fit_name = parts[1] if len(parts) > 1 else ""
+
+    if not ship_name:
+        raise ValueError("Le nom du vaisseau est introuvable dans l'EFT.")
+
+    return {
+        "ship_name": ship_name,
+        "eft_fit_name": eft_fit_name,
+        "normalized_eft": normalized,
+    }
+
+
+def save_fit_phase1(
+    guild_id,
+    discord_user_id,
+    fit_name,
+    usage,
+    eft_text,
+    notes=None,
+):
+    parsed = parse_eft_header(eft_text)
+
+    clean_name = str(fit_name or "").strip() or parsed["eft_fit_name"]
+    clean_usage = str(usage or "").strip()
+    clean_notes = str(notes or "").strip() or None
+
+    if not clean_name:
+        raise ValueError("Le nom du fit est obligatoire.")
+
+    if not clean_usage:
+        raise ValueError("L'usage du fit est obligatoire.")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fits (
+                    guild_id,
+                    name,
+                    ship_name,
+                    usage,
+                    eft_text,
+                    notes,
+                    status,
+                    created_by_discord_user_id,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s,
+                    'proposed', %s, NOW(), NOW()
+                )
+                RETURNING fit_id;
+                """,
+                (
+                    str(guild_id),
+                    clean_name,
+                    parsed["ship_name"],
+                    clean_usage,
+                    parsed["normalized_eft"],
+                    clean_notes,
+                    str(discord_user_id),
+                ),
+            )
+
+            fit_id = cur.fetchone()[0]
+
+        conn.commit()
+
+    return {
+        "fit_id": int(fit_id),
+        "name": clean_name,
+        "ship_name": parsed["ship_name"],
+        "usage": clean_usage,
+        "notes": clean_notes,
+        "status": "proposed",
+    }
+
+
+def modal_values(data):
+    """Flatten Discord modal action rows into {custom_id: value}."""
+
+    values = {}
+
+    for row in (data.get("data") or {}).get("components", []):
+        for component in row.get("components", []):
+            custom_id = component.get("custom_id")
+
+            if custom_id:
+                values[str(custom_id)] = component.get("value", "")
+
+    return values
+
+
+def handle_fit_modal_submit(data):
+    custom_id = str((data.get("data") or {}).get("custom_id") or "")
+
+    if custom_id != "freeborn_fit_create_v1":
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": "❌ Formulaire Freeborn inconnu.",
+                "flags": 64,
+            },
+        })
+
+    try:
+        discord_user_id = str(data["member"]["user"]["id"])
+        guild_id = str(data["guild_id"])
+    except (KeyError, TypeError):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": "❌ Impossible d'identifier le membre ou le serveur.",
+                "flags": 64,
+            },
+        })
+
+    if guild_id != str(DISCORD_GUILD_ID):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": "❌ Cette action est réservée à Freeborn Legacy.",
+                "flags": 64,
+            },
+        })
+
+    if not interaction_has_any_role(data, FITTING_CREATOR_ROLE_IDS):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    "⛔ **Accès refusé**\n\n"
+                    "La création de fittings est réservée aux membres Freeborn."
+                ),
+                "flags": 64,
+            },
+        })
+
+    values = modal_values(data)
+
+    try:
+        saved = save_fit_phase1(
+            guild_id,
+            discord_user_id,
+            values.get("fit_name"),
+            values.get("fit_usage"),
+            values.get("fit_eft"),
+            values.get("fit_notes"),
+        )
+    except ValueError as error:
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": f"❌ **Fit non enregistré**\n\n{error}",
+                "flags": 64,
+            },
+        })
+    except Exception as error:
+        print("Freeborn Fittings save failed:", repr(error))
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    "⚠️ **Erreur d'enregistrement**\n\n"
+                    "Le fit n'a pas pu être enregistré dans la base."
+                ),
+                "flags": 64,
+            },
+        })
+
+    return jsonify({
+        "type": 4,
+        "data": {
+            "content": (
+                "✅ **Fit enregistré — Phase 1**\n\n"
+                f"ID : **FB-{saved['fit_id']:04d}**\n"
+                f"Vaisseau : **{saved['ship_name']}**\n"
+                f"Fit : **{saved['name']}**\n"
+                f"Usage : **{saved['usage']}**\n"
+                "Statut : ⚪ **PROPOSÉ**\n\n"
+                "Le copier-coller EFT est bien stocké dans Freeborn. "
+                "La fiche graphique sera ajoutée à l'étape suivante."
+            ),
+            "flags": 64,
+        },
+    })
 
 
 # ============================================================
@@ -6712,6 +6984,20 @@ def interactions():
         )
 
     # ========================================================
+    # MODAL SUBMIT — FREEBORN FITTINGS
+    # ========================================================
+
+    if (
+        data["type"]
+        ==
+        5
+    ):
+
+        return handle_fit_modal_submit(
+            data
+        )
+
+    # ========================================================
     # AUTOCOMPLETE
     # ========================================================
 
@@ -6815,6 +7101,96 @@ def interactions():
                     "configuré pour Freeborn Verify V3.",
 
                 **interaction_response_flags_payload(data),
+            },
+        })
+
+    # ========================================================
+    # /fit-creer — FREEBORN FITTINGS PHASE 1
+    # ========================================================
+
+    if command_name == "fit-creer":
+
+        if not interaction_has_any_role(
+            data,
+            FITTING_CREATOR_ROLE_IDS,
+        ):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Accès refusé**\n\n"
+                        "La création de fittings est réservée aux membres Freeborn."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        return jsonify({
+            "type": 9,
+            "data": {
+                "custom_id": "freeborn_fit_create_v1",
+                "title": "Freeborn Fittings — Nouveau fit",
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 4,
+                                "custom_id": "fit_name",
+                                "label": "Nom du fit",
+                                "style": 1,
+                                "min_length": 1,
+                                "max_length": 80,
+                                "required": True,
+                                "placeholder": "Ex. Retribution — Abyssal T1",
+                            }
+                        ],
+                    },
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 4,
+                                "custom_id": "fit_usage",
+                                "label": "Usage",
+                                "style": 1,
+                                "min_length": 1,
+                                "max_length": 40,
+                                "required": True,
+                                "placeholder": "PvE, PvP, Wormhole, Exploration...",
+                            }
+                        ],
+                    },
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 4,
+                                "custom_id": "fit_eft",
+                                "label": "Copier-coller EFT",
+                                "style": 2,
+                                "min_length": 3,
+                                "max_length": 4000,
+                                "required": True,
+                                "placeholder": "[Retribution, Nom du fit]\n...",
+                            }
+                        ],
+                    },
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 4,
+                                "custom_id": "fit_notes",
+                                "label": "Notes du créateur (facultatif)",
+                                "style": 2,
+                                "max_length": 500,
+                                "required": False,
+                                "placeholder": "Ex. Capacitor Management V recommandé...",
+                            }
+                        ],
+                    },
+                ],
             },
         })
 
@@ -10584,6 +10960,17 @@ def register_commands():
 
         {
             "name":
+                "fit-creer",
+
+            "description":
+                "Proposer un fitting Freeborn à partir d'un copier-coller EFT",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
                 "guide-membre",
 
             "description":
@@ -11027,7 +11414,7 @@ def register_commands():
 
             print(
                 "Commandes Discord enregistrées : "
-                "/freeborn, /guide-membre, /guide-staff, /verification, "
+                "/freeborn, /fit-creer, /guide-membre, /guide-staff, /verification, "
                 "/alt-ajouter, /alt-supprimer, /main-changer, "
                 "/membre-info, /membre-liste, "
                 "/membre-promouvoir, /membre-supprimer, "
