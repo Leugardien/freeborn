@@ -7882,6 +7882,205 @@ def calculate_base_fitting_resources(
     return result
 
 
+
+# ============================================================
+# FREEBORN FITTINGS — PHASE 4O-A SKILL-AWARE ENGINE CORE
+# ============================================================
+
+# Universal Engineering skills affecting the ship's fitting outputs.
+EVE_SKILL_CPU_MANAGEMENT = 3426
+EVE_SKILL_POWER_GRID_MANAGEMENT = 3413
+
+FREEBORN_ALL_V_LEVEL = 5
+
+
+def freeborn_skill_level_map(skills_snapshot):
+    """
+    Convert the ESI skills snapshot into:
+        {skill_id: trained_skill_level}
+
+    ESI skill rows normally contain:
+        skill_id
+        trained_skill_level
+        active_skill_level
+        skillpoints_in_skill
+    """
+    levels = {}
+
+    for row in skills_snapshot or []:
+        if not isinstance(row, dict):
+            continue
+
+        try:
+            skill_id = int(row.get("skill_id"))
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            level = int(
+                row.get(
+                    "trained_skill_level",
+                    row.get("active_skill_level", 0),
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            level = 0
+
+        levels[skill_id] = max(0, min(5, level))
+
+    return levels
+
+
+def freeborn_fitting_skill_context(
+    mode="all_v",
+    skills_snapshot=None,
+):
+    """
+    Build the skill context used by the fitting engine.
+
+    mode='all_v':
+        relevant skills are evaluated at V.
+
+    mode='character':
+        actual trained levels from the ESI snapshot are used.
+    """
+    mode = str(mode or "all_v").lower()
+
+    if mode == "all_v":
+        return {
+            "mode": "all_v",
+            "levels": {},
+        }
+
+    if mode == "character":
+        return {
+            "mode": "character",
+            "levels": freeborn_skill_level_map(
+                skills_snapshot
+            ),
+        }
+
+    raise ValueError(
+        f"Unsupported Freeborn fitting skill mode: {mode}"
+    )
+
+
+def freeborn_context_skill_level(context, skill_id):
+    """Resolve one skill level from an ALL V or character context."""
+    if context.get("mode") == "all_v":
+        return FREEBORN_ALL_V_LEVEL
+
+    return int(
+        context.get("levels", {}).get(
+            int(skill_id),
+            0,
+        )
+    )
+
+
+def calculate_skill_aware_fitting_resources_core(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+    *,
+    mode="all_v",
+    skills_snapshot=None,
+):
+    """
+    Phase 4O-A skill-aware CPU/PG engine core.
+
+    This starts from the existing raw Dogma telemetry and applies the
+    universal ship-output skills:
+      - CPU Management: +5% CPU output per level
+      - Power Grid Management: +5% powergrid output per level
+
+    The module 'used' side deliberately remains BASE in 4O-A because
+    module-family skill reductions require Dogma effect/requirement
+    classification. Keeping that distinction explicit prevents Freeborn
+    from displaying a false 'ALL V' result.
+    """
+    base = calculate_base_fitting_resources(
+        ship_type_id,
+        eft_sections,
+        type_ids,
+    )
+
+    context = freeborn_fitting_skill_context(
+        mode=mode,
+        skills_snapshot=skills_snapshot,
+    )
+
+    cpu_level = freeborn_context_skill_level(
+        context,
+        EVE_SKILL_CPU_MANAGEMENT,
+    )
+    pg_level = freeborn_context_skill_level(
+        context,
+        EVE_SKILL_POWER_GRID_MANAGEMENT,
+    )
+
+    cpu_output = base["cpu_output"]
+    power_output = base["power_output"]
+
+    if cpu_output is not None:
+        cpu_output = float(cpu_output) * (
+            1.0 + (0.05 * cpu_level)
+        )
+
+    if power_output is not None:
+        power_output = float(power_output) * (
+            1.0 + (0.05 * pg_level)
+        )
+
+    return {
+        "mode": context["mode"],
+
+        "cpu_management_level": cpu_level,
+        "power_grid_management_level": pg_level,
+
+        "cpu_used_base": float(base["cpu_used"]),
+        "cpu_output": cpu_output,
+        "cpu_remaining_core": (
+            float(cpu_output) - float(base["cpu_used"])
+            if cpu_output is not None
+            else None
+        ),
+        "cpu_complete": bool(base["cpu_complete"]),
+
+        "power_used_base": float(base["power_used"]),
+        "power_output": power_output,
+        "power_remaining_core": (
+            float(power_output) - float(base["power_used"])
+            if power_output is not None
+            else None
+        ),
+        "power_complete": bool(base["power_complete"]),
+
+        # False is intentional in 4O-A:
+        # module-side fitting reductions are not applied yet.
+        "full_all_v_ready": False,
+    }
+
+
+def format_engine_number(value, unit):
+    if value is None:
+        return "— " + unit
+
+    value = float(value)
+
+    if abs(value - round(value)) < 0.0001:
+        number = f"{int(round(value)):,}".replace(",", " ")
+    else:
+        number = (
+            f"{value:,.1f}"
+            .replace(",", " ")
+            .replace(".", ",")
+        )
+
+    return f"{number} {unit}"
+
+
 def format_fitting_resource_value(
     used,
     output,
@@ -8036,7 +8235,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4N
+    FREEBORN FITTINGS — Phase 4O-A
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -8105,6 +8304,8 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
         pilot_skill_count = len(pilot_skills)
 
+        # 4O-A values are filled later, after the EFT/type resolution pass.
+        # Placeholders are replaced after the engine has calculated the fit.
         pilot_panel_html = f"""
         <div class="pilot-panel pilot-connected">
           <div class="pilot-panel-head">
@@ -8120,9 +8321,30 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             <span class="pilot-ready">✓ Profil prêt</span>
           </div>
           <div class="pilot-note">
-            La comparaison ALL V ↔ personnage utilisera ce profil.
-            Les calculs personnalisés CPU / PG / DPS / tank seront branchés
-            dans la prochaine étape du moteur.
+            Profil ESI chargé. Le moteur 4O-A applique maintenant les
+            compétences universelles de fitting CPU / Powergrid du personnage.
+            La télémétrie principale reste volontairement en BASE tant que
+            les réductions Dogma propres aux familles de modules ne sont pas
+            toutes appliquées.
+          </div>
+          <div class="pilot-engine-core">
+            <div class="pilot-engine-title">MOTEUR 4O-A — CONTRÔLE SKILLS</div>
+            <div class="pilot-engine-row">
+              <span>CPU Management</span>
+              <b id="pilot-cpu-skill">—</b>
+            </div>
+            <div class="pilot-engine-row">
+              <span>Power Grid Management</span>
+              <b id="pilot-pg-skill">—</b>
+            </div>
+            <div class="pilot-engine-row">
+              <span>CPU disponible</span>
+              <b id="pilot-cpu-output">—</b>
+            </div>
+            <div class="pilot-engine-row">
+              <span>Powergrid disponible</span>
+              <b id="pilot-pg-output">—</b>
+            </div>
           </div>
           <a class="pilot-button pilot-refresh" href="{escape(pilot_start_url)}">
             ↻ Actualiser mon profil EVE
@@ -8203,6 +8425,64 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             "MW",
         )
     )
+
+    all_v_core = calculate_skill_aware_fitting_resources_core(
+        fit.get("ship_type_id"),
+        eft_sections,
+        eft_type_ids,
+        mode="all_v",
+    )
+
+    if pilot_profile:
+        character_core = calculate_skill_aware_fitting_resources_core(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+            mode="character",
+            skills_snapshot=pilot_profile.get("skills_snapshot") or [],
+        )
+
+        pilot_panel_html = (
+            pilot_panel_html
+            .replace(
+                '<b id="pilot-cpu-skill">—</b>',
+                '<b id="pilot-cpu-skill">'
+                + escape(
+                    f'{character_core["cpu_management_level"]}/5'
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-pg-skill">—</b>',
+                '<b id="pilot-pg-skill">'
+                + escape(
+                    f'{character_core["power_grid_management_level"]}/5'
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cpu-output">—</b>',
+                '<b id="pilot-cpu-output">'
+                + escape(
+                    format_engine_number(
+                        character_core["cpu_output"],
+                        "tf",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-pg-output">—</b>',
+                '<b id="pilot-pg-output">'
+                + escape(
+                    format_engine_number(
+                        character_core["power_output"],
+                        "MW",
+                    )
+                )
+                + '</b>',
+            )
+        )
 
     low_html = format_eft_web_items(
         eft_sections["low"], eft_type_ids
@@ -8532,6 +8812,35 @@ button{{font:inherit}}
   border-color:var(--cyan2);
   box-shadow:0 0 14px rgba(53,199,255,.13);
 }}
+.pilot-engine-core{{
+  margin-top:10px;
+  padding:8px 9px;
+  border:1px solid rgba(49,185,255,.18);
+  background:rgba(0,0,0,.18);
+}}
+.pilot-engine-title{{
+  margin-bottom:6px;
+  color:#72d3ff;
+  font-size:10px;
+  font-weight:800;
+  letter-spacing:.08em;
+}}
+.pilot-engine-row{{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:3px 0;
+  border-bottom:1px solid rgba(255,255,255,.035);
+  color:#8faabd;
+  font-size:11px;
+}}
+.pilot-engine-row:last-child{{border-bottom:0}}
+.pilot-engine-row b{{
+  color:#edf6ff;
+  font-size:11px;
+  white-space:nowrap;
+}}
 .pilot-refresh{{
   border-color:rgba(121,221,115,.55);
   color:#9cec94;
@@ -8698,7 +9007,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4N</span>
+    <span class="version">Freeborn Legacy • Fittings 4O-A</span>
   </footer>
 </main>
 
