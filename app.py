@@ -8880,25 +8880,65 @@ def freeborn_dogma_rows_matching(
     *,
     contains_names=(),
 ):
-    """Return Dogma attributes whose normalized names match any fragment."""
+    """
+    Return Dogma attributes whose metadata name/display name matches a fragment.
+
+    4Q-A2 fixes the 4Q-A NameError by using the Dogma helpers that already
+    exist in Freeborn:
+        get_eve_type_dogma(type_id)
+        get_eve_dogma_attribute_metadata(attribute_id)
+    """
     rows = []
 
-    for row in get_type_dogma_attributes(type_id) or []:
-        name = str(
-            row.get("name")
-            or row.get("attribute_name")
-            or ""
-        )
-        normalized = name.lower()
+    dogma = get_eve_type_dogma(
+        type_id
+    )
 
-        if any(
-            fragment.lower() in normalized
-            for fragment in contains_names
+    if not dogma:
+        return rows
+
+    fragments = tuple(
+        str(fragment).strip().casefold()
+        for fragment in contains_names
+        if str(fragment).strip()
+    )
+
+    for attribute_id, value in dogma.items():
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or ""
+        ).strip()
+
+        display_name = str(
+            metadata.get("display_name")
+            or ""
+        ).strip()
+
+        haystack = (
+            name
+            + " "
+            + display_name
+        ).casefold()
+
+        if (
+            fragments
+            and any(
+                fragment in haystack
+                for fragment in fragments
+            )
         ):
             rows.append({
-                "name": name,
-                "value": row.get("value"),
-                "attribute_id": row.get("attribute_id"),
+                "name": (
+                    display_name
+                    or name
+                    or f"attribute {attribute_id}"
+                ),
+                "value": value,
+                "attribute_id": int(attribute_id),
             })
 
     return rows
@@ -10332,7 +10372,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4Q-A — FITTING / CAP / VITESSE / DPS</div>
+              <div class="pilot-engine-title">MOTEUR 4Q-A2 — FITTING / CAP / VITESSE / DPS</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -11807,7 +11847,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4Q-A</strong>
+            <strong>ALL V — VALIDATION 4Q-A2</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -11889,7 +11929,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           </div>
 
           <div class="allv-warning" style="margin-top:10px">
-            <strong>DPS — AUDIT DOGMA 4Q-A</strong><br>
+            <strong>DPS — AUDIT DOGMA 4Q-A2</strong><br>
             Cette étape inventorie les armes et amplificateurs réellement
             présents dans l'EFT avant tout calcul numérique de DPS.<br>
             {weapon_dogma_audit_html}<br>
@@ -11923,7 +11963,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4Q-A</span>
+    <span class="version">Freeborn Legacy • Fittings 4Q-A2</span>
   </footer>
 </main>
 
