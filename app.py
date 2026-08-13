@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 import psycopg
 import requests
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 from nacl.exceptions import BadSignatureError
 from nacl.secret import SecretBox
 from nacl.signing import VerifyKey
@@ -328,6 +328,12 @@ fit_delete_signer = TimestampSigner(
 fit_web_serializer = URLSafeTimedSerializer(
     FLASK_SECRET_KEY,
     salt="freeborn-fit-web",
+)
+
+
+fit_pilot_serializer = URLSafeTimedSerializer(
+    FLASK_SECRET_KEY,
+    salt="freeborn-fit-pilot",
 )
 
 
@@ -1727,6 +1733,99 @@ def get_guild_main_character_v3(
             )
 
             return cur.fetchone()
+
+
+def get_guild_main_by_character_id_v3(
+    guild_id,
+    character_id,
+):
+    """Return one verified guild Main from its EVE character ID."""
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    discord_user_id,
+                    character_id,
+                    character_name,
+                    corporation_id,
+                    in_corporation,
+                    total_skill_points,
+                    skills_updated_at,
+                    skills_snapshot
+                FROM guild_eve_characters
+                WHERE guild_id = %s
+                AND character_id = %s
+                AND character_type = 'main'
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    int(character_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "discord_user_id": str(row[0]),
+        "character_id": int(row[1]),
+        "character_name": row[2],
+        "corporation_id": int(row[3]),
+        "in_corporation": bool(row[4]),
+        "total_skill_points": (
+            int(row[5])
+            if row[5] is not None
+            else None
+        ),
+        "skills_updated_at": row[6],
+        "skills_snapshot": row[7],
+    }
+
+
+def update_guild_main_skills_snapshot_v3(
+    guild_id,
+    character_id,
+    skill_summary,
+):
+    """Refresh the stored skills snapshot after a voluntary pilot test."""
+
+    snapshot = skill_summary.get("skills", []) or []
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                UPDATE guild_eve_characters
+                SET
+                    total_skill_points = %s,
+                    skills_snapshot = %s::jsonb,
+                    skills_updated_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                AND character_id = %s
+                AND character_type = 'main';
+                """,
+                (
+                    int(skill_summary.get("total_sp", 0) or 0),
+                    json.dumps(
+                        snapshot,
+                        separators=(",", ":"),
+                    ),
+                    str(guild_id),
+                    int(character_id),
+                ),
+            )
+
+        conn.commit()
 
 
 def save_main_character_v3(
@@ -7935,9 +8034,9 @@ def format_eft_bay_items(items, type_ids=None):
 
 
 
-def freeborn_fitting_web_page(fit):
+def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4M
+    FREEBORN FITTINGS — Phase 4N
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -7977,6 +8076,78 @@ def freeborn_fitting_web_page(fit):
         print("Freeborn Fittings creator lookup failed:", repr(error))
 
     safe_creator = escape(str(creator_display))
+
+    raw_fit_ref = format_fit_reference(fit["fit_id"])
+
+    pilot_start_url = (
+        f"{PUBLIC_BASE_URL}/fittings/pilot/{raw_fit_ref}?"
+        + urlencode({
+            "token": str(fit_web_token or ""),
+        })
+    )
+
+    pilot_profile = pilot_profile or None
+
+    if pilot_profile:
+        pilot_name = escape(
+            str(
+                pilot_profile.get("character_name")
+                or "Pilote EVE"
+            )
+        )
+        pilot_total_sp = int(
+            pilot_profile.get("total_skill_points")
+            or 0
+        )
+        pilot_skills = (
+            pilot_profile.get("skills_snapshot")
+            or []
+        )
+        pilot_skill_count = len(pilot_skills)
+
+        pilot_panel_html = f"""
+        <div class="pilot-panel pilot-connected">
+          <div class="pilot-panel-head">
+            <span class="pilot-icon">◉</span>
+            <div>
+              <strong>MON PERSONNAGE — {pilot_name}</strong>
+              <small>Profil ESI reconnu et actualisé</small>
+            </div>
+          </div>
+          <div class="pilot-meta">
+            <span><b>{pilot_total_sp:,}</b> SP</span>
+            <span><b>{pilot_skill_count}</b> compétences</span>
+            <span class="pilot-ready">✓ Profil prêt</span>
+          </div>
+          <div class="pilot-note">
+            La comparaison ALL V ↔ personnage utilisera ce profil.
+            Les calculs personnalisés CPU / PG / DPS / tank seront branchés
+            dans la prochaine étape du moteur.
+          </div>
+          <a class="pilot-button pilot-refresh" href="{escape(pilot_start_url)}">
+            ↻ Actualiser mon profil EVE
+          </a>
+        </div>
+        """
+    else:
+        pilot_panel_html = f"""
+        <div class="pilot-panel">
+          <div class="pilot-panel-head">
+            <span class="pilot-icon">◉</span>
+            <div>
+              <strong>TESTER AVEC MON PERSONNAGE</strong>
+              <small>Comparaison personnelle avec la référence corporate ALL V</small>
+            </div>
+          </div>
+          <div class="pilot-note">
+            Connecte ton Main EVE vérifié. Freeborn utilisera uniquement
+            le scope compétences déjà prévu par l'intégration membre.
+          </div>
+          <a class="pilot-button" href="{escape(pilot_start_url)}">
+            Tester avec mon personnage
+          </a>
+        </div>
+        """
 
     status_map = {
         "proposed": ("PROPOSÉ", "#d8aa42"),
@@ -8273,6 +8444,100 @@ button{{font:inherit}}
 .telemetry-reference{{margin:7px 7px 0;padding:9px 11px;border:1px solid rgba(214,168,60,.34);background:rgba(214,168,60,.045)}}
 .telemetry-reference strong{{display:block;color:var(--gold2);font-size:11px;letter-spacing:.09em;text-transform:uppercase}}
 .telemetry-reference span{{display:block;margin-top:4px;color:#9bb4c7;font-size:11px;line-height:1.35}}
+.pilot-panel{{
+  margin:8px 7px 9px;
+  padding:11px 12px;
+  border:1px solid rgba(49,185,255,.38);
+  background:
+    linear-gradient(180deg,rgba(13,61,96,.18),rgba(2,12,23,.66));
+  box-shadow:inset 0 0 18px rgba(53,199,255,.025);
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+}}
+.pilot-connected{{
+  border-color:rgba(121,221,115,.38);
+  background:
+    linear-gradient(180deg,rgba(42,105,61,.13),rgba(2,12,23,.66));
+}}
+.pilot-panel-head{{
+  display:flex;
+  align-items:center;
+  gap:9px;
+}}
+.pilot-icon{{
+  width:28px;
+  height:28px;
+  flex:0 0 28px;
+  display:grid;
+  place-items:center;
+  border:1px solid var(--cyan);
+  border-radius:50%;
+  color:var(--cyan2);
+  background:rgba(16,108,174,.18);
+  font-size:12px;
+}}
+.pilot-panel-head strong{{
+  display:block;
+  color:#eef7ff;
+  font-size:13px;
+  letter-spacing:.07em;
+}}
+.pilot-panel-head small{{
+  display:block;
+  margin-top:2px;
+  color:#7ea6c2;
+  font-size:11px;
+}}
+.pilot-meta{{
+  display:flex;
+  flex-wrap:wrap;
+  gap:7px;
+  margin-top:9px;
+}}
+.pilot-meta span{{
+  padding:5px 8px;
+  border:1px solid rgba(49,185,255,.19);
+  background:rgba(0,0,0,.16);
+  color:#9db7ca;
+  font-size:11px;
+}}
+.pilot-meta b{{color:#edf6ff}}
+.pilot-meta .pilot-ready{{
+  color:#9cec94;
+  border-color:rgba(121,221,115,.28);
+}}
+.pilot-note{{
+  margin-top:9px;
+  color:#a7bbca;
+  font-size:12px;
+  line-height:1.38;
+}}
+.pilot-button{{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:37px;
+  margin-top:10px;
+  padding:8px 13px;
+  border:1px solid rgba(49,185,255,.78);
+  background:
+    linear-gradient(180deg,rgba(21,156,255,.16),rgba(21,156,255,.035));
+  color:#72d3ff;
+  text-decoration:none;
+  font-size:12px;
+  font-weight:800;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+}}
+.pilot-button:hover{{
+  border-color:var(--cyan2);
+  box-shadow:0 0 14px rgba(53,199,255,.13);
+}}
+.pilot-refresh{{
+  border-color:rgba(121,221,115,.55);
+  color:#9cec94;
+  background:
+    linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.025));
+}}
 .telemetry{{display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:6px}}
 .metric{{min-height:43px;border:1px solid rgba(49,185,255,.25);background:rgba(1,9,18,.55);padding:6px 8px;display:grid;grid-template-columns:28px 1fr;grid-template-rows:auto auto;column-gap:8px;align-items:center}}
 .metric-icon{{grid-row:1/3;width:25px;height:25px;border:1px solid rgba(49,185,255,.40);display:grid;place-items:center;color:#6fd2ff;background:rgba(3,20,34,.72);font-size:16px;line-height:1;text-shadow:0 0 10px rgba(49,185,255,.35)}}
@@ -8407,6 +8672,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             <div class="resist exp"><i class="resist-icon" aria-hidden="true">✹</i><span>Exp</span><b>—</b></div>
           </div>
         </div>
+        {pilot_panel_html}
       </article>
     </div>
   </section>
@@ -8432,7 +8698,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4M</span>
+    <span class="version">Freeborn Legacy • Fittings 4N</span>
   </footer>
 </main>
 
@@ -8516,7 +8782,101 @@ def fitting_web_card(fit_ref):
             status="warning",
         ), 404
 
-    return freeborn_fitting_web_page(fit)
+    pilot_profile = None
+    pilot_token = request.args.get("pilot", "")
+
+    if pilot_token:
+
+        try:
+
+            pilot_payload = fit_pilot_serializer.loads(
+                pilot_token,
+                max_age=1800,
+            )
+
+            if (
+                str(pilot_payload.get("guild_id"))
+                == str(token_guild_id)
+                and
+                int(pilot_payload.get("fit_id"))
+                == int(fit_id)
+            ):
+
+                pilot_profile = get_guild_main_by_character_id_v3(
+                    token_guild_id,
+                    int(pilot_payload["character_id"]),
+                )
+
+        except (
+            BadSignature,
+            SignatureExpired,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+
+            pilot_profile = None
+
+    return freeborn_fitting_web_page(
+        fit,
+        fit_web_token=token,
+        pilot_profile=pilot_profile,
+    )
+
+
+@app.route("/fittings/pilot/<fit_ref>")
+def fitting_pilot_start(fit_ref):
+    """
+    Start the voluntary EVE SSO flow used by
+    'Tester avec mon personnage'.
+    """
+    token = request.args.get("token", "")
+
+    try:
+        fit_id = parse_fit_reference(fit_ref)
+        token_guild_id, token_fit_id = read_fit_web_token(token)
+    except (ValueError, BadSignature, SignatureExpired, KeyError, TypeError):
+        return freeborn_web_page(
+            "Lien de fitting invalide",
+            "Ce lien Freeborn Fittings est invalide ou incomplet.",
+            status="error",
+        ), 403
+
+    if (
+        token_guild_id != str(DISCORD_GUILD_ID)
+        or token_fit_id != fit_id
+    ):
+        return freeborn_web_page(
+            "Accès refusé",
+            "Ce lien ne correspond pas à ce fitting Freeborn.",
+            status="error",
+        ), 403
+
+    if not get_fit(token_guild_id, fit_id):
+        return freeborn_web_page(
+            "Fitting introuvable",
+            f"{format_fit_reference(fit_id)} n'existe plus dans Freeborn.",
+            status="warning",
+        ), 404
+
+    state = state_serializer.dumps({
+        "guild_id": str(token_guild_id),
+        "verification_type": "fit_pilot",
+        "fit_id": int(fit_id),
+        "fit_web_token": str(token),
+    })
+
+    params = {
+        "response_type": "code",
+        "redirect_uri": EVE_CALLBACK_URL,
+        "client_id": EVE_CLIENT_ID,
+        "state": state,
+        "scope": " ".join(FREEBORN_EVE_SCOPES),
+    }
+
+    return redirect(
+        f"{EVE_AUTHORIZE_URL}?{urlencode(params)}"
+    )
 
 
 # ============================================================
@@ -12013,9 +12373,9 @@ def callback():
         ), 400
 
     discord_user_id = (
-        state_data[
+        state_data.get(
             "discord_user_id"
-        ]
+        )
     )
 
     guild_id = (
@@ -12125,7 +12485,7 @@ def callback():
 
     skill_summary = None
 
-    if verification_type == "freeborn":
+    if verification_type in {"freeborn", "fit_pilot"}:
 
         missing_scopes = (
             set(FREEBORN_EVE_SCOPES)
@@ -12137,12 +12497,25 @@ def callback():
 
             return freeborn_web_page(
                 "Autorisation ESI incomplète",
-                "Le scope ESI nécessaire aux compétences n'a pas été accordé. Relance /freeborn et accepte l'autorisation EVE demandée.",
+                (
+                    "Le scope ESI nécessaire aux compétences n'a pas été accordé. "
+                    + (
+                        "Retourne sur la fiche Freeborn Fittings et relance "
+                        "« Tester avec mon personnage »."
+                        if verification_type == "fit_pilot"
+                        else
+                        "Relance /freeborn et accepte l'autorisation EVE demandée."
+                    )
+                ),
                 status="error",
                 character_name=character_name,
             ), 403
 
-        if not refresh_token:
+        if (
+            verification_type == "freeborn"
+            and
+            not refresh_token
+        ):
 
             return freeborn_web_page(
                 "Autorisation EVE incomplète",
@@ -12302,6 +12675,79 @@ def callback():
             status="pending",
             character_name=character_name,
         ), 409
+
+    # ========================================================
+    # FREEBORN FITTINGS — PILOT TEST SSO
+    # ========================================================
+
+    if verification_type == "fit_pilot":
+
+        try:
+            fit_id = int(state_data["fit_id"])
+            fit_web_token = str(state_data["fit_web_token"])
+        except (KeyError, TypeError, ValueError):
+            return freeborn_web_page(
+                "Test pilote invalide",
+                "Le lien de test du fitting est incomplet. Retourne sur la fiche et relance le test.",
+                status="error",
+                character_name=character_name,
+            ), 400
+
+        pilot_record = get_guild_main_by_character_id_v3(
+            guild_id,
+            character_id,
+        )
+
+        if (
+            not pilot_record
+            or
+            not pilot_record["in_corporation"]
+        ):
+            return freeborn_web_page(
+                "Main EVE non reconnu",
+                (
+                    "Ce personnage n'est pas enregistré comme Main Freeborn "
+                    "pour ce serveur. Utilise d'abord /freeborn sur Discord "
+                    "avec ton Main EVE."
+                ),
+                status="warning",
+                character_name=character_name,
+            ), 403
+
+        try:
+            update_guild_main_skills_snapshot_v3(
+                guild_id,
+                character_id,
+                skill_summary,
+            )
+        except Exception as error:
+            print(
+                "Freeborn Fittings pilot snapshot refresh failed:",
+                repr(error),
+            )
+            return freeborn_web_page(
+                "Profil pilote indisponible",
+                "Freeborn n'a pas pu actualiser les compétences de ce Main EVE.",
+                status="warning",
+                character_name=character_name,
+            ), 500
+
+        pilot_token = fit_pilot_serializer.dumps({
+            "guild_id": str(guild_id),
+            "fit_id": int(fit_id),
+            "character_id": int(character_id),
+        })
+
+        target_url = (
+            f"{PUBLIC_BASE_URL}/fittings/"
+            f"{format_fit_reference(fit_id)}?"
+            + urlencode({
+                "token": fit_web_token,
+                "pilot": pilot_token,
+            })
+        )
+
+        return redirect(target_url)
 
     # ========================================================
     # FREEBORN FINAL INTEGRATION FLOW
