@@ -9091,11 +9091,51 @@ def parse_eft_item_quantity(line):
     )
 
 
+
+# Frequently used stable Dogma attribute IDs.
+# Fast-paths below avoid resolving metadata for every attribute in a type.
+FB_DOGMA_RATE_OF_FIRE = 51
+FB_DOGMA_BCS_RATE_OF_FIRE = 204
+FB_DOGMA_MISSILE_DAMAGE_BONUS = 213
+FB_DOGMA_CHARGE_GROUP_IDS = (604, 605, 609)
+
+FB_DOGMA_DAMAGE_IDS = {
+    "em": 114,
+    "exp": 116,
+    "kin": 117,
+    "therm": 118,
+}
+
+
+def freeborn_fast_damage_profile(type_id):
+    dogma = get_eve_type_dogma(type_id)
+    if not dogma:
+        return None
+
+    result = {
+        "em": float(dogma.get(FB_DOGMA_DAMAGE_IDS["em"], 0.0) or 0.0),
+        "therm": float(dogma.get(FB_DOGMA_DAMAGE_IDS["therm"], 0.0) or 0.0),
+        "kin": float(dogma.get(FB_DOGMA_DAMAGE_IDS["kin"], 0.0) or 0.0),
+        "exp": float(dogma.get(FB_DOGMA_DAMAGE_IDS["exp"], 0.0) or 0.0),
+    }
+
+    if not any(result.values()):
+        return None
+
+    result["resolved"] = True
+    result["attributes"] = []
+    return result
+
+
 def freeborn_damage_profile(type_id):
     """
     Read the four direct damage attributes of a charge/ammo type from Dogma.
     No damage type is inferred from the item name.
     """
+    fast = freeborn_fast_damage_profile(type_id)
+    if fast is not None:
+        return fast
+
     result = {
         "em": 0.0,
         "therm": 0.0,
@@ -9187,16 +9227,22 @@ def freeborn_damage_profile(type_id):
 
 def freeborn_launcher_cycle_seconds(type_id):
     """
-    Read the launcher's normal rate-of-fire / duration attribute in seconds.
-
-    Overheat bonus attributes are deliberately excluded.
+    Read launcher cycle in seconds. Attribute #51 is the direct fast path;
+    metadata scanning remains fallback for unusual weapon families.
     """
-    dogma = get_eve_type_dogma(
-        type_id
-    )
+    dogma = get_eve_type_dogma(type_id)
 
     if not dogma:
         return None
+
+    direct = dogma.get(FB_DOGMA_RATE_OF_FIRE)
+    if direct is not None:
+        try:
+            direct = float(direct)
+            if direct > 0:
+                return direct / 1000.0
+        except (TypeError, ValueError):
+            pass
 
     candidates = []
 
@@ -9277,11 +9323,23 @@ def freeborn_launcher_charge_groups(type_id):
     """
     groups = set()
 
-    dogma = get_eve_type_dogma(
-        type_id
-    )
+    dogma = get_eve_type_dogma(type_id)
 
     if not dogma:
+        return groups
+
+    for attribute_id in FB_DOGMA_CHARGE_GROUP_IDS:
+        value = dogma.get(attribute_id)
+        if value is None:
+            continue
+        try:
+            group_id = int(round(float(value)))
+        except (TypeError, ValueError):
+            continue
+        if group_id > 0:
+            groups.add(group_id)
+
+    if groups:
         return groups
 
     for attribute_id, value in dogma.items():
@@ -9526,7 +9584,7 @@ def freeborn_bcs_stack_from_weapon_audit(
     to missile damage and launcher rate of fire.
     """
     amplifiers = weapon_audit.get(
-        "amplifiers",
+        "upgrades",
         [],
     )
 
@@ -9542,6 +9600,26 @@ def freeborn_bcs_stack_from_weapon_audit(
 
         damage_multiplier = None
         rof_multiplier = None
+
+        amp_type_id = amplifier.get("type_id")
+        amp_dogma = get_eve_type_dogma(amp_type_id) if amp_type_id else {}
+
+        if amp_dogma:
+            try:
+                if amp_dogma.get(FB_DOGMA_MISSILE_DAMAGE_BONUS) is not None:
+                    damage_multiplier = float(
+                        amp_dogma[FB_DOGMA_MISSILE_DAMAGE_BONUS]
+                    )
+            except (TypeError, ValueError):
+                pass
+
+            try:
+                if amp_dogma.get(FB_DOGMA_BCS_RATE_OF_FIRE) is not None:
+                    rof_multiplier = float(
+                        amp_dogma[FB_DOGMA_BCS_RATE_OF_FIRE]
+                    )
+            except (TypeError, ValueError):
+                pass
 
         for row in amplifier.get(
             "dogma",
@@ -9755,7 +9833,7 @@ def freeborn_render_bcs_stack_audit(
     launcher_audit,
 ):
     chunks = [
-        '<strong>DPS — BALLISTIC CONTROL SYSTEMS 4Q-C</strong>',
+        '<strong>DPS — BALLISTIC CONTROL SYSTEMS 4Q-C2</strong>',
         '<br>Stacking penalties appliquées séparément au '
         'bonus dégâts missile et à la réduction du cycle launcher.',
     ]
@@ -11314,7 +11392,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4Q-C — FITTING / CAP / VITESSE / DPS</div>
+              <div class="pilot-engine-title">MOTEUR 4Q-C2 — FITTING / CAP / VITESSE / DPS</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -12823,7 +12901,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4Q-C</strong>
+            <strong>ALL V — VALIDATION 4Q-C2</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -12948,7 +13026,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4Q-C</span>
+    <span class="version">Freeborn Legacy • Fittings 4Q-C2</span>
   </footer>
 </main>
 
