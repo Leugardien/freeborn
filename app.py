@@ -9498,6 +9498,418 @@ def freeborn_launcher_ammo_dps_audit(
     }
 
 
+
+def freeborn_stacking_penalty(rank):
+    """
+    Standard EVE stacking-penalty effectiveness for percentage module effects.
+    rank is 1-based.
+    """
+    try:
+        rank = max(1, int(rank))
+    except (TypeError, ValueError):
+        rank = 1
+
+    return 0.5 ** (
+        (
+            0.45
+            * (rank - 1)
+        ) ** 2
+    )
+
+
+def freeborn_bcs_stack_from_weapon_audit(
+    weapon_audit,
+):
+    """
+    Resolve Ballistic Control System damage and ROF modifiers already exposed
+    by the 4Q-A2 Dogma audit, then apply EVE stacking penalties separately
+    to missile damage and launcher rate of fire.
+    """
+    amplifiers = weapon_audit.get(
+        "amplifiers",
+        [],
+    )
+
+    damage_effects = []
+    rof_effects = []
+    modules = []
+
+    for amplifier in amplifiers:
+        quantity = int(
+            amplifier.get("quantity", 1)
+            or 1
+        )
+
+        damage_multiplier = None
+        rof_multiplier = None
+
+        for row in amplifier.get(
+            "dogma",
+            [],
+        ):
+            name = str(
+                row.get("name")
+                or ""
+            ).casefold()
+
+            try:
+                value = float(
+                    row.get("value")
+                )
+            except (TypeError, ValueError):
+                continue
+
+            if (
+                "missile damage bonus" in name
+                or "missiledamagebonus" in name
+            ):
+                damage_multiplier = value
+
+            if (
+                "rate of fire bonus" in name
+                or "rateoffirebonus" in name
+            ):
+                rof_multiplier = value
+
+        modules.append({
+            "name": amplifier.get("name") or "",
+            "quantity": quantity,
+            "damage_multiplier": damage_multiplier,
+            "rof_multiplier": rof_multiplier,
+        })
+
+        if damage_multiplier is not None:
+            raw_bonus = (
+                damage_multiplier - 1.0
+            )
+            for _ in range(quantity):
+                damage_effects.append(
+                    raw_bonus
+                )
+
+        if rof_multiplier is not None:
+            # Dogma exposes e.g. 0.89, meaning an 11% cycle-time reduction.
+            raw_reduction = (
+                1.0 - rof_multiplier
+            )
+            for _ in range(quantity):
+                rof_effects.append(
+                    raw_reduction
+                )
+
+    damage_effects.sort(
+        key=abs,
+        reverse=True,
+    )
+    rof_effects.sort(
+        key=abs,
+        reverse=True,
+    )
+
+    damage_rows = []
+    damage_factor = 1.0
+
+    for rank, raw_bonus in enumerate(
+        damage_effects,
+        start=1,
+    ):
+        penalty = freeborn_stacking_penalty(
+            rank
+        )
+        effective_bonus = (
+            raw_bonus
+            * penalty
+        )
+        factor = (
+            1.0
+            + effective_bonus
+        )
+        damage_factor *= factor
+
+        damage_rows.append({
+            "rank": rank,
+            "penalty": penalty,
+            "raw_bonus": raw_bonus,
+            "effective_bonus": effective_bonus,
+            "factor": factor,
+        })
+
+    rof_rows = []
+    rof_factor = 1.0
+
+    for rank, raw_reduction in enumerate(
+        rof_effects,
+        start=1,
+    ):
+        penalty = freeborn_stacking_penalty(
+            rank
+        )
+        effective_reduction = (
+            raw_reduction
+            * penalty
+        )
+        factor = (
+            1.0
+            - effective_reduction
+        )
+        rof_factor *= factor
+
+        rof_rows.append({
+            "rank": rank,
+            "penalty": penalty,
+            "raw_reduction": raw_reduction,
+            "effective_reduction": effective_reduction,
+            "factor": factor,
+        })
+
+    return {
+        "modules": modules,
+        "damage_rows": damage_rows,
+        "rof_rows": rof_rows,
+        "damage_factor": damage_factor,
+        "rof_factor": rof_factor,
+    }
+
+
+def freeborn_apply_bcs_to_launcher_audit(
+    launcher_audit,
+    bcs_stack,
+):
+    """
+    Add a 4Q-C BCS-only volley/DPS layer to every launcher/ammo candidate.
+    No hull or skill modifiers are applied here.
+    """
+    damage_factor = float(
+        bcs_stack.get(
+            "damage_factor",
+            1.0,
+        )
+    )
+    rof_factor = float(
+        bcs_stack.get(
+            "rof_factor",
+            1.0,
+        )
+    )
+
+    for launcher in launcher_audit.get(
+        "launchers",
+        [],
+    ):
+        base_cycle = launcher.get(
+            "cycle_seconds"
+        )
+
+        bcs_cycle = (
+            float(base_cycle)
+            * rof_factor
+            if (
+                base_cycle is not None
+                and float(base_cycle) > 0
+            )
+            else None
+        )
+
+        launcher["bcs_cycle_seconds"] = (
+            bcs_cycle
+        )
+
+        for charge in launcher.get(
+            "charges",
+            [],
+        ):
+            base_volley = float(
+                charge.get(
+                    "raw_volley",
+                    0.0,
+                )
+            )
+
+            bcs_volley = (
+                base_volley
+                * damage_factor
+            )
+
+            bcs_dps = (
+                bcs_volley
+                / bcs_cycle
+                if (
+                    bcs_cycle is not None
+                    and bcs_cycle > 0
+                )
+                else None
+            )
+
+            charge["bcs_volley"] = (
+                bcs_volley
+            )
+            charge["bcs_dps"] = (
+                bcs_dps
+            )
+
+    return launcher_audit
+
+
+def freeborn_render_bcs_stack_audit(
+    bcs_stack,
+    launcher_audit,
+):
+    chunks = [
+        '<strong>DPS — BALLISTIC CONTROL SYSTEMS 4Q-C</strong>',
+        '<br>Stacking penalties appliquées séparément au '
+        'bonus dégâts missile et à la réduction du cycle launcher.',
+    ]
+
+    modules = bcs_stack.get(
+        "modules",
+        [],
+    )
+
+    if not modules:
+        chunks.append(
+            '<br><span class="cap-audit-muted">'
+            'Aucun Ballistic Control System résolu.'
+            '</span>'
+        )
+        return "".join(chunks)
+
+    chunks.append(
+        '<br><strong>MODULES RÉSOLUS</strong>'
+    )
+
+    for module in modules:
+        chunks.append(
+            '<br>'
+            + f'{module["quantity"]}× '
+            + escape(
+                str(module["name"])
+            )
+            + ' • dégâts '
+            + (
+                f'×{module["damage_multiplier"]:.4f}'
+                if module["damage_multiplier"] is not None
+                else 'non résolus'
+            )
+            + ' • ROF '
+            + (
+                f'×{module["rof_multiplier"]:.4f}'
+                if module["rof_multiplier"] is not None
+                else 'non résolu'
+            )
+        )
+
+    chunks.append(
+        '<br><strong>STACKING DÉGÂTS</strong>'
+    )
+
+    for row in bcs_stack.get(
+        "damage_rows",
+        [],
+    ):
+        chunks.append(
+            '<br>'
+            + f'#{row["rank"]} : '
+            + f'{row["penalty"] * 100:.3f}% efficacité'
+            + ' • bonus brut '
+            + f'{row["raw_bonus"] * 100:+.3f}%'
+            + ' → effectif '
+            + f'{row["effective_bonus"] * 100:+.3f}%'
+        )
+
+    chunks.append(
+        '<br>Multiplicateur dégâts BCS cumulé : '
+        + f'×{bcs_stack["damage_factor"]:.6f}'
+    )
+
+    chunks.append(
+        '<br><strong>STACKING RATE OF FIRE</strong>'
+    )
+
+    for row in bcs_stack.get(
+        "rof_rows",
+        [],
+    ):
+        chunks.append(
+            '<br>'
+            + f'#{row["rank"]} : '
+            + f'{row["penalty"] * 100:.3f}% efficacité'
+            + ' • réduction brute '
+            + f'{row["raw_reduction"] * 100:.3f}%'
+            + ' → effective '
+            + f'{row["effective_reduction"] * 100:.3f}%'
+        )
+
+    chunks.append(
+        '<br>Multiplicateur cycle BCS cumulé : '
+        + f'×{bcs_stack["rof_factor"]:.6f}'
+    )
+
+    chunks.append(
+        '<br><strong>RÉSULTAT LAUNCHER + MUNITION + BCS</strong>'
+    )
+
+    for launcher in launcher_audit.get(
+        "launchers",
+        [],
+    ):
+        chunks.append(
+            '<br>'
+            + escape(
+                str(launcher["name"])
+            )
+            + ' • cycle BASE '
+            + (
+                f'{launcher["cycle_seconds"]:.3f} s'
+                if launcher.get("cycle_seconds") is not None
+                else 'non résolu'
+            )
+            + ' → cycle avec BCS '
+            + (
+                f'{launcher["bcs_cycle_seconds"]:.3f} s'
+                if launcher.get("bcs_cycle_seconds") is not None
+                else 'non résolu'
+            )
+        )
+
+        for charge in launcher.get(
+            "charges",
+            [],
+        ):
+            chunks.append(
+                '<br>'
+                + '<span class="cap-audit-key">'
+                + escape(
+                    str(charge["name"])
+                )
+                + '</span>'
+                + ' • volée BASE '
+                + f'{charge["raw_volley"]:.2f}'
+                + ' → BCS '
+                + f'{charge["bcs_volley"]:.2f}'
+                + ' • DPS BASE '
+                + (
+                    f'{charge["raw_dps"]:.2f}'
+                    if charge.get("raw_dps") is not None
+                    else 'non résolu'
+                )
+                + ' → DPS BCS '
+                + (
+                    f'{charge["bcs_dps"]:.2f}'
+                    if charge.get("bcs_dps") is not None
+                    else 'non résolu'
+                )
+            )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">État :</span> '
+        '4Q-C valide uniquement la couche Ballistic Control System. '
+        'Skills missile, bonus hull/role/Marauders, implants, heat et boosts '
+        'restent exclus.'
+    )
+
+    return "".join(chunks)
+
+
 def freeborn_render_launcher_ammo_dps_audit(
     audit,
 ):
@@ -10796,7 +11208,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4Q-B
+    FREEBORN FITTINGS — Phase 4Q-C
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -10902,7 +11314,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4Q-B — FITTING / CAP / VITESSE / DPS</div>
+              <div class="pilot-engine-title">MOTEUR 4Q-C — FITTING / CAP / VITESSE / DPS</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -11134,6 +11546,26 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     launcher_ammo_dps_audit_html = (
         freeborn_render_launcher_ammo_dps_audit(
             launcher_ammo_dps_audit
+        )
+    )
+
+    bcs_stack_audit = (
+        freeborn_bcs_stack_from_weapon_audit(
+            weapon_dogma_audit
+        )
+    )
+
+    launcher_ammo_dps_audit = (
+        freeborn_apply_bcs_to_launcher_audit(
+            launcher_ammo_dps_audit,
+            bcs_stack_audit,
+        )
+    )
+
+    bcs_stack_audit_html = (
+        freeborn_render_bcs_stack_audit(
+            bcs_stack_audit,
+            launcher_ammo_dps_audit,
         )
     )
 
@@ -12391,7 +12823,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4Q-B</strong>
+            <strong>ALL V — VALIDATION 4Q-C</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -12485,6 +12917,10 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             <strong>DPS — LAUNCHER / MUNITIONS 4Q-B</strong><br>
             {launcher_ammo_dps_audit_html}
           </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            {bcs_stack_audit_html}
+          </div>
         </div>
         {pilot_panel_html}
       </article>
@@ -12512,7 +12948,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4Q-B</span>
+    <span class="version">Freeborn Legacy • Fittings 4Q-C</span>
   </footer>
 </main>
 
