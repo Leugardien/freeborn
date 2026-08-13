@@ -249,6 +249,15 @@ FITTING_CREATOR_ROLE_IDS = configured_role_ids(
     DISCORD_CEO_ROLE_ID,
 )
 
+FITTING_MANAGER_ROLE_IDS = configured_role_ids(
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+    DISCORD_OFFICER_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
 
 # ============================================================
 # URLS
@@ -307,6 +316,11 @@ main_change_signer = TimestampSigner(
 sync_apply_signer = TimestampSigner(
     FLASK_SECRET_KEY,
     salt="freeborn-sync-apply",
+)
+
+fit_delete_signer = TimestampSigner(
+    FLASK_SECRET_KEY,
+    salt="freeborn-fit-delete",
 )
 
 
@@ -593,6 +607,13 @@ def init_database():
                     """
                     CREATE INDEX IF NOT EXISTS idx_fits_guild_status
                     ON fits (guild_id, status);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS ship_type_id BIGINT;
                     """
                 )
 
@@ -3210,7 +3231,7 @@ def build_member_list_message():
 
 
 # ============================================================
-# FREEBORN FITTINGS — PHASE 1 HELPERS
+# FREEBORN FITTINGS — PHASE 2
 # ============================================================
 
 def parse_eft_header(eft_text):
@@ -3248,6 +3269,46 @@ def parse_eft_header(eft_text):
     }
 
 
+def resolve_eve_inventory_type_id(type_name):
+    """Resolve an exact EVE inventory type name through public ESI."""
+
+    clean_name = str(type_name or "").strip()
+
+    if not clean_name:
+        return None
+
+    try:
+        response = requests.post(
+            f"{ESI_BASE_URL}/universe/ids/",
+            json=[clean_name],
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        for item in payload.get("inventory_types", []):
+            if str(item.get("name", "")).casefold() == clean_name.casefold():
+                return int(item["id"])
+
+    except Exception as error:
+        print("Freeborn Fittings ESI type resolution failed:", repr(error))
+
+    return None
+
+
+def eve_type_render_url(type_id, size=512):
+    if not type_id:
+        return None
+
+    return (
+        f"https://images.evetech.net/types/{int(type_id)}/render"
+        f"?size={int(size)}&tenant=tranquility"
+    )
+
+
 def save_fit_phase1(
     guild_id,
     discord_user_id,
@@ -3268,6 +3329,8 @@ def save_fit_phase1(
     if not clean_usage:
         raise ValueError("L'usage du fit est obligatoire.")
 
+    ship_type_id = resolve_eve_inventory_type_id(parsed["ship_name"])
+
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -3276,6 +3339,7 @@ def save_fit_phase1(
                     guild_id,
                     name,
                     ship_name,
+                    ship_type_id,
                     usage,
                     eft_text,
                     notes,
@@ -3285,7 +3349,7 @@ def save_fit_phase1(
                     updated_at
                 )
                 VALUES (
-                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
                     'proposed', %s, NOW(), NOW()
                 )
                 RETURNING fit_id;
@@ -3294,6 +3358,7 @@ def save_fit_phase1(
                     str(guild_id),
                     clean_name,
                     parsed["ship_name"],
+                    ship_type_id,
                     clean_usage,
                     parsed["normalized_eft"],
                     clean_notes,
@@ -3309,9 +3374,258 @@ def save_fit_phase1(
         "fit_id": int(fit_id),
         "name": clean_name,
         "ship_name": parsed["ship_name"],
+        "ship_type_id": ship_type_id,
         "usage": clean_usage,
         "notes": clean_notes,
         "status": "proposed",
+    }
+
+
+def get_fit(guild_id, fit_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    fit_id,
+                    guild_id,
+                    name,
+                    ship_name,
+                    ship_type_id,
+                    usage,
+                    eft_text,
+                    notes,
+                    status,
+                    created_by_discord_user_id,
+                    created_at,
+                    updated_at
+                FROM fits
+                WHERE guild_id = %s
+                AND fit_id = %s
+                LIMIT 1;
+                """,
+                (str(guild_id), int(fit_id)),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    keys = (
+        "fit_id", "guild_id", "name", "ship_name", "ship_type_id",
+        "usage", "eft_text", "notes", "status",
+        "created_by_discord_user_id", "created_at", "updated_at",
+    )
+    return dict(zip(keys, row))
+
+
+def list_fits(guild_id, limit=50):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    fit_id,
+                    name,
+                    ship_name,
+                    usage,
+                    status,
+                    created_by_discord_user_id,
+                    created_at
+                FROM fits
+                WHERE guild_id = %s
+                ORDER BY fit_id DESC
+                LIMIT %s;
+                """,
+                (str(guild_id), int(limit)),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "fit_id": row[0],
+            "name": row[1],
+            "ship_name": row[2],
+            "usage": row[3],
+            "status": row[4],
+            "created_by_discord_user_id": row[5],
+            "created_at": row[6],
+        }
+        for row in rows
+    ]
+
+
+def ensure_fit_ship_type_id(fit):
+    if not fit or fit.get("ship_type_id"):
+        return fit
+
+    type_id = resolve_eve_inventory_type_id(fit.get("ship_name"))
+
+    if not type_id:
+        return fit
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET ship_type_id = %s,
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                AND fit_id = %s;
+                """,
+                (int(type_id), str(fit["guild_id"]), int(fit["fit_id"])),
+            )
+        conn.commit()
+
+    fit["ship_type_id"] = int(type_id)
+    return fit
+
+
+def fit_status_label(status):
+    labels = {
+        "proposed": "⚪ PROPOSÉ",
+        "approved": "🔵 APPROUVÉ FREEBORN",
+        "archived": "⚫ ARCHIVÉ",
+    }
+    return labels.get(str(status or "").lower(), str(status or "INCONNU").upper())
+
+
+def build_fit_embed(fit):
+    fit = ensure_fit_ship_type_id(fit)
+    notes = str(fit.get("notes") or "Aucune note particulière.")[:1024]
+
+    embed = {
+        "title": f"🛡️ FREEBORN FITTINGS — FB-{int(fit['fit_id']):04d}",
+        "description": (
+            f"## {fit['ship_name']}\n"
+            f"**{fit['name']}**\n\n"
+            f"Usage : **{fit['usage']}**"
+        ),
+        "color": 0x149CFF,
+        "fields": [
+            {
+                "name": "Statut",
+                "value": fit_status_label(fit.get("status")),
+                "inline": True,
+            },
+            {
+                "name": "Créateur",
+                "value": f"<@{fit['created_by_discord_user_id']}>",
+                "inline": True,
+            },
+            {
+                "name": "Notes du créateur",
+                "value": notes,
+                "inline": False,
+            },
+        ],
+        "footer": {
+            "text": "Freeborn Legacy • Fittings • EFT conservé dans Freeborn",
+        },
+    }
+
+    render_url = eve_type_render_url(fit.get("ship_type_id"), 512)
+    if render_url:
+        embed["thumbnail"] = {"url": render_url}
+
+    return embed
+
+
+def build_fit_components(fit_id):
+    return [
+        {
+            "type": 1,
+            "components": [
+                {
+                    "type": 2,
+                    "style": 2,
+                    "label": "Voir / copier l'EFT",
+                    "emoji": {"name": "📋"},
+                    "custom_id": f"fit_eft:{int(fit_id)}",
+                },
+            ],
+        },
+    ]
+
+
+def build_fit_list_message(guild_id):
+    fits = list_fits(guild_id, limit=50)
+
+    if not fits:
+        return (
+            "🛡️ **FREEBORN FITTINGS**\n\n"
+            "Aucun fitting n'est encore enregistré.\n"
+            "Utilise **/fit-creer** pour proposer le premier fit."
+        )
+
+    lines = [
+        "🛡️ **FREEBORN FITTINGS — Bibliothèque corporation**",
+        "",
+        f"Fittings enregistrés : **{len(fits)}**",
+        "",
+    ]
+
+    for fit in fits:
+        lines.append(
+            f"**FB-{int(fit['fit_id']):04d}** • **{fit['ship_name']}** "
+            f"— {fit['name']} • `{fit['usage']}` • "
+            f"{fit_status_label(fit['status'])}"
+        )
+
+    lines.extend([
+        "",
+        "Utilise **/fit-afficher id:** pour ouvrir une fiche.",
+    ])
+
+    return "\n".join(lines)[:1900]
+
+
+def create_fit_delete_token(fit_id, requester_user_id):
+    payload = f"{int(fit_id)}:{requester_user_id}"
+    return fit_delete_signer.sign(payload.encode()).decode()
+
+
+def read_fit_delete_token(token):
+    payload = fit_delete_signer.unsign(token, max_age=300).decode()
+    fit_id, requester_user_id = payload.split(":", 1)
+    return int(fit_id), requester_user_id
+
+
+def can_delete_fit(data, fit):
+    try:
+        actor_user_id = str(data["member"]["user"]["id"])
+    except (KeyError, TypeError):
+        return False
+
+    if actor_user_id == str(fit.get("created_by_discord_user_id")):
+        return True
+
+    return interaction_has_any_role(data, FITTING_MANAGER_ROLE_IDS)
+
+
+def delete_fit(guild_id, fit_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM fits
+                WHERE guild_id = %s
+                AND fit_id = %s
+                RETURNING fit_id, name, ship_name;
+                """,
+                (str(guild_id), int(fit_id)),
+            )
+            deleted = cur.fetchone()
+        conn.commit()
+
+    if not deleted:
+        return None
+
+    return {
+        "fit_id": int(deleted[0]),
+        "name": deleted[1],
+        "ship_name": deleted[2],
     }
 
 
@@ -3407,19 +3721,17 @@ def handle_fit_modal_submit(data):
             },
         })
 
+    fit = get_fit(guild_id, saved["fit_id"])
+
     return jsonify({
         "type": 4,
         "data": {
             "content": (
-                "✅ **Fit enregistré — Phase 1**\n\n"
-                f"ID : **FB-{saved['fit_id']:04d}**\n"
-                f"Vaisseau : **{saved['ship_name']}**\n"
-                f"Fit : **{saved['name']}**\n"
-                f"Usage : **{saved['usage']}**\n"
-                "Statut : ⚪ **PROPOSÉ**\n\n"
-                "Le copier-coller EFT est bien stocké dans Freeborn. "
-                "La fiche graphique sera ajoutée à l'étape suivante."
+                f"✅ **FB-{saved['fit_id']:04d} enregistré dans Freeborn.**\n"
+                "La fiche ci-dessous peut maintenant être partagée avec la corporation."
             ),
+            "embeds": [build_fit_embed(fit)],
+            "components": build_fit_components(saved["fit_id"]),
             "flags": 64,
         },
     })
@@ -6454,6 +6766,79 @@ def handle_message_component(
             },
         })
 
+    # ========================================================
+    # FREEBORN FITTINGS — COMPONENTS
+    # ========================================================
+
+    if custom_id.startswith("fit_eft:"):
+        try:
+            fit_id = int(custom_id.split(":", 1)[1])
+            guild_id = str(data["guild_id"])
+        except (ValueError, KeyError, TypeError):
+            return jsonify({"type": 4, "data": {"content": "❌ Fit invalide.", "flags": 64}})
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({"type": 4, "data": {"content": "❌ Ce fit n'existe plus dans Freeborn.", "flags": 64}})
+
+        if not interaction_has_any_role(data, FITTING_CREATOR_ROLE_IDS):
+            return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
+
+        eft_text = str(fit.get("eft_text") or "")
+        safe_eft = eft_text[:1800]
+        suffix = "\n… *(EFT tronqué pour Discord)*" if len(eft_text) > 1800 else ""
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"📋 **EFT — FB-{fit_id:04d} • {fit['ship_name']}**\n"
+                    f"```\n{safe_eft}\n```{suffix}"
+                ),
+                "flags": 64,
+            },
+        })
+
+    if custom_id.startswith("fit_del_yes:") or custom_id.startswith("fit_del_no:"):
+        try:
+            actor_user_id = str(data["member"]["user"]["id"])
+            guild_id = str(data["guild_id"])
+            token = custom_id.split(":", 1)[1]
+            fit_id, requester_user_id = read_fit_delete_token(token)
+        except SignatureExpired:
+            return jsonify({"type": 7, "data": {"content": "⌛ **Confirmation expirée**\n\nAucun fit n'a été supprimé.", "components": []}})
+        except (BadSignature, ValueError, KeyError, TypeError):
+            return jsonify({"type": 7, "data": {"content": "⛔ **Confirmation invalide**\n\nAucun fit n'a été supprimé.", "components": []}})
+
+        if actor_user_id != requester_user_id:
+            return jsonify({"type": 4, "data": {"content": "⛔ Cette confirmation ne t'appartient pas.", "flags": 64}})
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({"type": 7, "data": {"content": "ℹ️ Ce fit n'existe déjà plus dans Freeborn.", "components": []}})
+
+        if not can_delete_fit(data, fit):
+            return jsonify({"type": 4, "data": {"content": "⛔ Tu n'as plus la permission de supprimer ce fit.", "flags": 64}})
+
+        if custom_id.startswith("fit_del_no:"):
+            return jsonify({"type": 7, "data": {"content": "🛡️ **Suppression annulée**\n\nLe fit reste enregistré dans Freeborn.", "components": []}})
+
+        deleted = delete_fit(guild_id, fit_id)
+        if not deleted:
+            return jsonify({"type": 7, "data": {"content": "ℹ️ Ce fit n'existe déjà plus dans Freeborn.", "components": []}})
+
+        return jsonify({
+            "type": 7,
+            "data": {
+                "content": (
+                    f"🗑️ **FB-{fit_id:04d} supprimé définitivement**\n\n"
+                    f"**{deleted['ship_name']} — {deleted['name']}** a été retiré de Neon.\n"
+                    "Les éventuels anciens messages Discord déjà publiés ne constituent pas la base de données."
+                ),
+                "components": [],
+            },
+        })
+
     # --------------------------------------------------------
     # Ignore unknown components
     # --------------------------------------------------------
@@ -7105,7 +7490,112 @@ def interactions():
         })
 
     # ========================================================
-    # /fit-creer — FREEBORN FITTINGS PHASE 1
+    # /fit-liste — FREEBORN FITTINGS
+    # ========================================================
+
+    if command_name == "fit-liste":
+        if not interaction_has_any_role(data, FITTING_CREATOR_ROLE_IDS):
+            return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": build_fit_list_message(guild_id),
+                "flags": 64,
+            },
+        })
+
+    # ========================================================
+    # /fit-afficher — FREEBORN FITTINGS
+    # Public corporation card in the current channel.
+    # ========================================================
+
+    if command_name == "fit-afficher":
+        if not interaction_has_any_role(data, FITTING_CREATOR_ROLE_IDS):
+            return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
+
+        fit_id = None
+        for option in data["data"].get("options", []):
+            if option.get("name") == "id":
+                fit_id = option.get("value")
+                break
+
+        fit = get_fit(guild_id, fit_id) if fit_id is not None else None
+        if not fit:
+            return jsonify({"type": 4, "data": {"content": "❌ Ce fit n'existe pas dans Freeborn.", "flags": 64}})
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "embeds": [build_fit_embed(fit)],
+                "components": build_fit_components(fit["fit_id"]),
+            },
+        })
+
+    # ========================================================
+    # /fit-supprimer — FREEBORN FITTINGS
+    # Real deletion from Neon after confirmation.
+    # ========================================================
+
+    if command_name == "fit-supprimer":
+        fit_id = None
+        for option in data["data"].get("options", []):
+            if option.get("name") == "id":
+                fit_id = option.get("value")
+                break
+
+        fit = get_fit(guild_id, fit_id) if fit_id is not None else None
+        if not fit:
+            return jsonify({"type": 4, "data": {"content": "❌ Ce fit n'existe pas dans Freeborn.", "flags": 64}})
+
+        if not can_delete_fit(data, fit):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Suppression refusée**\n\n"
+                        "Seul le créateur du fit ou le staff Fittings peut le supprimer."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        token = create_fit_delete_token(fit["fit_id"], discord_user_id)
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"⚠️ **Supprimer définitivement FB-{fit['fit_id']:04d} ?**\n\n"
+                    f"Vaisseau : **{fit['ship_name']}**\n"
+                    f"Fit : **{fit['name']}**\n\n"
+                    "Cette action supprimera réellement le fitting de Neon."
+                ),
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 2,
+                                "style": 4,
+                                "label": "Supprimer définitivement",
+                                "custom_id": f"fit_del_yes:{token}",
+                            },
+                            {
+                                "type": 2,
+                                "style": 2,
+                                "label": "Annuler",
+                                "custom_id": f"fit_del_no:{token}",
+                            },
+                        ],
+                    },
+                ],
+                "flags": 64,
+            },
+        })
+
+    # ========================================================
+    # /fit-creer — FREEBORN FITTINGS
     # ========================================================
 
     if command_name == "fit-creer":
@@ -10971,6 +11461,59 @@ def register_commands():
 
         {
             "name":
+                "fit-liste",
+
+            "description":
+                "Afficher la bibliothèque des fittings Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "fit-afficher",
+
+            "description":
+                "Publier la fiche d'un fitting Freeborn",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type": 4,
+                    "name": "id",
+                    "description": "Numéro du fit (ex. 1 pour FB-0001)",
+                    "required": True,
+                    "min_value": 1,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "fit-supprimer",
+
+            "description":
+                "Supprimer définitivement un fitting Freeborn",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type": 4,
+                    "name": "id",
+                    "description": "Numéro du fit (ex. 1 pour FB-0001)",
+                    "required": True,
+                    "min_value": 1,
+                }
+            ],
+        },
+
+        {
+            "name":
                 "guide-membre",
 
             "description":
@@ -11414,7 +11957,8 @@ def register_commands():
 
             print(
                 "Commandes Discord enregistrées : "
-                "/freeborn, /fit-creer, /guide-membre, /guide-staff, /verification, "
+                "/freeborn, /fit-creer, /fit-liste, /fit-afficher, /fit-supprimer, "
+                "/guide-membre, /guide-staff, /verification, "
                 "/alt-ajouter, /alt-supprimer, /main-changer, "
                 "/membre-info, /membre-liste, "
                 "/membre-promouvoir, /membre-supprimer, "
