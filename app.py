@@ -7410,7 +7410,9 @@ button{{font:inherit}}
 .content{{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,42%);gap:14px;padding:14px 16px 10px}}
 .panel{{border:1px solid rgba(213,166,50,.38);background:linear-gradient(180deg,rgba(13,18,25,.94),rgba(7,10,15,.97));padding:16px}}
 .kicker{{color:var(--gold2);font-size:11px;letter-spacing:.18em;text-transform:uppercase}}
-h2{{margin:5px 0 2px;font-size:clamp(27px,3.8vw,44px);line-height:1.08;text-transform:uppercase}}
+.ship-title{{margin:7px 0 0;color:#e8e5df;font-size:clamp(18px,2vw,26px);font-weight:800;letter-spacing:.07em;text-transform:uppercase}}
+.fit-title{{margin:3px 0 5px;color:var(--gold2);font-size:clamp(22px,2.9vw,34px);line-height:1.08;font-weight:850;letter-spacing:.025em;text-transform:uppercase;text-shadow:0 0 18px rgba(213,166,50,.10)}}
+.techline{{color:#71849a;font:10px/1.4 Consolas,monospace;letter-spacing:.13em;text-transform:uppercase}}
 .ref{{color:var(--muted);font-family:Consolas,monospace;font-size:13px}}
 .meta{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px}}
 .meta div{{padding:9px 12px;border-top:1px solid rgba(213,166,50,.26);background:rgba(0,0,0,.16)}}
@@ -7450,8 +7452,9 @@ pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;bor
   <section class="content">
     <article class="panel">
       <div class="kicker">{safe_ref} • fiche corporate</div>
-      <h2>{safe_name}</h2>
-      <div class="ref">{safe_ship}</div>
+      <div class="ship-title">{safe_ship}</div>
+      <h2 class="fit-title">{safe_name}</h2>
+      <div class="techline">FREEBORN LEGACY // FITTING DATABASE // {safe_ref}</div>
       <div class="meta">
         <div><small>Usage</small><strong>{safe_usage}</strong></div>
         <div><small>Créé par</small><strong>{safe_creator}</strong></div>
@@ -7476,7 +7479,7 @@ pre{{margin:0;max-height:280px;overflow:auto;padding:12px;background:#050914;bor
     </div>
   </section>
 
-  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Fittings 4B</span></footer>
+  <footer class="bottom"><span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span><span>Freeborn Legacy • Fittings 4C</span></footer>
 </main>
 <div class="toast" id="toast">EFT copié</div>
 <script>
