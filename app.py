@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from html import escape
 from urllib.parse import urlencode
 
@@ -4823,10 +4824,40 @@ def remove_discord_role(
     )
 
 
+_discord_member_read_cache = {}
+DISCORD_MEMBER_CACHE_TTL_SECONDS = 300
+
+
 def get_discord_member(
     guild_id,
     user_id,
 ):
+    """
+    Read one Discord member with a short in-process cache.
+
+    Fitting pages only need the creator display name. Re-querying Discord on
+    every page refresh adds avoidable latency and does not need real-time
+    precision.
+    """
+    guild_id = str(guild_id or "")
+    user_id = str(user_id or "")
+
+    if not guild_id or not user_id:
+        return None
+
+    key = (guild_id, user_id)
+    now = time.monotonic()
+
+    cached = _discord_member_read_cache.get(key)
+
+    if cached:
+        cached_at, payload = cached
+
+        if (
+            now - cached_at
+            <= DISCORD_MEMBER_CACHE_TTL_SECONDS
+        ):
+            return payload
 
     response = requests.get(
         f"{DISCORD_API}/guilds/{guild_id}/members/{user_id}",
@@ -4839,7 +4870,14 @@ def get_discord_member(
     if response.status_code != 200:
         return None
 
-    return response.json()
+    payload = response.json()
+
+    _discord_member_read_cache[key] = (
+        now,
+        payload,
+    )
+
+    return payload
 
 
 def send_discord_channel_message(
@@ -7567,6 +7605,9 @@ def normalize_eft_item_name(line):
     return clean
 
 
+_eve_inventory_batch_id_cache = {}
+
+
 def resolve_eve_inventory_type_ids(type_names):
     """Resolve many exact EVE inventory names in one public ESI request."""
     names = []
@@ -7581,6 +7622,20 @@ def resolve_eve_inventory_type_ids(type_names):
     if not names:
         return {}
 
+    cache_key = tuple(
+        sorted(
+            value.casefold()
+            for value in names
+        )
+    )
+
+    cached = _eve_inventory_batch_id_cache.get(
+        cache_key
+    )
+
+    if cached is not None:
+        return dict(cached)
+
     try:
         response = requests.post(
             f"{ESI_BASE_URL}/universe/ids/",
@@ -7592,11 +7647,17 @@ def resolve_eve_inventory_type_ids(type_names):
         )
         response.raise_for_status()
         payload = response.json()
-        return {
+        resolved = {
             str(item.get("name", "")).casefold(): int(item["id"])
             for item in payload.get("inventory_types", [])
             if item.get("name") and item.get("id")
         }
+
+        _eve_inventory_batch_id_cache[
+            cache_key
+        ] = dict(resolved)
+
+        return resolved
     except Exception as error:
         print("Freeborn Fittings ESI batch type resolution failed:", repr(error))
         return {}
@@ -7673,6 +7734,37 @@ def get_eve_type_metadata(type_id):
         response.raise_for_status()
         payload = response.json() or {}
         _eve_type_metadata_cache[type_id] = payload
+
+        dogma = {}
+        for row in payload.get(
+            "dogma_attributes",
+            [],
+        ) or []:
+            attribute_id = row.get(
+                "attribute_id"
+            )
+            value = row.get(
+                "value"
+            )
+
+            if (
+                attribute_id is None
+                or value is None
+            ):
+                continue
+
+            try:
+                dogma[
+                    int(attribute_id)
+                ] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+        if dogma:
+            _eve_type_dogma_cache[
+                type_id
+            ] = dogma
+
         return payload
 
     except Exception as error:
@@ -8168,6 +8260,43 @@ def get_eve_type_dogma(type_id):
     if type_id in _eve_type_dogma_cache:
         return _eve_type_dogma_cache[type_id]
 
+    cached_payload = _eve_type_metadata_cache.get(
+        type_id
+    )
+
+    if cached_payload:
+        dogma = {}
+
+        for row in cached_payload.get(
+            "dogma_attributes",
+            [],
+        ) or []:
+            attribute_id = row.get(
+                "attribute_id"
+            )
+            value = row.get(
+                "value"
+            )
+
+            if (
+                attribute_id is None
+                or value is None
+            ):
+                continue
+
+            try:
+                dogma[
+                    int(attribute_id)
+                ] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+        _eve_type_dogma_cache[
+            type_id
+        ] = dogma
+
+        return dogma
+
     try:
         response = requests.get(
             f"{ESI_BASE_URL}/universe/types/{type_id}/",
@@ -8179,6 +8308,11 @@ def get_eve_type_dogma(type_id):
         )
         response.raise_for_status()
         payload = response.json()
+
+        if type_id not in _eve_type_metadata_cache:
+            _eve_type_metadata_cache[
+                type_id
+            ] = payload
 
         dogma = {}
         for row in payload.get("dogma_attributes", []) or []:
@@ -8881,31 +9015,71 @@ def freeborn_dogma_rows_matching(
     contains_names=(),
 ):
     """
-    Return Dogma attributes whose metadata name/display name matches a fragment.
+    Fast 4Q-C3 audit resolver.
 
-    4Q-A2 fixes the 4Q-A NameError by using the Dogma helpers that already
-    exist in Freeborn:
-        get_eve_type_dogma(type_id)
-        get_eve_dogma_attribute_metadata(attribute_id)
+    This diagnostic used to call /dogma/attributes for nearly every Dogma
+    attribute on each launcher/BCS during a cold Render process. The DPS
+    branch already validated the stable IDs below, so use them directly and
+    retain metadata scanning only as a fallback for other requested families.
     """
-    rows = []
-
     dogma = get_eve_type_dogma(
         type_id
     )
 
     if not dogma:
-        return rows
+        return []
 
     fragments = tuple(
-        str(fragment).strip().casefold()
-        for fragment in contains_names
-        if str(fragment).strip()
+        str(value).strip().casefold()
+        for value in contains_names
+        if str(value).strip()
     )
 
+    known = {
+        51: "Rate of fire",
+        204: "Rate of Fire Bonus",
+        213: "Missile Damage Bonus",
+        604: "Used with (Charge Group)",
+        605: "Used with (Charge Group)",
+        609: "Used with (Charge Group)",
+        1205: "Overload rate of fire bonus",
+    }
+
+    direct_rows = []
+
+    for attribute_id, label in known.items():
+        if attribute_id not in dogma:
+            continue
+
+        normalized_label = label.casefold()
+
+        if not any(
+            fragment in normalized_label
+            or normalized_label in fragment
+            for fragment in fragments
+        ):
+            continue
+
+        direct_rows.append({
+            "name": label,
+            "value": dogma[
+                attribute_id
+            ],
+            "attribute_id": attribute_id,
+        })
+
+    if direct_rows:
+        return direct_rows
+
+    # Generic fallback for future weapon families not yet promoted to direct
+    # IDs. This path is intentionally rare.
+    rows = []
+
     for attribute_id, value in dogma.items():
-        metadata = get_eve_dogma_attribute_metadata(
-            attribute_id
+        metadata = (
+            get_eve_dogma_attribute_metadata(
+                attribute_id
+            )
         )
 
         name = str(
@@ -8938,7 +9112,9 @@ def freeborn_dogma_rows_matching(
                     or f"attribute {attribute_id}"
                 ),
                 "value": value,
-                "attribute_id": int(attribute_id),
+                "attribute_id": int(
+                    attribute_id
+                ),
             })
 
     return rows
@@ -9833,7 +10009,7 @@ def freeborn_render_bcs_stack_audit(
     launcher_audit,
 ):
     chunks = [
-        '<strong>DPS — BALLISTIC CONTROL SYSTEMS 4Q-C2</strong>',
+        '<strong>DPS — BALLISTIC CONTROL SYSTEMS 4Q-C3</strong>',
         '<br>Stacking penalties appliquées séparément au '
         'bonus dégâts missile et à la réduction du cycle launcher.',
     ]
@@ -11392,7 +11568,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4Q-C2 — FITTING / CAP / VITESSE / DPS</div>
+              <div class="pilot-engine-title">MOTEUR 4Q-C3 — FITTING / CAP / VITESSE / DPS</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -12901,7 +13077,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4Q-C2</strong>
+            <strong>ALL V — VALIDATION 4Q-C3</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -13026,7 +13202,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4Q-C2</span>
+    <span class="version">Freeborn Legacy • Fittings 4Q-C3</span>
   </footer>
 </main>
 
