@@ -3381,6 +3381,34 @@ def save_fit_phase1(
     }
 
 
+def parse_fit_reference(value):
+    """Accept 1, "1", "FB-0001", "fb0001" or "FB 0001"."""
+
+    text = str(value or "").strip().upper()
+
+    if not text:
+        raise ValueError("Identifiant de fit manquant.")
+
+    compact = text.replace("-", "").replace(" ", "")
+
+    if compact.startswith("FB"):
+        compact = compact[2:]
+
+    if not compact.isdigit():
+        raise ValueError("Identifiant de fit invalide. Utilise par exemple FB-0001.")
+
+    fit_id = int(compact)
+
+    if fit_id < 1:
+        raise ValueError("Identifiant de fit invalide.")
+
+    return fit_id
+
+
+def format_fit_reference(fit_id):
+    return f"FB-{int(fit_id):04d}"
+
+
 def get_fit(guild_id, fit_id):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -3485,10 +3513,21 @@ def ensure_fit_ship_type_id(fit):
 def fit_status_label(status):
     labels = {
         "proposed": "⚪ PROPOSÉ",
-        "approved": "🔵 APPROUVÉ FREEBORN",
+        "approved": "🟢 FREEBORN APPROVED",
+        "rejected": "🔴 REFUSÉ",
         "archived": "⚫ ARCHIVÉ",
     }
     return labels.get(str(status or "").lower(), str(status or "INCONNU").upper())
+
+
+def fit_embed_color(status):
+    colors = {
+        "proposed": 0xD6A84B,
+        "approved": 0x78C94A,
+        "rejected": 0xC94A4A,
+        "archived": 0x666666,
+    }
+    return colors.get(str(status or "").lower(), 0x149CFF)
 
 
 def build_fit_embed(fit):
@@ -3496,13 +3535,13 @@ def build_fit_embed(fit):
     notes = str(fit.get("notes") or "Aucune note particulière.")[:1024]
 
     embed = {
-        "title": f"🛡️ FREEBORN FITTINGS — FB-{int(fit['fit_id']):04d}",
+        "title": f"🛡️ FREEBORN FITTINGS — {format_fit_reference(fit['fit_id'])}",
         "description": (
             f"## {fit['ship_name']}\n"
             f"**{fit['name']}**\n\n"
             f"Usage : **{fit['usage']}**"
         ),
-        "color": 0x149CFF,
+        "color": fit_embed_color(fit.get("status")),
         "fields": [
             {
                 "name": "Statut",
@@ -3568,14 +3607,14 @@ def build_fit_list_message(guild_id):
 
     for fit in fits:
         lines.append(
-            f"**FB-{int(fit['fit_id']):04d}** • **{fit['ship_name']}** "
+            f"**{format_fit_reference(fit['fit_id'])}** • **{fit['ship_name']}** "
             f"— {fit['name']} • `{fit['usage']}` • "
             f"{fit_status_label(fit['status'])}"
         )
 
     lines.extend([
         "",
-        "Utilise **/fit-afficher id:** pour ouvrir une fiche.",
+        "Utilise **/fit-afficher ref:FB-0001** pour ouvrir une fiche.",
     ])
 
     return "\n".join(lines)[:1900]
@@ -3602,6 +3641,40 @@ def can_delete_fit(data, fit):
         return True
 
     return interaction_has_any_role(data, FITTING_MANAGER_ROLE_IDS)
+
+
+def set_fit_status(guild_id, fit_id, status):
+    allowed_statuses = {"proposed", "approved", "rejected", "archived"}
+    clean_status = str(status or "").lower()
+
+    if clean_status not in allowed_statuses:
+        raise ValueError("Statut de fitting invalide.")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET status = %s,
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                AND fit_id = %s
+                RETURNING fit_id, name, ship_name, status;
+                """,
+                (clean_status, str(guild_id), int(fit_id)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    if not row:
+        return None
+
+    return {
+        "fit_id": int(row[0]),
+        "name": row[1],
+        "ship_name": row[2],
+        "status": row[3],
+    }
 
 
 def delete_fit(guild_id, fit_id):
@@ -7514,15 +7587,20 @@ def interactions():
         if not interaction_has_any_role(data, FITTING_CREATOR_ROLE_IDS):
             return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
 
-        fit_id = None
+        fit_ref = None
         for option in data["data"].get("options", []):
-            if option.get("name") == "id":
-                fit_id = option.get("value")
+            if option.get("name") == "ref":
+                fit_ref = option.get("value")
                 break
 
-        fit = get_fit(guild_id, fit_id) if fit_id is not None else None
+        try:
+            fit_id = parse_fit_reference(fit_ref)
+        except ValueError as error:
+            return jsonify({"type": 4, "data": {"content": f"❌ {error}", "flags": 64}})
+
+        fit = get_fit(guild_id, fit_id)
         if not fit:
-            return jsonify({"type": 4, "data": {"content": "❌ Ce fit n'existe pas dans Freeborn.", "flags": 64}})
+            return jsonify({"type": 4, "data": {"content": f"❌ {format_fit_reference(fit_id)} n'existe pas dans Freeborn.", "flags": 64}})
 
         return jsonify({
             "type": 4,
@@ -7533,20 +7611,83 @@ def interactions():
         })
 
     # ========================================================
+    # /fit-approuver + /fit-refuser — FREEBORN FITTINGS
+    # Staff workflow: PROPOSÉ -> FREEBORN APPROVED / REFUSÉ.
+    # ========================================================
+
+    if command_name in {"fit-approuver", "fit-refuser"}:
+        if not interaction_has_any_role(data, FITTING_MANAGER_ROLE_IDS):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Accès refusé**\n\n"
+                        "La validation des fittings est réservée au staff Fittings "
+                        "(Fleet Commander et hiérarchie supérieure)."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        fit_ref = None
+        for option in data["data"].get("options", []):
+            if option.get("name") == "ref":
+                fit_ref = option.get("value")
+                break
+
+        try:
+            fit_id = parse_fit_reference(fit_ref)
+        except ValueError as error:
+            return jsonify({"type": 4, "data": {"content": f"❌ {error}", "flags": 64}})
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({"type": 4, "data": {"content": f"❌ {format_fit_reference(fit_id)} n'existe pas dans Freeborn.", "flags": 64}})
+
+        new_status = "approved" if command_name == "fit-approuver" else "rejected"
+        updated = set_fit_status(guild_id, fit_id, new_status)
+
+        if not updated:
+            return jsonify({"type": 4, "data": {"content": "❌ Mise à jour impossible.", "flags": 64}})
+
+        action_text = (
+            "🟢 **FREEBORN APPROVED**"
+            if new_status == "approved"
+            else "🔴 **FIT REFUSÉ**"
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"{action_text} — **{format_fit_reference(fit_id)}**\n\n"
+                    f"**{updated['ship_name']} — {updated['name']}**\n"
+                    f"Statut : {fit_status_label(updated['status'])}"
+                ),
+                "flags": 64,
+            },
+        })
+
+    # ========================================================
     # /fit-supprimer — FREEBORN FITTINGS
     # Real deletion from Neon after confirmation.
     # ========================================================
 
     if command_name == "fit-supprimer":
-        fit_id = None
+        fit_ref = None
         for option in data["data"].get("options", []):
-            if option.get("name") == "id":
-                fit_id = option.get("value")
+            if option.get("name") == "ref":
+                fit_ref = option.get("value")
                 break
 
-        fit = get_fit(guild_id, fit_id) if fit_id is not None else None
+        try:
+            fit_id = parse_fit_reference(fit_ref)
+        except ValueError as error:
+            return jsonify({"type": 4, "data": {"content": f"❌ {error}", "flags": 64}})
+
+        fit = get_fit(guild_id, fit_id)
         if not fit:
-            return jsonify({"type": 4, "data": {"content": "❌ Ce fit n'existe pas dans Freeborn.", "flags": 64}})
+            return jsonify({"type": 4, "data": {"content": f"❌ {format_fit_reference(fit_id)} n'existe pas dans Freeborn.", "flags": 64}})
 
         if not can_delete_fit(data, fit):
             return jsonify({
@@ -7566,7 +7707,7 @@ def interactions():
             "type": 4,
             "data": {
                 "content": (
-                    f"⚠️ **Supprimer définitivement FB-{fit['fit_id']:04d} ?**\n\n"
+                    f"⚠️ **Supprimer définitivement {format_fit_reference(fit['fit_id'])} ?**\n\n"
                     f"Vaisseau : **{fit['ship_name']}**\n"
                     f"Fit : **{fit['name']}**\n\n"
                     "Cette action supprimera réellement le fitting de Neon."
@@ -11482,11 +11623,56 @@ def register_commands():
 
             "options": [
                 {
-                    "type": 4,
-                    "name": "id",
-                    "description": "Numéro du fit (ex. 1 pour FB-0001)",
+                    "type": 3,
+                    "name": "ref",
+                    "description": "Référence du fit (ex. FB-0001)",
                     "required": True,
-                    "min_value": 1,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "fit-approuver",
+
+            "description":
+                "Valider un fitting comme FREEBORN APPROVED",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type": 3,
+                    "name": "ref",
+                    "description": "Référence du fit (ex. FB-0001)",
+                    "required": True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "fit-refuser",
+
+            "description":
+                "Refuser un fitting proposé",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type": 3,
+                    "name": "ref",
+                    "description": "Référence du fit (ex. FB-0001)",
+                    "required": True,
                 }
             ],
         },
@@ -11503,11 +11689,10 @@ def register_commands():
 
             "options": [
                 {
-                    "type": 4,
-                    "name": "id",
-                    "description": "Numéro du fit (ex. 1 pour FB-0001)",
+                    "type": 3,
+                    "name": "ref",
+                    "description": "Référence du fit (ex. FB-0001)",
                     "required": True,
-                    "min_value": 1,
                 }
             ],
         },
@@ -11957,7 +12142,7 @@ def register_commands():
 
             print(
                 "Commandes Discord enregistrées : "
-                "/freeborn, /fit-creer, /fit-liste, /fit-afficher, /fit-supprimer, "
+                "/freeborn, /fit-creer, /fit-liste, /fit-afficher, /fit-approuver, /fit-refuser, /fit-supprimer, "
                 "/guide-membre, /guide-staff, /verification, "
                 "/alt-ajouter, /alt-supprimer, /main-changer, "
                 "/membre-info, /membre-liste, "
