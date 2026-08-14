@@ -380,7 +380,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2-JITA + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2B-SEARCH-PRICEOVERRIDE + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -4174,7 +4174,7 @@ def freeborn_market_search_types(query):
         return cached["items"]
 
     response = requests.get(
-        f"{ESI_BASE_URL}/search/",
+        "https://esi.evetech.net/v2/search/",
         params={
             "categories": "inventory_type",
             "search": normalized,
@@ -4187,6 +4187,15 @@ def freeborn_market_search_types(query):
         },
         timeout=12,
     )
+    if response.status_code != 200:
+        print(
+            "Freeborn Market EVE search HTTP error:",
+            response.status_code,
+            response.text[:500],
+            "query=",
+            normalized,
+        )
+
     response.raise_for_status()
 
     ids = (
@@ -4420,6 +4429,12 @@ def freeborn_market_phase2_page(
         else "JITA SELL"
     )
 
+    custom_price_label = (
+        "PRIX D'ACHAT"
+        if is_buy
+        else "PRIX VENDEUR"
+    )
+
     safe_token = escape(
         str(token),
         quote=True,
@@ -4452,7 +4467,7 @@ html,body{{min-height:100%}}
 body{{
   margin:0;
   color:var(--text);
-  font-family:"Rajdhani","Arial Narrow",Arial,sans-serif;
+  font-family:"Arial Narrow","Roboto Condensed",Arial,sans-serif;
   background:
     linear-gradient(rgba(1,8,15,.78),rgba(1,8,15,.88)),
     url('/assets/bg-space.jpg') center/cover fixed no-repeat,
@@ -4496,7 +4511,7 @@ button,input{{font:inherit}}
   margin:0;
   font-size:34px;
   letter-spacing:2.2px;
-  font-weight:700;
+  font-weight:600;
 }}
 .brand h1 span{{color:var(--gold)}}
 .brand p{{
@@ -4513,8 +4528,8 @@ button,input{{font:inherit}}
   color:var(--gold);
   background:rgba(240,195,91,.06);
   font-size:12px;
-  font-weight:800;
-  letter-spacing:1.1px;
+  font-weight:700;
+  letter-spacing:1px;
 }}
 .corp-mode{{
   border-color:rgba(128,245,139,.65);
@@ -4632,7 +4647,7 @@ button,input{{font:inherit}}
 }}
 .line-head,.market-row{{
   display:grid;
-  grid-template-columns:38px minmax(260px,1fr) 92px 170px 180px 44px;
+  grid-template-columns:34px minmax(240px,1fr) 76px 145px 145px 160px 40px;
   gap:7px;
   align-items:center;
 }}
@@ -4724,6 +4739,21 @@ button,input{{font:inherit}}
   text-align:right;
   padding:0 9px;
 }}
+.manual-price{{
+  width:100%;
+  height:42px;
+  border:1px solid rgba(240,195,91,.45);
+  background:#020a12;
+  color:#f5dc97;
+  text-align:right;
+  padding:0 9px;
+  outline:none;
+  font-weight:700;
+}}
+.manual-price:focus{{
+  border-color:rgba(240,195,91,.85);
+  box-shadow:0 0 0 1px rgba(240,195,91,.10);
+}}
 .value-box{{
   min-height:42px;
   display:flex;
@@ -4756,8 +4786,8 @@ button,input{{font:inherit}}
   border:1px solid rgba(240,195,91,.62);
   background:linear-gradient(180deg,rgba(240,195,91,.12),rgba(240,195,91,.025));
   color:#f0d27e;
-  font-weight:800;
-  letter-spacing:.5px;
+  font-weight:700;
+  letter-spacing:.35px;
   cursor:pointer;
 }}
 .action.primary{{
@@ -4828,7 +4858,7 @@ button,input{{font:inherit}}
 @media(max-width:1050px){{
   .workspace{{grid-template-columns:1fr}}
   .line-head,.market-row{{
-    grid-template-columns:34px minmax(200px,1fr) 82px 145px 155px 40px;
+    grid-template-columns:30px minmax(190px,1fr) 72px 130px 130px 145px 38px;
   }}
 }}
 @media(max-width:760px){{
@@ -4840,6 +4870,7 @@ button,input{{font:inherit}}
     grid-template-columns:30px 1fr 78px 38px;
   }}
   .market-row .price-box,
+  .market-row .manual-price,
   .market-row .subtotal{{
     grid-column:2 / 4;
   }}
@@ -4893,6 +4924,7 @@ button,input{{font:inherit}}
           <div>Item EVE</div>
           <div>Qté</div>
           <div>Prix Jita</div>
+          <div>{custom_price_label}</div>
           <div>Sous-total</div>
           <div></div>
         </div>
@@ -4906,7 +4938,7 @@ button,input{{font:inherit}}
       </div>
 
       <div class="status-line" id="marketStatus">
-        Recherche EVE et prix Jita actifs. Commence par saisir au moins 2 caractères.
+        Recherche EVE active. Le {custom_price_label.lower()} reprend le prix Jita par défaut et peut être modifié ; l'ajustement global s'applique ensuite à toute l'annonce.
       </div>
     </div>
 
@@ -4980,6 +5012,26 @@ function money(value) {{
   }}) + ' ISK';
 }}
 
+function parseISKInput(value) {{
+  let raw = String(value ?? '')
+    .trim()
+    .replace(/\s/g, '')
+    .replace(',', '.')
+    .replace(/[^0-9.-]/g, '');
+
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}}
+
+function plainISK(value) {{
+  if (!Number.isFinite(Number(value))) return '';
+  return Number(value).toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    useGrouping: false
+  }});
+}}
+
 function parseAdjustment() {{
   let raw = String(adjustmentInput.value || '0')
     .trim()
@@ -5010,11 +5062,17 @@ function updateTotals() {{
 
   document.querySelectorAll('.market-row').forEach(row => {{
     const qty = Math.max(1, Number(row.querySelector('.qty').value || 1));
-    const price = Number(row.dataset.referencePrice || 0);
+    const referencePrice = Number(row.dataset.referencePrice || 0);
+    const manualPriceInput = row.querySelector('.manual-price');
+    const chosenUnitPrice = parseISKInput(manualPriceInput.value);
 
-    const adjustedUnit = price > 0 ? price * multiplier : 0;
+    const adjustedUnit = chosenUnitPrice > 0
+      ? chosenUnitPrice * multiplier
+      : 0;
+
     const subtotal = adjustedUnit * qty;
 
+    row.dataset.chosenUnitPrice = chosenUnitPrice;
     row.dataset.adjustedUnit = adjustedUnit;
     row.dataset.subtotal = subtotal;
 
@@ -5022,14 +5080,14 @@ function updateTotals() {{
       subtotal > 0 ? money(subtotal) : '—';
 
     row.querySelector('.subtotal small').textContent =
-      price > 0
+      chosenUnitPrice > 0
       ? (
           (adjustment > 0 ? '+' : '') +
           adjustment.toLocaleString('fr-FR', {{
             minimumFractionDigits: 2,
             maximumFractionDigits: 2
           }}) +
-          ' %'
+          ' % GLOBAL'
         )
       : 'AJUSTEMENT';
 
@@ -5110,6 +5168,8 @@ function makeRow() {{
       <b>—</b>
       <small>{reference_label}</small>
     </div>
+    <input class="manual-price" type="text" inputmode="decimal"
+      placeholder="{custom_price_label}" aria-label="{custom_price_label}">
     <div class="value-box subtotal">
       <b>—</b>
       <small>AJUSTEMENT</small>
@@ -5121,6 +5181,7 @@ function makeRow() {{
   const results = row.querySelector('.results');
   const icon = row.querySelector('.item-icon');
   const qty = row.querySelector('.qty');
+  const manualPrice = row.querySelector('.manual-price');
   const remove = row.querySelector('.remove');
 
   let debounceTimer = null;
@@ -5129,7 +5190,9 @@ function makeRow() {{
   input.addEventListener('input', () => {{
     row.dataset.typeId = '';
     row.dataset.referencePrice = '0';
+    row.dataset.priceFetchedAt = '';
     icon.style.display = 'none';
+    manualPrice.value = '';
     row.querySelector('.price-box b').textContent = '—';
     results.innerHTML = '';
     results.style.display = 'none';
@@ -5177,8 +5240,14 @@ function makeRow() {{
               row.dataset.referencePrice =
                 selectedPrice == null ? '0' : String(selectedPrice);
 
+              row.dataset.priceFetchedAt =
+                String(priceData.fetched_at || '');
+
               row.querySelector('.price-box b').textContent =
                 selectedPrice == null ? 'Aucun ordre' : money(selectedPrice);
+
+              manualPrice.value =
+                selectedPrice == null ? '' : plainISK(selectedPrice);
 
               updateTotals();
 
@@ -5190,8 +5259,21 @@ function makeRow() {{
                   'err'
                 );
               }} else {{
+                let captured = '';
+                if (priceData.fetched_at) {{
+                  const d = new Date(priceData.fetched_at);
+                  if (!Number.isNaN(d.getTime())) {{
+                    captured = ' • référence capturée à ' +
+                      d.toLocaleTimeString('fr-FR', {{
+                        hour:'2-digit',
+                        minute:'2-digit',
+                        second:'2-digit'
+                      }});
+                  }}
+                }}
+
                 setStatus(
-                  item.name + ' — prix Jita chargé.',
+                  item.name + ' — prix Jita chargé' + captured + '.',
                   'ok'
                 );
               }}
@@ -5225,6 +5307,13 @@ function makeRow() {{
   }});
 
   qty.addEventListener('input', updateTotals);
+
+  manualPrice.addEventListener('input', updateTotals);
+  manualPrice.addEventListener('blur', () => {{
+    const value = parseISKInput(manualPrice.value);
+    manualPrice.value = value > 0 ? plainISK(value) : '';
+    updateTotals();
+  }});
 
   remove.addEventListener('click', () => {{
     const allRows = document.querySelectorAll('.market-row');
