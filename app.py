@@ -11915,6 +11915,392 @@ def freeborn_render_ehp_audit(ehp_result):
     )
 
 
+
+def freeborn_repair_module_profile(module_row):
+    """
+    Resolve active repair amount + cycle from one already-audited tank module.
+
+    Supports:
+      - Shield Booster
+      - Armor Repairer
+
+    Uses only attributes already captured in tank_module_audit.
+    """
+    name = str(
+        module_row.get("name")
+        or ""
+    )
+    group = str(
+        module_row.get("group_name")
+        or ""
+    )
+
+    haystack = (
+        name + " " + group
+    ).casefold()
+
+    repair_layer = None
+
+    if "shield booster" in haystack:
+        repair_layer = "shield"
+    elif "armor repair" in haystack:
+        repair_layer = "armor"
+
+    if not repair_layer:
+        return None
+
+    amount = None
+    duration_ms = None
+
+    for attr in module_row.get(
+        "attributes",
+        [],
+    ):
+        attr_name = str(
+            attr.get("name")
+            or ""
+        ).casefold()
+
+        try:
+            value = float(
+                attr.get("value")
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if repair_layer == "shield":
+            if (
+                "shield bonus" in attr_name
+                and "overload" not in attr_name
+            ):
+                amount = value
+
+        if repair_layer == "armor":
+            if (
+                "armor repair" in attr_name
+                and "overload" not in attr_name
+            ):
+                amount = value
+
+        if (
+            "activation time / duration" in attr_name
+            or (
+                "duration" in attr_name
+                and "overload" not in attr_name
+            )
+        ):
+            # Preserve the first normal duration attribute found.
+            if duration_ms is None:
+                duration_ms = value
+
+    if (
+        amount is None
+        or duration_ms is None
+        or duration_ms <= 0
+    ):
+        return None
+
+    quantity = max(
+        1,
+        int(
+            module_row.get(
+                "quantity",
+                1,
+            )
+            or 1
+        ),
+    )
+
+    hp_per_second = (
+        float(amount)
+        / (
+            float(duration_ms)
+            / 1000.0
+        )
+        * quantity
+    )
+
+    return {
+        "name": name,
+        "layer": repair_layer,
+        "quantity": quantity,
+        "repair_amount_per_cycle":
+            float(amount),
+        "duration_ms":
+            float(duration_ms),
+        "hp_per_second":
+            hp_per_second,
+    }
+
+
+def freeborn_omni_repair_ehps(
+    raw_hps,
+    resistances,
+):
+    """
+    Convert raw repaired HP/s into OMNI EHP/s using the same
+    25/25/25/25 resonance convention as 4S-D.
+    """
+    if raw_hps is None:
+        return None
+
+    resonances = []
+
+    for damage in (
+        "em",
+        "therm",
+        "kin",
+        "exp",
+    ):
+        resistance = resistances.get(
+            damage
+        )
+
+        if resistance is None:
+            return None
+
+        try:
+            resistance = float(
+                resistance
+            )
+        except (TypeError, ValueError):
+            return None
+
+        resonances.append(
+            min(
+                1.0,
+                max(
+                    0.0,
+                    1.0
+                    - resistance / 100.0,
+                ),
+            )
+        )
+
+    average_resonance = (
+        sum(resonances)
+        / len(resonances)
+    )
+
+    if average_resonance <= 0:
+        return None
+
+    return (
+        float(raw_hps)
+        / average_resonance
+    )
+
+
+def freeborn_calculate_active_repairs(
+    tank_modules,
+    final_resistance_result,
+):
+    """
+    Aggregate active repair modules by layer.
+    """
+    final = final_resistance_result.get(
+        "final",
+        {},
+    )
+
+    modules = []
+    totals = {
+        "shield_raw_hps": 0.0,
+        "armor_raw_hps": 0.0,
+        "shield_ehps": 0.0,
+        "armor_ehps": 0.0,
+    }
+
+    for module_row in tank_modules or []:
+        profile = freeborn_repair_module_profile(
+            module_row
+        )
+
+        if not profile:
+            continue
+
+        layer = profile[
+            "layer"
+        ]
+
+        ehps = freeborn_omni_repair_ehps(
+            profile[
+                "hp_per_second"
+            ],
+            final.get(
+                layer,
+                {},
+            ),
+        )
+
+        profile[
+            "omni_ehp_per_second"
+        ] = ehps
+
+        modules.append(
+            profile
+        )
+
+        if layer == "shield":
+            totals[
+                "shield_raw_hps"
+            ] += profile[
+                "hp_per_second"
+            ]
+
+            if ehps is not None:
+                totals[
+                    "shield_ehps"
+                ] += ehps
+
+        elif layer == "armor":
+            totals[
+                "armor_raw_hps"
+            ] += profile[
+                "hp_per_second"
+            ]
+
+            if ehps is not None:
+                totals[
+                    "armor_ehps"
+                ] += ehps
+
+    return {
+        "profile":
+            "OMNI 25/25/25/25",
+        "modules":
+            modules,
+        **totals,
+    }
+
+
+def format_repairs_value(
+    value,
+):
+    if value is None:
+        return "—"
+
+    return (
+        f"{float(value):,.1f}"
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+
+def freeborn_render_repairs_audit(
+    result,
+):
+    chunks = [
+        '<strong>RÉPARATIONS — MOTEUR 4S-E</strong>',
+        '<br><span class="cap-audit-key">Profil :</span> '
+        + escape(
+            str(
+                result.get(
+                    "profile",
+                    "—",
+                )
+            )
+        ),
+    ]
+
+    modules = result.get(
+        "modules",
+        [],
+    )
+
+    if not modules:
+        chunks.append(
+            '<br>Aucun module de réparation actif résolu.'
+        )
+    else:
+        for module in modules:
+            chunks.append(
+                '<br>'
+                + f'{module["quantity"]}× '
+                + escape(
+                    str(
+                        module["name"]
+                    )
+                )
+                + ' • '
+                + escape(
+                    module["layer"].upper()
+                )
+                + ' • '
+                + format_repairs_value(
+                    module[
+                        "repair_amount_per_cycle"
+                    ]
+                )
+                + ' HP/cycle'
+                + ' • '
+                + format_repairs_value(
+                    module[
+                        "duration_ms"
+                    ]
+                    / 1000.0
+                )
+                + ' s'
+                + ' • '
+                + format_repairs_value(
+                    module[
+                        "hp_per_second"
+                    ]
+                )
+                + ' HP/s'
+                + ' • '
+                + format_repairs_value(
+                    module.get(
+                        "omni_ehp_per_second"
+                    )
+                )
+                + ' EHP/s'
+            )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">Shield :</span> '
+        + format_repairs_value(
+            result.get(
+                "shield_raw_hps"
+            )
+        )
+        + ' HP/s • '
+        + format_repairs_value(
+            result.get(
+                "shield_ehps"
+            )
+        )
+        + ' EHP/s'
+    )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">Armor :</span> '
+        + format_repairs_value(
+            result.get(
+                "armor_raw_hps"
+            )
+        )
+        + ' HP/s • '
+        + format_repairs_value(
+            result.get(
+                "armor_ehps"
+            )
+        )
+        + ' EHP/s'
+    )
+
+    chunks.append(
+        '<br><span class="cap-audit-muted">'
+        '4S-E exclut volontairement surchauffe, implants, boosts de flotte, '
+        'effets de bastion/skills non encore modélisés dans cette couche.'
+        '</span>'
+    )
+
+    return "".join(
+        chunks
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -12913,7 +13299,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-D — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP</div>
+              <div class="pilot-engine-title">MOTEUR 4S-E — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -13135,6 +13521,19 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
     ehp_audit_html = freeborn_render_ehp_audit(
         ehp_result
+    )
+
+    active_repairs_result = (
+        freeborn_calculate_active_repairs(
+            tank_module_audit,
+            final_resistance_result,
+        )
+    )
+
+    repairs_audit_html = (
+        freeborn_render_repairs_audit(
+            active_repairs_result
+        )
     )
 
     cargo_usage_value = escape(
@@ -14496,7 +14895,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-D</strong>
+            <strong>ALL V — VALIDATION 4S-E</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -14540,6 +14939,10 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 
           <div class="allv-warning" style="margin-top:10px">
             {ehp_audit_html}
+          </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            {repairs_audit_html}
           </div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
@@ -14629,7 +15032,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-D</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-E</span>
   </footer>
 </main>
 
