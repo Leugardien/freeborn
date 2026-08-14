@@ -15671,23 +15671,23 @@ button{{font:inherit}}
 .app-shell:after{{right:8px;bottom:8px;border-right:2px solid var(--cyan);border-bottom:2px solid var(--cyan)}}
 .topbar{{
   display:grid;
-  grid-template-columns:94px 1fr auto;
-  gap:18px;
+  grid-template-columns:104px 1fr auto;
+  gap:20px;
   align-items:center;
-  padding:7px 22px;
-  min-height:84px;
+  padding:9px 24px;
+  min-height:94px;
   border-bottom:1px solid var(--line2);
   background:linear-gradient(90deg,rgba(2,11,23,.94),rgba(5,21,40,.72),rgba(2,8,17,.92));
 }}
-.logo{{width:74px;filter:drop-shadow(0 0 13px rgba(44,187,255,.22))}}
-.brand h1{{margin:0;font-size:clamp(23px,2.65vw,36px);line-height:1;font-weight:560;letter-spacing:.08em;text-transform:uppercase;color:#eef6ff}}
+.logo{{width:84px;filter:drop-shadow(0 0 14px rgba(44,187,255,.24))}}
+.brand h1{{margin:0;font-size:clamp(25px,2.8vw,39px);line-height:1;font-weight:560;letter-spacing:.08em;text-transform:uppercase;color:#eef6ff}}
 .brand h1 span{{color:var(--gold2);font-weight:640}}
-.brand p{{margin:5px 0 0;color:#c6d8e8;font-size:12px;letter-spacing:.16em;text-transform:uppercase}}
+.brand p{{margin:6px 0 0;color:#c6d8e8;font-size:12.5px;letter-spacing:.16em;text-transform:uppercase}}
 .status-badge{{border:1px solid var(--status);color:var(--status);background:color-mix(in srgb,var(--status) 9%,rgba(2,8,16,.96));padding:10px 15px;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;white-space:nowrap;box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
 .fit-ref-line{{padding:8px 18px 7px;color:var(--cyan2);border-bottom:1px solid rgba(49,185,255,.18);background:rgba(1,8,17,.74);font:11px/1.25 Consolas,monospace;letter-spacing:.16em;text-transform:uppercase}}
-.main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(360px,1.08fr) minmax(390px,1.15fr);gap:7px;padding:7px;align-items:stretch}}
+.main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(390px,1.12fr) minmax(410px,1.20fr);gap:7px;padding:7px;align-items:start}}
 .stack{{display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}}
-.right-col > .hud-panel:last-child{{flex:1}}
+.right-col > .hud-panel:last-child{{flex:0 0 auto}}
 .center-col{{align-self:start;height:auto}}
 .center-col > .hud-panel:last-child{{flex:0 0 auto}}
 .hud-panel{{position:relative;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(5,20,38,.88),rgba(2,8,17,.94));box-shadow:inset 0 0 24px rgba(39,186,255,.025),0 0 10px rgba(0,0,0,.18)}}
@@ -16491,6 +16491,122 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 .pilot-compare-grid{{
   font-variant-numeric:tabular-nums;
 }}
+
+@media(max-width:780px){{
+  .center-ship-panel .ship-stage{{
+    min-height:210px;
+  }}
+  .center-ship-panel .ship-render{{
+    height:210px;
+  }}
+  .compact-meta-value{{
+    font-size:13px;
+  }}
+}}
+
+/* =========================================================
+   4S-L3 — layout rebalance & readability
+   ========================================================= */
+
+.center-ship-panel .ship-stage{{
+  min-height:225px;
+}}
+.center-ship-panel .ship-render{{
+  height:225px;
+}}
+
+.compact-meta-panel .panel-title{{
+  min-height:27px;
+  padding-top:4px;
+  padding-bottom:4px;
+}}
+.compact-meta-panel .slot-symbol{{
+  width:18px;
+  height:18px;
+  flex-basis:18px;
+  font-size:9px;
+}}
+.compact-meta-value{{
+  padding:9px 12px 10px;
+  color:#eef6ff;
+  font-size:14px;
+  font-weight:700;
+  letter-spacing:.02em;
+}}
+.usage-meta-panel .compact-meta-value{{
+  color:#f1cb68;
+}}
+.creator-meta-panel .compact-meta-value{{
+  color:#e7f4fc;
+}}
+
+/* Telemetry readability — only the areas requested */
+.resistance-table{{
+  font-size:11px!important;
+}}
+.resistance-head{{
+  font-size:10px!important;
+}}
+.resistance-layer{{
+  font-size:11px!important;
+}}
+.ehp-cell{{
+  font-size:11px!important;
+}}
+.ehp-total{{
+  font-size:11px!important;
+}}
+.ehp-total strong{{
+  font-size:14px!important;
+}}
+
+.misc-grid span{{
+  font-size:11px!important;
+}}
+.misc-grid b{{
+  font-size:12px!important;
+}}
+.telemetry-section:has(.misc-grid) .telemetry-section-title{{
+  font-size:13px!important;
+}}
+.telemetry-section:has(.misc-grid) .telemetry-section-title small{{
+  font-size:10.5px!important;
+}}
+
+/* Corporate-reference footer was too small */
+.telemetry-footnote{{
+  font-size:10px!important;
+  line-height:1.42!important;
+  gap:6px 16px!important;
+}}
+
+/* Pilot readability: modest increase after L2 became too compact */
+.pilot-intro-copy{{
+  font-size:11px!important;
+  line-height:1.46!important;
+}}
+.pilot-engine-title,
+.pilot-compare-title{{
+  font-size:13px!important;
+  line-height:1.10!important;
+}}
+.pilot-engine-row span,
+.pilot-compare-grid span{{
+  font-size:11px!important;
+  line-height:1.26!important;
+}}
+.pilot-engine-row b,
+.pilot-compare-grid b,
+.compare-delta{{
+  font-size:11px!important;
+  line-height:1.26!important;
+}}
+
+/* Keep refresh on one line while restoring a little readability */
+.pilot-engine-compat,
+.pilot-refresh-control{{
+  font-size:11px!important;
+}}
 @media(max-width:1180px){{
   .pilot-tech-grid{{grid-template-columns:1fr}}
   .main-grid{{grid-template-columns:1fr 1fr}}
@@ -16551,11 +16667,23 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         <div class="eyebrow">Fiche corporate // {safe_ref}</div>
         <div class="ship-name">{safe_ship}</div>
         <div class="fit-name">{safe_name}</div>
-        <div class="info-grid">
-          <div class="info-cell"><small>Usage</small><strong>{safe_usage}</strong></div>
-          <div class="info-cell"><small>Créé par</small><strong>{safe_creator}</strong></div>
-        </div>
       </article>
+
+      <article class="hud-panel ship-panel center-ship-panel">
+        <div class="panel-title"><span class="slot-symbol">S</span>{safe_ship}<span class="panel-code">SHIP</span></div>
+        <div class="ship-stage">{ship_html}</div>
+      </article>
+
+      <article class="hud-panel compact-meta-panel usage-meta-panel">
+        <div class="panel-title"><span class="slot-symbol">U</span>Usage<span class="panel-code">ROLE</span></div>
+        <div class="compact-meta-value">{safe_usage}</div>
+      </article>
+
+      <article class="hud-panel compact-meta-panel creator-meta-panel">
+        <div class="panel-title"><span class="slot-symbol">C</span>Créé par<span class="panel-code">AUTHOR</span></div>
+        <div class="compact-meta-value">{safe_creator}</div>
+      </article>
+
       <article class="hud-panel hold-panel drone-bay-panel">
         <div class="panel-title"><span class="slot-symbol">◈</span>Drone Bay<span class="panel-code">DRONES</span></div>
         <div class="slot-body bay-grid">{drones_html}</div>
@@ -16565,6 +16693,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         <div class="panel-title"><span class="slot-symbol">▦</span>Cargo Bay<span class="panel-code">CARGO</span></div>
         <div class="slot-body bay-grid">{cargo_html}</div>
       </article>
+
       <article class="hud-panel">
         <div class="panel-title"><span class="slot-symbol">N</span>Notes du créateur<span class="panel-code">NOTES</span></div>
         <div class="notes-body">{safe_notes}</div>
@@ -16572,11 +16701,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
     </div>
 
     <div class="stack right-col">
-      <article class="hud-panel ship-panel">
-        <div class="panel-title"><span class="slot-symbol">S</span>{safe_ship}<span class="panel-code">SHIP</span></div>
-        <div class="ship-stage">{ship_html}</div>
-      </article>
-      <article class="hud-panel">
+      <article class="hud-panel telemetry-master-panel">
         <div class="panel-title"><span class="slot-symbol">T</span>Fitting Telemetry<span class="panel-code">STATS</span></div>
         <div class="telemetry">
           <div class="metric"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU <em class="metric-mode">ALL V</em></small><strong>{all_v_cpu_pair}</strong></div>
@@ -16788,7 +16913,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-L2</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-L3</span>
   </footer>
 </main>
 
