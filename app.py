@@ -180,6 +180,14 @@ DISCORD_VETERAN_ROLE_ID = os.environ.get(
     "DISCORD_VETERAN_ROLE_ID"
 )
 
+# Freeborn Fittings must NEVER be exposed inside the Diplomatie category.
+# Render may override this ID later, but the current Freeborn Legacy ID
+# is kept as a safe built-in fallback.
+DISCORD_DIPLOMACY_CATEGORY_ID = os.environ.get(
+    "DISCORD_DIPLOMACY_CATEGORY_ID",
+    "1535676807343374413",
+)
+
 DISCORD_DIRECTOR_ROLE_ID = (
     DISCORD_DIRECTION_ROLE_ID
 )
@@ -4251,6 +4259,13 @@ def modal_values(data):
 
 
 def handle_fit_modal_submit(data):
+    diplomacy_denial = ensure_fitting_channel_allowed(
+        data
+    )
+
+    if diplomacy_denial is not None:
+        return diplomacy_denial
+
     custom_id = str(
         (data.get("data") or {}).get(
             "custom_id"
@@ -4614,6 +4629,215 @@ def interaction_has_any_role(
             if role_id
         )
     )
+
+
+# ============================================================
+# FREEBORN FITTINGS — DIPLOMACY CATEGORY SECURITY
+# ============================================================
+
+_fit_channel_parent_cache = {}
+
+
+def discord_channel_parent_id(channel_id):
+    """
+    Resolve one Discord channel parent_id with a short in-memory cache.
+
+    This lets Freeborn detect:
+      text channel -> category
+      thread/forum post -> parent channel -> category
+
+    The REST lookup is only needed when Discord's interaction payload
+    does not already include enough channel hierarchy information.
+    """
+
+    channel_id = str(channel_id or "").strip()
+
+    if not channel_id:
+        return None
+
+    now = time.time()
+    cached = _fit_channel_parent_cache.get(channel_id)
+
+    if cached:
+        cached_at, parent_id = cached
+
+        if (now - cached_at) < 300:
+            return parent_id
+
+    try:
+        response = requests.get(
+            f"{DISCORD_API}/channels/{channel_id}",
+            headers={
+                "Authorization":
+                    f"Bot {DISCORD_BOT_TOKEN}",
+            },
+            timeout=5,
+        )
+
+        if response.status_code != 200:
+            print(
+                "Freeborn Fittings channel lookup failed:",
+                channel_id,
+                response.status_code,
+                response.text[:250],
+            )
+            return None
+
+        payload = response.json()
+
+        parent_id = (
+            str(payload.get("parent_id"))
+            if payload.get("parent_id")
+            else None
+        )
+
+        _fit_channel_parent_cache[channel_id] = (
+            now,
+            parent_id,
+        )
+
+        return parent_id
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings channel lookup exception:",
+            channel_id,
+            repr(error),
+        )
+        return None
+
+
+def fitting_interaction_channel_scope(data):
+    """
+    Return:
+      {
+        "blocked": bool,
+        "resolved": bool,
+        "channel_id": str | None,
+        "ancestor_ids": set[str],
+      }
+
+    Security rule:
+    Every /fit-* command, fitting modal and fitting component is blocked
+    when its channel belongs to the Diplomatie category.
+
+    Resolution walks up to 4 parent levels so threads/forum posts are also
+    protected when their parent channel is inside Diplomatie.
+    """
+
+    diplomacy_category_id = str(
+        DISCORD_DIPLOMACY_CATEGORY_ID
+        or ""
+    ).strip()
+
+    channel_id = str(
+        data.get("channel_id")
+        or ""
+    ).strip()
+
+    if not channel_id:
+        return {
+            "blocked": False,
+            "resolved": False,
+            "channel_id": None,
+            "ancestor_ids": set(),
+        }
+
+    ancestor_ids = {channel_id}
+
+    if (
+        diplomacy_category_id
+        and
+        channel_id == diplomacy_category_id
+    ):
+        return {
+            "blocked": True,
+            "resolved": True,
+            "channel_id": channel_id,
+            "ancestor_ids": ancestor_ids,
+        }
+
+    # Discord interactions may include a partial channel object.
+    channel_payload = data.get("channel") or {}
+
+    current_id = channel_id
+    first_parent = None
+
+    if (
+        str(channel_payload.get("id") or "")
+        == channel_id
+        and
+        channel_payload.get("parent_id")
+    ):
+        first_parent = str(
+            channel_payload.get("parent_id")
+        )
+
+    resolved_any_parent = bool(first_parent)
+
+    for depth in range(4):
+
+        parent_id = (
+            first_parent
+            if depth == 0 and first_parent
+            else discord_channel_parent_id(
+                current_id
+            )
+        )
+
+        if not parent_id:
+            break
+
+        resolved_any_parent = True
+        parent_id = str(parent_id)
+        ancestor_ids.add(parent_id)
+
+        if (
+            diplomacy_category_id
+            and
+            parent_id == diplomacy_category_id
+        ):
+            return {
+                "blocked": True,
+                "resolved": True,
+                "channel_id": channel_id,
+                "ancestor_ids": ancestor_ids,
+            }
+
+        current_id = parent_id
+
+    return {
+        "blocked": False,
+        "resolved": resolved_any_parent,
+        "channel_id": channel_id,
+        "ancestor_ids": ancestor_ids,
+    }
+
+
+def fitting_diplomacy_access_denied():
+    return jsonify({
+        "type": 4,
+        "data": {
+            "content": (
+                "⛔ **Freeborn Fittings indisponible ici**\n\n"
+                "Les commandes, fiches et actions **/fit-*** sont "
+                "désactivées dans la catégorie **Diplomatie** afin de "
+                "protéger les fittings internes de la corporation."
+            ),
+            "flags": 64,
+        },
+    })
+
+
+def ensure_fitting_channel_allowed(data):
+    scope = fitting_interaction_channel_scope(
+        data
+    )
+
+    if scope["blocked"]:
+        return fitting_diplomacy_access_denied()
+
+    return None
 
 
 def interaction_is_recruitment_manager(
@@ -7641,6 +7865,18 @@ def handle_message_component(
     # ========================================================
     # FREEBORN FITTINGS — COMPONENTS
     # ========================================================
+
+    if (
+        custom_id.startswith("fit_")
+        or
+        custom_id.startswith("freeborn_fit_")
+    ):
+        diplomacy_denial = ensure_fitting_channel_allowed(
+            data
+        )
+
+        if diplomacy_denial is not None:
+            return diplomacy_denial
 
     if custom_id.startswith("fit_eft:"):
         try:
@@ -18095,6 +18331,20 @@ def interactions():
         })
 
     # ========================================================
+    # FREEBORN FITTINGS — CATEGORY SECURITY GATE
+    # All /fit-* commands are forbidden inside Diplomatie.
+    # This applies even to the CEO / Discord administrators.
+    # ========================================================
+
+    if str(command_name).lower().startswith("fit-"):
+        diplomacy_denial = ensure_fitting_channel_allowed(
+            data
+        )
+
+        if diplomacy_denial is not None:
+            return diplomacy_denial
+
+    # ========================================================
     # /fit-liste — FREEBORN FITTINGS
     # ========================================================
 
@@ -18139,6 +18389,7 @@ def interactions():
             "data": {
                 "embeds": [build_fit_embed(fit)],
                 "components": build_fit_components(fit["fit_id"], guild_id),
+                "flags": 64,
             },
         })
 
