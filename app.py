@@ -11808,6 +11808,113 @@ def freeborn_render_final_resistance_audit(
     )
 
 
+
+def freeborn_layer_omni_ehp(raw_hp, resistances):
+    """Calculate EHP for one layer against a uniform 25/25/25/25 profile."""
+    if raw_hp is None:
+        return None
+
+    try:
+        raw_hp = float(raw_hp)
+    except (TypeError, ValueError):
+        return None
+
+    resonances = []
+
+    for damage in ("em", "therm", "kin", "exp"):
+        resistance = resistances.get(damage)
+
+        if resistance is None:
+            return None
+
+        try:
+            resistance = float(resistance)
+        except (TypeError, ValueError):
+            return None
+
+        resonance = 1.0 - resistance / 100.0
+        resonances.append(
+            min(1.0, max(0.0, resonance))
+        )
+
+    average_resonance = sum(resonances) / len(resonances)
+
+    if average_resonance <= 0:
+        return None
+
+    return raw_hp / average_resonance
+
+
+def freeborn_calculate_omni_ehp(tank_base, final_resistance_result):
+    """Return Shield / Armor / Structure and total OMNI EHP."""
+    final = final_resistance_result.get("final", {})
+
+    shield_ehp = freeborn_layer_omni_ehp(
+        tank_base.get("shield_hp"),
+        final.get("shield", {}),
+    )
+    armor_ehp = freeborn_layer_omni_ehp(
+        tank_base.get("armor_hp"),
+        final.get("armor", {}),
+    )
+    structure_ehp = freeborn_layer_omni_ehp(
+        tank_base.get("structure_hp"),
+        final.get("structure", {}),
+    )
+
+    values = (shield_ehp, armor_ehp, structure_ehp)
+
+    total_ehp = (
+        sum(value for value in values if value is not None)
+        if any(value is not None for value in values)
+        else None
+    )
+
+    return {
+        "profile": "OMNI 25/25/25/25",
+        "shield_ehp": shield_ehp,
+        "armor_ehp": armor_ehp,
+        "structure_ehp": structure_ehp,
+        "total_ehp": total_ehp,
+    }
+
+
+def format_ehp_value(value):
+    if value is None:
+        return "—"
+
+    value = float(value)
+
+    if value >= 1000000:
+        return f"{value / 1000000:.2f} M".replace(".", ",")
+
+    if value >= 1000:
+        return f"{value / 1000:.2f} k".replace(".", ",")
+
+    return f"{value:,.0f}".replace(",", " ")
+
+
+def freeborn_render_ehp_audit(ehp_result):
+    return (
+        '<strong>EHP — MOTEUR 4S-D</strong><br>'
+        '<span class="cap-audit-key">Profil :</span> '
+        + escape(str(ehp_result.get("profile", "—")))
+        + '<br><span class="cap-audit-key">Shield EHP :</span> '
+        + escape(format_ehp_value(ehp_result.get("shield_ehp")))
+        + '<br><span class="cap-audit-key">Armor EHP :</span> '
+        + escape(format_ehp_value(ehp_result.get("armor_ehp")))
+        + '<br><span class="cap-audit-key">Structure EHP :</span> '
+        + escape(format_ehp_value(ehp_result.get("structure_ehp")))
+        + '<br><span class="cap-audit-key">TOTAL EHP :</span> <strong>'
+        + escape(format_ehp_value(ehp_result.get("total_ehp")))
+        + '</strong>'
+        + '<br><span class="cap-audit-muted">'
+          'Convention 4S-D : dégâts entrants uniformes '
+          '25% EM / 25% THERM / 25% KIN / 25% EXP.'
+          '</span>'
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -12806,7 +12913,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-C2 — FITTING / RESSOURCES / CAP / VITESSE / TANK</div>
+              <div class="pilot-engine-title">MOTEUR 4S-D — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -13013,6 +13120,21 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             "shield",
             {},
         )
+    )
+
+    ehp_result = freeborn_calculate_omni_ehp(
+        tank_base,
+        final_resistance_result,
+    )
+
+    ehp_value = escape(
+        format_ehp_value(
+            ehp_result.get("total_ehp")
+        )
+    )
+
+    ehp_audit_html = freeborn_render_ehp_audit(
+        ehp_result
     )
 
     cargo_usage_value = escape(
@@ -14364,7 +14486,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           <div class="metric" title="{capacitor_title}"><span class="metric-icon" aria-hidden="true">◫</span><small>Capaciteur <em class="metric-mode">BASE</em></small><strong>{capacitor_value}</strong></div>
           <div class="metric" title="{velocity_title}"><span class="metric-icon" aria-hidden="true">➤</span><small>Vitesse <em class="metric-mode">BASE</em></small><strong>{velocity_value}</strong></div>
           <div class="metric" title="DPS volontairement non calculé par Freeborn Fittings. Utilise l'EFT dans EVE pour les statistiques exactes."><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">----</strong></div>
-          <div class="metric"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP</small><strong class="pending">À calculer</strong></div>
+          <div class="metric" title="EHP OMNI 25/25/25/25"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP</small><strong>{ehp_value}</strong></div>
           <div class="resists">
             <div class="resist em"><i class="resist-icon" aria-hidden="true">✦</i><span>EM</span><b>{escape(format_tank_resistance(final_shield_resistance.get("em")))}</b></div>
             <div class="resist therm"><i class="resist-icon" aria-hidden="true">♨</i><span>Therm</span><b>{escape(format_tank_resistance(final_shield_resistance.get("therm")))}</b></div>
@@ -14374,7 +14496,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-C2</strong>
+            <strong>ALL V — VALIDATION 4S-D</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -14414,6 +14536,10 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 
           <div class="allv-warning" style="margin-top:10px">
             {final_resistance_audit_html}
+          </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            {ehp_audit_html}
           </div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
@@ -14503,7 +14629,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-C2</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-D</span>
   </footer>
 </main>
 
