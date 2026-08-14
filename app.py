@@ -320,6 +320,12 @@ FREEBORN_EVE_SCOPES = (
 
 DISCORD_API = "https://discord.com/api/v10"
 
+# Freeborn Fittings deletion synchronization build marker.
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "4T-D-DELETE-SYNC-V2"
+print(
+    "FREEBORN FITTINGS BUILD:",
+    FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
+)
 
 VALID_EVE_ISSUERS = {
     "login.eveonline.com",
@@ -4665,6 +4671,314 @@ def set_fit_status(guild_id, fit_id, status):
     }
 
 
+def find_fit_forum_thread_by_reference(fit):
+    """
+    Recovery path for an old/missing DB linkage.
+
+    Search the configured Fittings forum for a thread/post whose name begins
+    with the unique FREE-xxxx reference. Active threads are checked first,
+    then archived public threads.
+
+    Returns thread_id or None.
+    """
+    if not fit or not DISCORD_FITTINGS_CHANNEL_ID:
+        return None
+
+    ref = format_fit_reference(
+        fit.get("fit_id")
+    )
+
+    parent_id = str(
+        DISCORD_FITTINGS_CHANNEL_ID
+    )
+
+    headers = discord_bot_headers()
+
+    # Active threads in the guild.
+    try:
+        response = requests.get(
+            (
+                f"{DISCORD_API}/guilds/"
+                f"{fit['guild_id']}/threads/active"
+            ),
+            headers=headers,
+            timeout=12,
+        )
+
+        if response.status_code == 200:
+            payload = response.json() or {}
+
+            for thread in payload.get(
+                "threads",
+                [],
+            ) or []:
+                if (
+                    str(thread.get("parent_id") or "")
+                    == parent_id
+                    and
+                    str(thread.get("name") or "").startswith(
+                        ref
+                    )
+                ):
+                    return str(
+                        thread["id"]
+                    )
+
+        else:
+            print(
+                "Freeborn fit active-thread recovery lookup failed:",
+                response.status_code,
+                response.text[:500],
+            )
+
+    except Exception as error:
+        print(
+            "Freeborn fit active-thread recovery exception:",
+            repr(error),
+        )
+
+    # Archived public threads in the forum.
+    try:
+        response = requests.get(
+            (
+                f"{DISCORD_API}/channels/"
+                f"{parent_id}/threads/archived/public"
+            ),
+            headers=headers,
+            params={"limit": 100},
+            timeout=12,
+        )
+
+        if response.status_code == 200:
+            payload = response.json() or {}
+
+            for thread in payload.get(
+                "threads",
+                [],
+            ) or []:
+                if str(
+                    thread.get("name") or ""
+                ).startswith(ref):
+                    return str(
+                        thread["id"]
+                    )
+
+        else:
+            print(
+                "Freeborn fit archived-thread recovery lookup failed:",
+                response.status_code,
+                response.text[:500],
+            )
+
+    except Exception as error:
+        print(
+            "Freeborn fit archived-thread recovery exception:",
+            repr(error),
+        )
+
+    return None
+
+
+def delete_fit_discord_publication(fit):
+    """
+    Delete the Discord publication linked to one Freeborn fit.
+
+    For a Forum/Media post, the post is a Discord thread channel:
+        DELETE /channels/{thread_id}
+
+    The operation is fail-closed:
+    if Discord deletion fails, /fit-supprimer must NOT delete the Neon row.
+    """
+    if not fit:
+        return {
+            "ok": False,
+            "reason": "fit_missing",
+        }
+
+    publication_channel_id = str(
+        fit.get("discord_post_channel_id")
+        or ""
+    ).strip()
+
+    publication_message_id = str(
+        fit.get("discord_post_message_id")
+        or ""
+    ).strip()
+
+    thread_id = str(
+        fit.get("discord_thread_id")
+        or ""
+    ).strip()
+
+    print(
+        "Freeborn fit delete linkage:",
+        format_fit_reference(
+            fit.get("fit_id")
+        ),
+        "configured_forum=",
+        DISCORD_FITTINGS_CHANNEL_ID,
+        "stored_channel=",
+        publication_channel_id or None,
+        "stored_message=",
+        publication_message_id or None,
+        "stored_thread=",
+        thread_id or None,
+    )
+
+    # Recovery for an old/missing linkage.
+    if not thread_id:
+        recovered_thread_id = (
+            find_fit_forum_thread_by_reference(
+                fit
+            )
+        )
+
+        if recovered_thread_id:
+            thread_id = str(
+                recovered_thread_id
+            )
+
+            print(
+                "Freeborn fit delete recovered forum thread:",
+                format_fit_reference(
+                    fit.get("fit_id")
+                ),
+                thread_id,
+            )
+
+    # Forum posts created by Freeborn store channel == thread.
+    # If a recovered thread exists, it also takes this route.
+    forum_thread_id = None
+
+    if thread_id:
+        if (
+            not publication_channel_id
+            or
+            publication_channel_id == thread_id
+            or
+            str(DISCORD_FITTINGS_CHANNEL_ID or "")
+            != publication_channel_id
+        ):
+            forum_thread_id = thread_id
+
+    headers = discord_bot_headers()
+
+    if forum_thread_id:
+        response = requests.delete(
+            (
+                f"{DISCORD_API}/channels/"
+                f"{forum_thread_id}"
+            ),
+            headers=headers,
+            timeout=12,
+        )
+
+        print(
+            "Freeborn forum post DELETE:",
+            format_fit_reference(
+                fit.get("fit_id")
+            ),
+            forum_thread_id,
+            response.status_code,
+            response.text[:300],
+        )
+
+        if response.status_code in {
+            200,
+            204,
+            404,
+        }:
+            return {
+                "ok": True,
+                "deleted": True,
+                "kind": "forum_post",
+                "thread_id": forum_thread_id,
+            }
+
+        return {
+            "ok": False,
+            "reason": "forum_post_delete_failed",
+            "status_code": response.status_code,
+            "body": response.text[:500],
+        }
+
+    # Standard text/announcement publication fallback.
+    if thread_id:
+        response = requests.delete(
+            f"{DISCORD_API}/channels/{thread_id}",
+            headers=headers,
+            timeout=12,
+        )
+
+        print(
+            "Freeborn discussion thread DELETE:",
+            thread_id,
+            response.status_code,
+            response.text[:300],
+        )
+
+        if response.status_code not in {
+            200,
+            204,
+            404,
+        }:
+            return {
+                "ok": False,
+                "reason": "thread_delete_failed",
+                "status_code": response.status_code,
+                "body": response.text[:500],
+            }
+
+    if (
+        publication_channel_id
+        and
+        publication_message_id
+    ):
+        response = requests.delete(
+            (
+                f"{DISCORD_API}/channels/"
+                f"{publication_channel_id}/messages/"
+                f"{publication_message_id}"
+            ),
+            headers=headers,
+            timeout=12,
+        )
+
+        print(
+            "Freeborn publication message DELETE:",
+            publication_channel_id,
+            publication_message_id,
+            response.status_code,
+            response.text[:300],
+        )
+
+        if response.status_code not in {
+            200,
+            204,
+            404,
+        }:
+            return {
+                "ok": False,
+                "reason": "message_delete_failed",
+                "status_code": response.status_code,
+                "body": response.text[:500],
+            }
+
+        return {
+            "ok": True,
+            "deleted": True,
+            "kind": "text_publication",
+        }
+
+    # If nothing is linked and recovery found nothing, do not block deleting
+    # legacy fits that genuinely never had a Discord publication.
+    return {
+        "ok": True,
+        "deleted": False,
+        "reason": "no_publication_found",
+    }
+
+
 def delete_fit(guild_id, fit_id):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
@@ -8527,9 +8841,83 @@ def handle_message_component(
         if custom_id.startswith("fit_del_no:"):
             return jsonify({"type": 7, "data": {"content": "🛡️ **Suppression annulée**\n\nLe fit reste enregistré dans Freeborn.", "components": []}})
 
-        deleted = delete_fit(guild_id, fit_id)
+        try:
+            discord_delete = (
+                delete_fit_discord_publication(
+                    fit
+                )
+            )
+        except Exception as error:
+            print(
+                "Freeborn fit Discord delete exception:",
+                format_fit_reference(
+                    fit_id
+                ),
+                repr(error),
+            )
+
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": (
+                        "⚠️ **Suppression interrompue**\n\n"
+                        f"{format_fit_reference(fit_id)} reste dans Neon : "
+                        "Freeborn n'a pas pu supprimer sa publication Discord.\n"
+                        "Aucune donnée n'a été supprimée."
+                    ),
+                    "components": [],
+                },
+            })
+
+        if not discord_delete.get("ok"):
+            status_code = (
+                discord_delete.get(
+                    "status_code"
+                )
+            )
+
+            suffix = (
+                f" — Discord HTTP {status_code}"
+                if status_code
+                else ""
+            )
+
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": (
+                        "⚠️ **Suppression interrompue**\n\n"
+                        f"Impossible de supprimer le post Discord de "
+                        f"{format_fit_reference(fit_id)}{suffix}.\n"
+                        "Le fitting reste volontairement dans Neon pour éviter "
+                        "un post orphelin."
+                    ),
+                    "components": [],
+                },
+            })
+
+        deleted = delete_fit(
+            guild_id,
+            fit_id,
+        )
+
         if not deleted:
-            return jsonify({"type": 7, "data": {"content": "ℹ️ Ce fit n'existe déjà plus dans Freeborn.", "components": []}})
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": (
+                        "ℹ️ La publication Discord a été traitée, "
+                        "mais ce fit n'existe déjà plus dans Freeborn."
+                    ),
+                    "components": [],
+                },
+            })
+
+        discord_note = (
+            "✅ Publication Discord supprimée."
+            if discord_delete.get("deleted")
+            else "ℹ️ Aucune publication Discord liée n'a été trouvée."
+        )
 
         return jsonify({
             "type": 7,
@@ -8537,7 +8925,7 @@ def handle_message_component(
                 "content": (
                     f"🗑️ **{format_fit_reference(fit_id)} supprimé définitivement**\n\n"
                     f"**{deleted['ship_name']} — {deleted['name']}** a été retiré de Neon.\n"
-                    "Les éventuels anciens messages Discord déjà publiés ne constituent pas la base de données."
+                    f"{discord_note}"
                 ),
                 "components": [],
             },
@@ -19956,7 +20344,8 @@ def interactions():
                     f"⚠️ **Supprimer définitivement {format_fit_reference(fit['fit_id'])} ?**\n\n"
                     f"Vaisseau : **{fit['ship_name']}**\n"
                     f"Fit : **{fit['name']}**\n\n"
-                    "Cette action supprimera réellement le fitting de Neon."
+                    "Cette action supprimera d'abord le post Discord lié, "
+                    "puis supprimera réellement le fitting de Neon."
                 ),
                 "components": [
                     {
