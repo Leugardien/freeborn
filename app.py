@@ -12404,6 +12404,162 @@ def freeborn_render_targeting_misc_audit(
     )
 
 
+
+def freeborn_calculate_targeting_all_v(
+    targeting_base,
+):
+    """
+    Calculate ALL V targeting values from the validated 4S-F hull values.
+
+    The ship hard cap remains authoritative for simultaneous target locks.
+    """
+    base_targets = targeting_base.get(
+        "max_locked_targets"
+    )
+    base_range_km = targeting_base.get(
+        "targeting_range_km"
+    )
+    base_scan_resolution = targeting_base.get(
+        "scan_resolution_mm"
+    )
+
+    all_v_range_km = (
+        float(base_range_km) * 1.25
+        if base_range_km is not None
+        else None
+    )
+
+    all_v_scan_resolution = (
+        float(base_scan_resolution) * 1.25
+        if base_scan_resolution is not None
+        else None
+    )
+
+    # Base character targeting capacity is 2.
+    # Target Management V adds 5, Advanced Target Management V adds 5.
+    character_target_capacity = 12
+
+    all_v_targets = None
+
+    if base_targets is not None:
+        all_v_targets = min(
+            int(round(float(base_targets))),
+            character_target_capacity,
+        )
+
+    return {
+        "max_locked_targets":
+            all_v_targets,
+        "targeting_range_km":
+            all_v_range_km,
+        "scan_resolution_mm":
+            all_v_scan_resolution,
+        "signature_radius_m":
+            targeting_base.get(
+                "signature_radius_m"
+            ),
+        "warp_speed_au_s":
+            targeting_base.get(
+                "warp_speed_au_s"
+            ),
+        "skills": {
+            "Long Range Targeting": 5,
+            "Signature Analysis": 5,
+            "Target Management": 5,
+            "Advanced Target Management": 5,
+        },
+    }
+
+
+def freeborn_render_targeting_all_v_audit(
+    values,
+):
+    skills = values.get(
+        "skills",
+        {},
+    )
+
+    return (
+        '<strong>CIBLAGE ALL V — MOTEUR 4S-G</strong>'
+        '<br><span class="cap-audit-key">Cibles verrouillables :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "max_locked_targets"
+            ),
+            0,
+        )
+        + '<br><span class="cap-audit-key">Portée de ciblage :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "targeting_range_km"
+            ),
+            1,
+        )
+        + ' km'
+        + '<br><span class="cap-audit-key">Résolution de scan :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "scan_resolution_mm"
+            ),
+            0,
+        )
+        + ' mm'
+        + '<br><span class="cap-audit-key">Rayon de signature :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "signature_radius_m"
+            ),
+            0,
+        )
+        + ' m'
+        + '<br><span class="cap-audit-key">Warp speed :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "warp_speed_au_s"
+            ),
+            2,
+        )
+        + ' AU/s'
+        + '<br><strong>SKILLS ALL V APPLIQUÉS</strong>'
+        + '<br>Long Range Targeting '
+        + str(
+            skills.get(
+                "Long Range Targeting",
+                0,
+            )
+        )
+        + '/5'
+        + '<br>Signature Analysis '
+        + str(
+            skills.get(
+                "Signature Analysis",
+                0,
+            )
+        )
+        + '/5'
+        + '<br>Target Management '
+        + str(
+            skills.get(
+                "Target Management",
+                0,
+            )
+        )
+        + '/5'
+        + '<br>Advanced Target Management '
+        + str(
+            skills.get(
+                "Advanced Target Management",
+                0,
+            )
+        )
+        + '/5'
+        + '<br><span class="cap-audit-muted">'
+          'La capacité de verrouillage personnage est plafonnée '
+          'par la limite propre au vaisseau.'
+          '</span>'
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -13410,7 +13566,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-F — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE</div>
+              <div class="pilot-engine-title">MOTEUR 4S-G — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -13582,6 +13738,18 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         technical_snapshot.get(
             "targeting_misc_base",
             {},
+        )
+    )
+
+    targeting_all_v = (
+        freeborn_calculate_targeting_all_v(
+            targeting_misc_base
+        )
+    )
+
+    targeting_all_v_audit_html = (
+        freeborn_render_targeting_all_v_audit(
+            targeting_all_v
         )
     )
 
@@ -15021,7 +15189,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-F</strong>
+            <strong>ALL V — VALIDATION 4S-G</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -15073,6 +15241,10 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 
           <div class="allv-warning" style="margin-top:10px">
             {targeting_misc_audit_html}
+          </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            {targeting_all_v_audit_html}
           </div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
@@ -15162,7 +15334,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-F</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-G</span>
   </footer>
 </main>
 
