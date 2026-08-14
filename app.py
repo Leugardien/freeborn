@@ -384,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P3B-FORUM-TAGS + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4-LIFECYCLE + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -888,6 +888,27 @@ def init_database():
                     """
                     ALTER TABLE market_orders
                     ADD COLUMN IF NOT EXISTS discord_post_created_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
                     """
                 )
 
@@ -6015,6 +6036,752 @@ def freeborn_market_select_forum_tags(
     return selected
 
 
+def freeborn_market_get_order(
+    guild_id,
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    market_id,
+                    guild_id,
+                    order_type,
+                    owner_scope,
+                    status,
+                    created_by_discord_user_id,
+                    accepted_by_discord_user_id,
+                    adjustment_percent,
+                    notes,
+                    jita_snapshot_at,
+                    total_isk,
+                    discord_post_channel_id,
+                    discord_post_message_id,
+                    discord_thread_id,
+                    created_at,
+                    accepted_at,
+                    completed_at,
+                    cancelled_at
+                FROM market_orders
+                WHERE guild_id = %s
+                  AND market_id = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    int(market_id),
+                ),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "market_id": int(row[0]),
+        "guild_id": str(row[1]),
+        "order_type": str(row[2]),
+        "owner_scope": str(row[3]),
+        "status": str(row[4]),
+        "created_by_discord_user_id": str(row[5]),
+        "accepted_by_discord_user_id": (
+            str(row[6])
+            if row[6]
+            else None
+        ),
+        "adjustment_percent": row[7],
+        "notes": row[8],
+        "jita_snapshot_at": row[9],
+        "total_isk": row[10],
+        "discord_post_channel_id": row[11],
+        "discord_post_message_id": row[12],
+        "discord_thread_id": row[13],
+        "created_at": row[14],
+        "accepted_at": row[15],
+        "completed_at": row[16],
+        "cancelled_at": row[17],
+    }
+
+
+def freeborn_market_get_items(
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    line_number,
+                    type_id,
+                    type_name,
+                    quantity,
+                    jita_reference_side,
+                    jita_reference_unit_price,
+                    chosen_unit_price,
+                    manual_price_override,
+                    adjusted_unit_price,
+                    line_total,
+                    price_fetched_at
+                FROM market_order_items
+                WHERE market_id = %s
+                ORDER BY line_number ASC;
+                """,
+                (
+                    int(market_id),
+                ),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "line_number": int(row[0]),
+            "type_id": int(row[1]),
+            "type_name": str(row[2]),
+            "quantity": int(row[3]),
+            "jita_reference_side": str(row[4]),
+            "jita_reference_unit_price": row[5],
+            "chosen_unit_price": row[6],
+            "manual_price_override": bool(row[7]),
+            "adjusted_unit_price": row[8],
+            "line_total": row[9],
+            "price_fetched_at": row[10],
+        }
+        for row in rows
+    ]
+
+
+def freeborn_market_context_from_order(
+    order,
+):
+    return {
+        "guild_id": order["guild_id"],
+        "discord_user_id":
+            order["created_by_discord_user_id"],
+        "order_type":
+            order["order_type"],
+        "owner_scope":
+            order["owner_scope"],
+    }
+
+
+def freeborn_market_validated_from_order(
+    order,
+    items,
+):
+    return {
+        "adjustment_percent":
+            freeborn_market_decimal(
+                order["adjustment_percent"]
+                or 0
+            ),
+        "notes":
+            str(
+                order["notes"]
+                or ""
+            ),
+        "jita_snapshot_at":
+            order["jita_snapshot_at"]
+            or order["created_at"]
+            or datetime.now(
+                timezone.utc
+            ),
+        "items":
+            items,
+        "total_isk":
+            freeborn_market_money_decimal(
+                order["total_isk"]
+                or 0
+            ),
+    }
+
+
+def freeborn_market_status_label(
+    status,
+):
+    mapping = {
+        "open":
+            "🟢 OUVERT",
+        "in_progress":
+            "🟠 EN COURS",
+        "completed":
+            "✅ TERMINÉ",
+        "cancelled":
+            "🔴 ANNULÉ",
+    }
+
+    return mapping.get(
+        status,
+        str(status).upper(),
+    )
+
+
+def freeborn_market_status_aliases(
+    status,
+):
+    mapping = {
+        "open": {
+            "ouvert",
+            "ouverte",
+            "open",
+            "actif",
+            "active",
+        },
+        "in_progress": {
+            "en cours",
+            "attribue",
+            "attribué",
+            "assigned",
+            "in progress",
+        },
+        "completed": {
+            "termine",
+            "terminé",
+            "terminee",
+            "terminée",
+            "complete",
+            "completed",
+            "clos",
+            "cloture",
+            "clôturé",
+        },
+        "cancelled": {
+            "annule",
+            "annulé",
+            "annulee",
+            "annulée",
+            "cancelled",
+            "canceled",
+        },
+    }
+
+    return {
+        freeborn_market_normalize_forum_tag_name(
+            value
+        )
+        for value in mapping.get(
+            status,
+            set(),
+        )
+    }
+
+
+def freeborn_market_find_status_tag_id(
+    channel,
+    status,
+):
+    aliases = (
+        freeborn_market_status_aliases(
+            status
+        )
+    )
+
+    for tag in (
+        channel.get(
+            "available_tags"
+        )
+        or []
+    ):
+        tag_id = str(
+            tag.get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        tag_name = (
+            freeborn_market_normalize_forum_tag_name(
+                tag.get(
+                    "name"
+                )
+            )
+        )
+
+        if (
+            tag_id
+            and tag_name in aliases
+        ):
+            return tag_id
+
+    return None
+
+
+def freeborn_market_build_components(
+    market_id,
+    status,
+):
+    if status == "open":
+        return [
+            {
+                "type": 1,
+                "components": [
+                    {
+                        "type": 2,
+                        "style": 1,
+                        "label": "Prendre l'offre",
+                        "emoji": {
+                            "name": "🤝"
+                        },
+                        "custom_id":
+                            f"market_take:{int(market_id)}",
+                    },
+                    {
+                        "type": 2,
+                        "style": 4,
+                        "label": "Annuler",
+                        "emoji": {
+                            "name": "✖️"
+                        },
+                        "custom_id":
+                            f"market_cancel:{int(market_id)}",
+                    },
+                ],
+            }
+        ]
+
+    if status == "in_progress":
+        return [
+            {
+                "type": 1,
+                "components": [
+                    {
+                        "type": 2,
+                        "style": 3,
+                        "label": "Terminer",
+                        "emoji": {
+                            "name": "✅"
+                        },
+                        "custom_id":
+                            f"market_complete:{int(market_id)}",
+                    },
+                    {
+                        "type": 2,
+                        "style": 4,
+                        "label": "Annuler",
+                        "emoji": {
+                            "name": "✖️"
+                        },
+                        "custom_id":
+                            f"market_cancel:{int(market_id)}",
+                    },
+                ],
+            }
+        ]
+
+    return []
+
+
+def freeborn_market_build_discord_embed_from_order(
+    order,
+    items,
+):
+    market_context = (
+        freeborn_market_context_from_order(
+            order
+        )
+    )
+
+    validated = (
+        freeborn_market_validated_from_order(
+            order,
+            items,
+        )
+    )
+
+    embed = (
+        freeborn_market_build_discord_embed(
+            order[
+                "market_id"
+            ],
+            market_context,
+            validated,
+        )
+    )
+
+    # Override the lifecycle fields with authoritative current state.
+    for field in embed.get(
+        "fields",
+        []
+    ):
+        if field.get(
+            "name"
+        ) == "Statut":
+            field[
+                "value"
+            ] = (
+                freeborn_market_status_label(
+                    order[
+                        "status"
+                    ]
+                )
+            )
+
+        if field.get(
+            "name"
+        ) == "Créé par":
+            creator = (
+                f"<@{order['created_by_discord_user_id']}>"
+            )
+
+            if order.get(
+                "accepted_by_discord_user_id"
+            ):
+                creator += (
+                    "\nPris par : "
+                    f"<@{order['accepted_by_discord_user_id']}>"
+                )
+
+            field[
+                "value"
+            ] = creator
+
+    return embed
+
+
+def freeborn_market_update_forum_post(
+    order,
+):
+    thread_id = str(
+        order.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    message_id = str(
+        order.get(
+            "discord_post_message_id"
+        )
+        or ""
+    ).strip()
+
+    if (
+        not thread_id
+        or not message_id
+    ):
+        raise RuntimeError(
+            "Market Discord linkage missing"
+        )
+
+    items = (
+        freeborn_market_get_items(
+            order[
+                "market_id"
+            ]
+        )
+    )
+
+    payload = {
+        "embeds": [
+            freeborn_market_build_discord_embed_from_order(
+                order,
+                items,
+            )
+        ],
+        "components":
+            freeborn_market_build_components(
+                order[
+                    "market_id"
+                ],
+                order[
+                    "status"
+                ],
+            ),
+        "allowed_mentions": {
+            "parse": []
+        },
+    }
+
+    message_response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}/messages/"
+            f"{message_id}"
+        ),
+        headers=discord_bot_headers(),
+        json=payload,
+        timeout=15,
+    )
+
+    if message_response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn Market message update failed "
+            f"({message_response.status_code}): "
+            f"{message_response.text[:800]}"
+        )
+
+    # Update lifecycle tag when a matching tag exists.
+    try:
+        channel = discord_get_channel(
+            DISCORD_MARKET_CHANNEL_ID
+        )
+
+        status_tag_id = (
+            freeborn_market_find_status_tag_id(
+                channel,
+                order[
+                    "status"
+                ],
+            )
+        )
+
+        if status_tag_id:
+            thread_response = requests.patch(
+                (
+                    f"{DISCORD_API}/channels/"
+                    f"{thread_id}"
+                ),
+                headers=discord_bot_headers(),
+                json={
+                    "applied_tags": [
+                        status_tag_id
+                    ]
+                },
+                timeout=12,
+            )
+
+            if thread_response.status_code not in {
+                200,
+                201,
+            }:
+                print(
+                    "Freeborn Market tag update warning [P4]:",
+                    thread_response.status_code,
+                    thread_response.text[:500],
+                )
+    except Exception as error:
+        print(
+            "Freeborn Market lifecycle tag warning [P4]:",
+            repr(error),
+        )
+
+
+def freeborn_market_user_is_manager(
+    interaction_data,
+):
+    return interaction_has_any_role(
+        interaction_data,
+        MARKET_CORP_ROLE_IDS,
+    )
+
+
+def freeborn_market_user_can_cancel(
+    interaction_data,
+    order,
+    discord_user_id,
+):
+    return (
+        str(
+            discord_user_id
+        )
+        == str(
+            order[
+                "created_by_discord_user_id"
+            ]
+        )
+        or
+        freeborn_market_user_is_manager(
+            interaction_data
+        )
+    )
+
+
+def freeborn_market_user_can_complete(
+    interaction_data,
+    order,
+    discord_user_id,
+):
+    return (
+        str(
+            discord_user_id
+        )
+        == str(
+            order.get(
+                "accepted_by_discord_user_id"
+            )
+            or ""
+        )
+        or
+        str(
+            discord_user_id
+        )
+        == str(
+            order[
+                "created_by_discord_user_id"
+            ]
+        )
+        or
+        freeborn_market_user_is_manager(
+            interaction_data
+        )
+    )
+
+
+def freeborn_market_take_order(
+    guild_id,
+    market_id,
+    discord_user_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE market_orders
+                SET
+                    status = 'in_progress',
+                    accepted_by_discord_user_id = %s,
+                    accepted_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                  AND market_id = %s
+                  AND status = 'open'
+                RETURNING market_id;
+                """,
+                (
+                    str(
+                        discord_user_id
+                    ),
+                    str(
+                        guild_id
+                    ),
+                    int(
+                        market_id
+                    ),
+                ),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_market_complete_order(
+    guild_id,
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE market_orders
+                SET
+                    status = 'completed',
+                    completed_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                  AND market_id = %s
+                  AND status = 'in_progress'
+                RETURNING market_id;
+                """,
+                (
+                    str(
+                        guild_id
+                    ),
+                    int(
+                        market_id
+                    ),
+                ),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_market_cancel_order(
+    guild_id,
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE market_orders
+                SET
+                    status = 'cancelled',
+                    cancelled_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                  AND market_id = %s
+                  AND status IN (
+                      'open',
+                      'in_progress'
+                  )
+                RETURNING market_id;
+                """,
+                (
+                    str(
+                        guild_id
+                    ),
+                    int(
+                        market_id
+                    ),
+                ),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_market_delete_forum_thread(
+    order,
+):
+    thread_id = str(
+        order.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    if not thread_id:
+        return False
+
+    response = requests.delete(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}"
+        ),
+        headers=discord_bot_headers(),
+        timeout=12,
+    )
+
+    if response.status_code in {
+        200,
+        204,
+        404,
+    }:
+        return True
+
+    raise RuntimeError(
+        "Freeborn Market thread delete failed "
+        f"({response.status_code}): "
+        f"{response.text[:600]}"
+    )
+
+
 def freeborn_market_publish_discord(
     market_id,
     market_context,
@@ -6089,6 +6856,11 @@ def freeborn_market_publish_discord(
                 validated,
             )
         ],
+        "components":
+            freeborn_market_build_components(
+                market_id,
+                "open",
+            ),
         "allowed_mentions": {
             "parse": []
         },
@@ -24449,6 +25221,315 @@ def interactions():
                 **interaction_response_flags_payload(data),
             },
         })
+
+    interaction_type = int(
+        data.get(
+            "type",
+            0,
+        )
+        or 0
+    )
+
+    # ========================================================
+    # FREEBORN MARKET — PHASE 4 LIFECYCLE COMPONENTS
+    # ========================================================
+
+    if (
+        interaction_type
+        == 3
+    ):
+        custom_id = str(
+            (
+                data.get(
+                    "data"
+                )
+                or {}
+            ).get(
+                "custom_id"
+            )
+            or ""
+        )
+
+        lifecycle_match = re.fullmatch(
+            r"market_(take|complete|cancel):(\d+)",
+            custom_id,
+        )
+
+        if lifecycle_match:
+            action = lifecycle_match.group(
+                1
+            )
+            market_id = int(
+                lifecycle_match.group(
+                    2
+                )
+            )
+
+            order = (
+                freeborn_market_get_order(
+                    guild_id,
+                    market_id,
+                )
+            )
+
+            if not order:
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            "ℹ️ Cette annonce Freeborn Market n'existe plus.",
+                        "flags":
+                            64,
+                    },
+                })
+
+            # ------------------------------------------------
+            # TAKE
+            # ------------------------------------------------
+            if action == "take":
+                if order[
+                    "status"
+                ] != "open":
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content":
+                                (
+                                    "ℹ️ Cette annonce n'est plus disponible "
+                                    "au statut **OUVERT**."
+                                ),
+                            "flags":
+                                64,
+                        },
+                    })
+
+                if (
+                    str(
+                        order[
+                            "created_by_discord_user_id"
+                        ]
+                    )
+                    == str(
+                        discord_user_id
+                    )
+                ):
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content":
+                                (
+                                    "ℹ️ Tu es déjà le créateur de cette annonce. "
+                                    "Un autre membre doit la prendre."
+                                ),
+                            "flags":
+                                64,
+                        },
+                    })
+
+                if not freeborn_market_take_order(
+                    guild_id,
+                    market_id,
+                    discord_user_id,
+                ):
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content":
+                                (
+                                    "ℹ️ L'annonce vient d'être prise par "
+                                    "quelqu'un d'autre."
+                                ),
+                            "flags":
+                                64,
+                        },
+                    })
+
+                order = freeborn_market_get_order(
+                    guild_id,
+                    market_id,
+                )
+
+                freeborn_market_update_forum_post(
+                    order
+                )
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            (
+                                f"🤝 **{format_market_reference(market_id)} "
+                                "est maintenant EN COURS.**\n"
+                                "Tu es enregistré comme membre ayant pris l'annonce."
+                            ),
+                        "flags":
+                            64,
+                    },
+                })
+
+            # ------------------------------------------------
+            # COMPLETE
+            # ------------------------------------------------
+            if action == "complete":
+                if order[
+                    "status"
+                ] != "in_progress":
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content":
+                                (
+                                    "ℹ️ Seule une annonce **EN COURS** "
+                                    "peut être terminée."
+                                ),
+                            "flags":
+                                64,
+                        },
+                    })
+
+                if not freeborn_market_user_can_complete(
+                    data,
+                    order,
+                    discord_user_id,
+                ):
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content":
+                                (
+                                    "⛔ Tu n'es pas autorisé à terminer "
+                                    "cette annonce."
+                                ),
+                            "flags":
+                                64,
+                        },
+                    })
+
+                if not freeborn_market_complete_order(
+                    guild_id,
+                    market_id,
+                ):
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content":
+                                "ℹ️ Le statut de cette annonce a déjà changé.",
+                            "flags":
+                                64,
+                        },
+                    })
+
+                order = freeborn_market_get_order(
+                    guild_id,
+                    market_id,
+                )
+
+                freeborn_market_update_forum_post(
+                    order
+                )
+
+                # Final cleanup: once completed, remove the forum post/thread.
+                freeborn_market_delete_forum_thread(
+                    order
+                )
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            (
+                                f"✅ **{format_market_reference(market_id)} "
+                                "terminé.**\n"
+                                "L'annonce est conservée dans Neon et le post "
+                                "Discord a été supprimé."
+                            ),
+                        "flags":
+                            64,
+                    },
+                })
+
+            # ------------------------------------------------
+            # CANCEL
+            # ------------------------------------------------
+            if action == "cancel":
+                if order[
+                    "status"
+                ] not in {
+                    "open",
+                    "in_progress",
+                }:
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content":
+                                (
+                                    "ℹ️ Cette annonce est déjà clôturée."
+                                ),
+                            "flags":
+                                64,
+                        },
+                    })
+
+                if not freeborn_market_user_can_cancel(
+                    data,
+                    order,
+                    discord_user_id,
+                ):
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content":
+                                (
+                                    "⛔ Seul le créateur de l'annonce, "
+                                    "la Direction, le Haut Conseil ou le CEO "
+                                    "peut l'annuler."
+                                ),
+                            "flags":
+                                64,
+                        },
+                    })
+
+                if not freeborn_market_cancel_order(
+                    guild_id,
+                    market_id,
+                ):
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content":
+                                "ℹ️ Le statut de cette annonce a déjà changé.",
+                            "flags":
+                                64,
+                        },
+                    })
+
+                order = freeborn_market_get_order(
+                    guild_id,
+                    market_id,
+                )
+
+                freeborn_market_update_forum_post(
+                    order
+                )
+
+                freeborn_market_delete_forum_thread(
+                    order
+                )
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            (
+                                f"🔴 **{format_market_reference(market_id)} "
+                                "annulé.**\n"
+                                "L'annonce est conservée dans Neon et le post "
+                                "Discord a été supprimé."
+                            ),
+                        "flags":
+                            64,
+                    },
+                })
 
     # ========================================================
     # FREEBORN MARKET — PHASE 1
