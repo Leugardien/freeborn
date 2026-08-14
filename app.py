@@ -10479,7 +10479,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-A-1"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-B-1"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -10895,6 +10895,441 @@ def format_resource_usage_value(
     )
 
 
+
+def freeborn_ship_tank_base(ship_type_id):
+    """
+    Read raw hull hitpoints and base resistance attributes from Dogma.
+
+    Returned resistances are normalized as percentages when possible.
+    No fitted module, skill, stacking penalty or reactive effect is applied.
+    """
+    dogma = get_eve_type_dogma(
+        ship_type_id
+    )
+
+    if not dogma:
+        return {}
+
+    aliases = {
+        "shield_hp": (
+            "shield capacity",
+            "shieldcapacity",
+        ),
+        "armor_hp": (
+            "armor hp",
+            "armorhp",
+        ),
+        "structure_hp": (
+            "hp",
+            "structure hp",
+            "structurehitpoints",
+        ),
+        "shield_em": (
+            "shield em damage resistance",
+            "shield em resistance",
+        ),
+        "shield_therm": (
+            "shield thermal damage resistance",
+            "shield thermal resistance",
+        ),
+        "shield_kin": (
+            "shield kinetic damage resistance",
+            "shield kinetic resistance",
+        ),
+        "shield_exp": (
+            "shield explosive damage resistance",
+            "shield explosive resistance",
+        ),
+        "armor_em": (
+            "armor em damage resistance",
+            "armor em resistance",
+        ),
+        "armor_therm": (
+            "armor thermal damage resistance",
+            "armor thermal resistance",
+        ),
+        "armor_kin": (
+            "armor kinetic damage resistance",
+            "armor kinetic resistance",
+        ),
+        "armor_exp": (
+            "armor explosive damage resistance",
+            "armor explosive resistance",
+        ),
+        "structure_em": (
+            "structure em damage resistance",
+            "structure em resistance",
+            "hull em resistance",
+        ),
+        "structure_therm": (
+            "structure thermal damage resistance",
+            "structure thermal resistance",
+            "hull thermal resistance",
+        ),
+        "structure_kin": (
+            "structure kinetic damage resistance",
+            "structure kinetic resistance",
+            "hull kinetic resistance",
+        ),
+        "structure_exp": (
+            "structure explosive damage resistance",
+            "structure explosive resistance",
+            "hull explosive resistance",
+        ),
+    }
+
+    result = {
+        key: None
+        for key in aliases
+    }
+
+    # Keep structure HP from matching every generic "... hp" attribute:
+    # exact matches win, otherwise require context-specific wording.
+    for attribute_id, value in dogma.items():
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or ""
+        ).strip()
+
+        display_name = str(
+            metadata.get("display_name")
+            or ""
+        ).strip()
+
+        normalized = (
+            name
+            + " "
+            + display_name
+        ).casefold()
+
+        for key, terms in aliases.items():
+            if result[key] is not None:
+                continue
+
+            matched = False
+
+            if key == "structure_hp":
+                matched = (
+                    normalized.strip() == "hp"
+                    or "structure hp" in normalized
+                    or "structure hitpoints" in normalized
+                )
+            else:
+                matched = any(
+                    term in normalized
+                    for term in terms
+                )
+
+            if not matched:
+                continue
+
+            try:
+                numeric = float(
+                    value
+                )
+            except (TypeError, ValueError):
+                continue
+
+            # Resistance Dogma can be either a multiplier (0..1) or percent.
+            if "_em" in key or "_therm" in key or "_kin" in key or "_exp" in key:
+                if 0.0 <= numeric <= 1.0:
+                    # EVE often stores damage resonance; convert to resistance.
+                    numeric = (
+                        1.0 - numeric
+                    ) * 100.0
+
+            result[key] = numeric
+
+    return result
+
+
+def freeborn_tank_module_audit(
+    eft_sections,
+    type_ids,
+):
+    """
+    Inventory fitted tank modules and expose Dogma attributes likely to affect:
+      - shield/armor/structure HP;
+      - EM/Thermal/Kinetic/Explosive resistances;
+      - shield boost / armor repair amount;
+      - cycle duration.
+
+    This is an audit only. 4S-B deliberately does not derive final tank stats.
+    """
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    relevant_fragments = (
+        "shield bonus",
+        "armor bonus",
+        "structure bonus",
+        "shield capacity",
+        "armor hp",
+        "hp bonus",
+        "resonance",
+        "resistance",
+        "shield boost",
+        "armor repair",
+        "repair amount",
+        "duration",
+        "cycle time",
+    )
+
+    rows = []
+
+    for type_id, quantity in counts.items():
+        metadata = get_eve_type_metadata(
+            type_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or f"Type {type_id}"
+        )
+        group_name = get_eve_type_group_name(
+            type_id
+        )
+
+        haystack = (
+            name
+            + " "
+            + str(group_name or "")
+        ).casefold()
+
+        tankish = any(
+            token in haystack
+            for token in (
+                "shield",
+                "armor",
+                "hardener",
+                "damage control",
+                "bulkhead",
+                "extender",
+                "plate",
+                "booster",
+                "repairer",
+                "resistance",
+            )
+        )
+
+        if not tankish:
+            continue
+
+        dogma = get_eve_type_dogma(
+            type_id
+        )
+
+        attributes = []
+
+        for attribute_id, value in dogma.items():
+            meta = get_eve_dogma_attribute_metadata(
+                attribute_id
+            )
+
+            attr_name = str(
+                meta.get("name")
+                or ""
+            ).strip()
+            display_name = str(
+                meta.get("display_name")
+                or ""
+            ).strip()
+
+            normalized = (
+                attr_name
+                + " "
+                + display_name
+            ).casefold()
+
+            if not any(
+                fragment in normalized
+                for fragment in relevant_fragments
+            ):
+                continue
+
+            attributes.append({
+                "attribute_id":
+                    int(attribute_id),
+                "name":
+                    display_name
+                    or attr_name
+                    or f"attribute {attribute_id}",
+                "value":
+                    value,
+            })
+
+        rows.append({
+            "type_id": int(type_id),
+            "name": name,
+            "group_name":
+                str(group_name or ""),
+            "quantity": int(quantity),
+            "attributes": attributes,
+        })
+
+    return rows
+
+
+def format_tank_resistance(value):
+    if value is None:
+        return "—"
+
+    return (
+        f"{float(value):.1f}%"
+        .replace(".", ",")
+    )
+
+
+def freeborn_render_tank_audit(
+    tank_base,
+    modules,
+):
+    chunks = [
+        '<strong>TANK / RÉSISTANCES — AUDIT 4S-B</strong>',
+        '<br><span class="cap-audit-key">Hull brut :</span>',
+        '<br>Shield HP : '
+        + escape(
+            str(
+                tank_base.get(
+                    "shield_hp",
+                    "—",
+                )
+            )
+        ),
+        ' • Armor HP : '
+        + escape(
+            str(
+                tank_base.get(
+                    "armor_hp",
+                    "—",
+                )
+            )
+        ),
+        ' • Structure HP : '
+        + escape(
+            str(
+                tank_base.get(
+                    "structure_hp",
+                    "—",
+                )
+            )
+        ),
+        '<br><span class="cap-audit-key">Shield :</span> '
+        + 'EM '
+        + format_tank_resistance(
+            tank_base.get("shield_em")
+        )
+        + ' • THERM '
+        + format_tank_resistance(
+            tank_base.get("shield_therm")
+        )
+        + ' • KIN '
+        + format_tank_resistance(
+            tank_base.get("shield_kin")
+        )
+        + ' • EXP '
+        + format_tank_resistance(
+            tank_base.get("shield_exp")
+        ),
+        '<br><span class="cap-audit-key">Armor :</span> '
+        + 'EM '
+        + format_tank_resistance(
+            tank_base.get("armor_em")
+        )
+        + ' • THERM '
+        + format_tank_resistance(
+            tank_base.get("armor_therm")
+        )
+        + ' • KIN '
+        + format_tank_resistance(
+            tank_base.get("armor_kin")
+        )
+        + ' • EXP '
+        + format_tank_resistance(
+            tank_base.get("armor_exp")
+        ),
+        '<br><span class="cap-audit-key">Structure :</span> '
+        + 'EM '
+        + format_tank_resistance(
+            tank_base.get("structure_em")
+        )
+        + ' • THERM '
+        + format_tank_resistance(
+            tank_base.get("structure_therm")
+        )
+        + ' • KIN '
+        + format_tank_resistance(
+            tank_base.get("structure_kin")
+        )
+        + ' • EXP '
+        + format_tank_resistance(
+            tank_base.get("structure_exp")
+        ),
+        '<br><strong>MODULES TANK DÉTECTÉS</strong>',
+    ]
+
+    if not modules:
+        chunks.append(
+            '<br>Aucun module tank détecté.'
+        )
+        return "".join(chunks)
+
+    for row in modules:
+        chunks.append(
+            '<br>'
+            + f'{row["quantity"]}× '
+            + escape(row["name"])
+            + (
+                ' — '
+                + escape(
+                    row["group_name"]
+                )
+                if row["group_name"]
+                else ''
+            )
+        )
+
+        if not row["attributes"]:
+            chunks.append(
+                '<br><span class="cap-audit-muted">'
+                'Aucun attribut tank filtré.'
+                '</span>'
+            )
+            continue
+
+        for attr in row["attributes"]:
+            chunks.append(
+                '<br>'
+                + '<span class="cap-audit-key">'
+                + escape(
+                    str(attr["name"])
+                )
+                + '</span> = '
+                + escape(
+                    str(attr["value"])
+                )
+                + ' <span class="cap-audit-muted">[#'
+                + escape(
+                    str(attr["attribute_id"])
+                )
+                + ']</span>'
+            )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">État :</span> '
+        '4S-B est volontairement un audit. '
+        'Aucune résistance finale, EHP ou réparation/s n’est encore publiée.'
+    )
+
+    return "".join(chunks)
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -11014,6 +11449,19 @@ def build_freeborn_technical_snapshot(
         )
     )
 
+    tank_base = (
+        freeborn_ship_tank_base(
+            fit.get("ship_type_id")
+        )
+    )
+
+    tank_module_audit = (
+        freeborn_tank_module_audit(
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
     return {
         "version":
             FREEBORN_TECHNICAL_SNAPSHOT_VERSION,
@@ -11035,6 +11483,10 @@ def build_freeborn_technical_snapshot(
         "module_rows": module_rows,
         "ship_resource_usage":
             ship_resource_usage,
+        "tank_base":
+            tank_base,
+        "tank_module_audit":
+            tank_module_audit,
         "base_resources": base_resources,
         "base_velocity": base_velocity,
         "all_v_velocity": all_v_velocity,
@@ -11867,7 +12319,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-A — FITTING / RESSOURCES / CAP / VITESSE</div>
+              <div class="pilot-engine-title">MOTEUR 4S-B — FITTING / RESSOURCES / CAP / VITESSE / TANK</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -12025,6 +12477,27 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         technical_snapshot.get(
             "ship_resource_usage",
             {},
+        )
+    )
+
+    tank_base = dict(
+        technical_snapshot.get(
+            "tank_base",
+            {},
+        )
+    )
+
+    tank_module_audit = list(
+        technical_snapshot.get(
+            "tank_module_audit",
+            [],
+        )
+    )
+
+    tank_audit_html = (
+        freeborn_render_tank_audit(
+            tank_base,
+            tank_module_audit,
         )
     )
 
@@ -13387,7 +13860,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-A</strong>
+            <strong>ALL V — VALIDATION 4S-B</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -13419,6 +13892,10 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
               Bandwidth utilisé = 0 dans une fiche statique :
               il dépend des drones effectivement déployés.
             </span>
+          </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            {tank_audit_html}
           </div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
@@ -13508,7 +13985,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-A</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-B</span>
   </footer>
 </main>
 
