@@ -17586,7 +17586,7 @@ document.addEventListener(
 );
 
 function copyEditCommand() {{
-  const command = `/fit-modifier ref:${fitRef}`;
+  const command = "/fit-modifier ref:{safe_ref}";
 
   navigator.clipboard.writeText(command).then(() => {{
     const toast = document.getElementById('toast');
