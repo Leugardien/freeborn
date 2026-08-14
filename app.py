@@ -242,7 +242,8 @@ STAFF_ROLE_IDS = SYSTEM_ADMIN_ROLE_IDS
 # FREEBORN FITTINGS — ACCESS
 # ============================================================
 
-FITTING_CREATOR_ROLE_IDS = configured_role_ids(
+# Reading the corporate fitting library remains available to Freeborn members.
+FITTING_VIEWER_ROLE_IDS = configured_role_ids(
     DISCORD_MEMBER_ROLE_ID,
     DISCORD_VETERAN_ROLE_ID,
     DISCORD_FLEET_COMMANDER_ROLE_ID,
@@ -253,12 +254,17 @@ FITTING_CREATOR_ROLE_IDS = configured_role_ids(
     DISCORD_CEO_ROLE_ID,
 )
 
-FITTING_MANAGER_ROLE_IDS = configured_role_ids(
+# A fit may be proposed only by Fleet Commanders, Direction, High Council or CEO.
+# Officer / HR / Member / Veteran alone are deliberately excluded.
+FITTING_CREATOR_ROLE_IDS = configured_role_ids(
     DISCORD_FLEET_COMMANDER_ROLE_ID,
-    DISCORD_OFFICER_ROLE_ID,
-    DISCORD_HR_ROLE_ID,
     DISCORD_DIRECTION_ROLE_ID,
     DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# Final corporate authority: approve, reject and permanently delete = CEO only.
+FITTING_MANAGER_ROLE_IDS = configured_role_ids(
     DISCORD_CEO_ROLE_ID,
 )
 
@@ -3836,9 +3842,7 @@ def can_delete_fit(data, fit):
     except (KeyError, TypeError):
         return False
 
-    if actor_user_id == str(fit.get("created_by_discord_user_id")):
-        return True
-
+    # Permanent deletion is a CEO-only action, including for the original creator.
     return interaction_has_any_role(data, FITTING_MANAGER_ROLE_IDS)
 
 
@@ -3955,7 +3959,7 @@ def handle_fit_modal_submit(data):
             "data": {
                 "content": (
                     "⛔ **Accès refusé**\n\n"
-                    "La création de fittings est réservée aux membres Freeborn."
+                    "La proposition de fittings est réservée aux Fleet Commanders, à la Direction, au Haut Conseil et au CEO."
                 ),
                 "flags": 64,
             },
@@ -7124,7 +7128,7 @@ def handle_message_component(
         if not fit:
             return jsonify({"type": 4, "data": {"content": "❌ Ce fit n'existe plus dans Freeborn.", "flags": 64}})
 
-        if not interaction_has_any_role(data, FITTING_CREATOR_ROLE_IDS):
+        if not interaction_has_any_role(data, FITTING_VIEWER_ROLE_IDS):
             return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
 
         eft_text = str(fit.get("eft_text") or "")
@@ -17418,7 +17422,7 @@ def interactions():
     # ========================================================
 
     if command_name == "fit-liste":
-        if not interaction_has_any_role(data, FITTING_CREATOR_ROLE_IDS):
+        if not interaction_has_any_role(data, FITTING_VIEWER_ROLE_IDS):
             return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
 
         return jsonify({
@@ -17435,7 +17439,7 @@ def interactions():
     # ========================================================
 
     if command_name == "fit-afficher":
-        if not interaction_has_any_role(data, FITTING_CREATOR_ROLE_IDS):
+        if not interaction_has_any_role(data, FITTING_VIEWER_ROLE_IDS):
             return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
 
         fit_ref = None
@@ -17546,7 +17550,7 @@ def interactions():
                 "data": {
                     "content": (
                         "⛔ **Suppression refusée**\n\n"
-                        "Seul le créateur du fit ou le staff Fittings peut le supprimer."
+                        "La suppression définitive d’un fitting est réservée exclusivement au CEO."
                     ),
                     "flags": 64,
                 },
@@ -17601,7 +17605,7 @@ def interactions():
                 "data": {
                     "content": (
                         "⛔ **Accès refusé**\n\n"
-                        "La création de fittings est réservée aux membres Freeborn."
+                        "La proposition de fittings est réservée aux Fleet Commanders, à la Direction, au Haut Conseil et au CEO."
                     ),
                     "flags": 64,
                 },
