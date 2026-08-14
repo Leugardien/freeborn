@@ -380,7 +380,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P1 + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2-JITA + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -4033,8 +4033,19 @@ def build_fit_embed(fit):
 
 
 # ============================================================
-# FREEBORN MARKET — PHASE 1 HELPERS
+# FREEBORN MARKET — PHASE 2
+# SEARCH EVE + JITA PRICING + FINAL VISUAL FOUNDATION
 # ============================================================
+
+FREEBORN_JITA_REGION_ID = 10000002
+FREEBORN_JITA_44_LOCATION_ID = 60003760
+FREEBORN_MARKET_SEARCH_LIMIT = 8
+FREEBORN_MARKET_PRICE_CACHE_SECONDS = 300
+FREEBORN_MARKET_SEARCH_CACHE_SECONDS = 300
+
+_freeborn_market_price_cache = {}
+_freeborn_market_search_cache = {}
+
 
 def format_market_reference(market_id):
     return f"FREE-MKT-{int(market_id):04d}"
@@ -4117,20 +4128,255 @@ def build_market_web_url(
     )
 
 
-def freeborn_market_phase1_page(
-    market_context,
-):
-    """
-    Phase 1 visual/interaction foundation.
+def freeborn_market_validate_token(token):
+    context = read_market_web_token(
+        token
+    )
 
-    Search + Jita pricing + persistence are intentionally Phase 2/3.
-    This page already validates:
-      - personal vs corporation intent,
-      - BUY vs SELL intent,
-      - one dynamic row at start,
-      - + Add item up to the configured hard limit,
-      - one GLOBAL percentage adjustment only.
+    if (
+        context["guild_id"]
+        != str(DISCORD_GUILD_ID)
+    ):
+        raise ValueError(
+            "Wrong guild"
+        )
+
+    return context
+
+
+def freeborn_market_search_types(query):
     """
+    Search public EVE inventory types through ESI and keep only types that
+    actually belong to a Market Group.
+
+    Search results are cached briefly in-process to avoid hammering ESI while
+    a member is typing.
+    """
+    normalized = " ".join(
+        str(query or "").strip().split()
+    )
+
+    if len(normalized) < 2:
+        return []
+
+    cache_key = normalized.casefold()
+    now = time.time()
+    cached = _freeborn_market_search_cache.get(
+        cache_key
+    )
+
+    if (
+        cached
+        and
+        now - cached["at"]
+        < FREEBORN_MARKET_SEARCH_CACHE_SECONDS
+    ):
+        return cached["items"]
+
+    response = requests.get(
+        f"{ESI_BASE_URL}/search/",
+        params={
+            "categories": "inventory_type",
+            "search": normalized,
+            "strict": "false",
+            "datasource": "tranquility",
+        },
+        headers={
+            "User-Agent":
+                "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+        },
+        timeout=12,
+    )
+    response.raise_for_status()
+
+    ids = (
+        response.json()
+        .get("inventory_type", [])
+        or []
+    )
+
+    # Inspect a bounded candidate set. get_eve_type_metadata already uses
+    # Freeborn's type cache, so repeated searches remain inexpensive.
+    items = []
+
+    for type_id in ids[:30]:
+        try:
+            metadata = get_eve_type_metadata(
+                int(type_id)
+            ) or {}
+        except Exception:
+            continue
+
+        # Only real market types belong in Freeborn Market.
+        if not metadata.get(
+            "market_group_id"
+        ):
+            continue
+
+        name = str(
+            metadata.get("name")
+            or ""
+        ).strip()
+
+        if not name:
+            continue
+
+        items.append({
+            "type_id": int(type_id),
+            "name": name,
+            "group_id": metadata.get(
+                "group_id"
+            ),
+            "market_group_id": metadata.get(
+                "market_group_id"
+            ),
+            "icon_url": eve_type_icon_url(
+                int(type_id),
+                64,
+            ),
+        })
+
+        if len(items) >= FREEBORN_MARKET_SEARCH_LIMIT:
+            break
+
+    # Prefer prefix matches, then short names, then alphabetical order.
+    qfold = normalized.casefold()
+
+    items.sort(
+        key=lambda item: (
+            0 if item["name"].casefold().startswith(qfold) else 1,
+            len(item["name"]),
+            item["name"].casefold(),
+        )
+    )
+
+    _freeborn_market_search_cache[
+        cache_key
+    ] = {
+        "at": now,
+        "items": items,
+    }
+
+    return items
+
+
+def freeborn_market_jita_price(type_id):
+    """
+    Return Jita 4-4 station-local reference prices for one type.
+
+    SELL = lowest sell order physically located at Jita 4-4.
+    BUY  = highest buy order physically located at Jita 4-4.
+
+    The ESI market-order route is cached for about five minutes; Freeborn uses
+    an aligned local five-minute cache so repeated UI calculations do not
+    generate unnecessary market-order traffic.
+    """
+    type_id = int(type_id)
+    now = time.time()
+
+    cached = _freeborn_market_price_cache.get(
+        type_id
+    )
+
+    if (
+        cached
+        and
+        now - cached["at"]
+        < FREEBORN_MARKET_PRICE_CACHE_SECONDS
+    ):
+        return cached["data"]
+
+    response = requests.get(
+        (
+            f"{ESI_BASE_URL}/markets/"
+            f"{FREEBORN_JITA_REGION_ID}/orders/"
+        ),
+        params={
+            "datasource": "tranquility",
+            "order_type": "all",
+            "type_id": type_id,
+        },
+        headers={
+            "User-Agent":
+                "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+
+    orders = response.json() or []
+
+    station_orders = [
+        order
+        for order in orders
+        if int(
+            order.get("location_id")
+            or 0
+        ) == FREEBORN_JITA_44_LOCATION_ID
+    ]
+
+    sell_prices = [
+        float(order["price"])
+        for order in station_orders
+        if not order.get("is_buy_order")
+        and order.get("price") is not None
+    ]
+
+    buy_prices = [
+        float(order["price"])
+        for order in station_orders
+        if order.get("is_buy_order")
+        and order.get("price") is not None
+    ]
+
+    best_sell = (
+        min(sell_prices)
+        if sell_prices
+        else None
+    )
+
+    best_buy = (
+        max(buy_prices)
+        if buy_prices
+        else None
+    )
+
+    metadata = get_eve_type_metadata(
+        type_id
+    ) or {}
+
+    data = {
+        "type_id": type_id,
+        "type_name": str(
+            metadata.get("name")
+            or f"Type {type_id}"
+        ),
+        "jita_sell": best_sell,
+        "jita_buy": best_buy,
+        "location_id":
+            FREEBORN_JITA_44_LOCATION_ID,
+        "region_id":
+            FREEBORN_JITA_REGION_ID,
+        "fetched_at":
+            datetime.now(
+                timezone.utc
+            ).isoformat(),
+    }
+
+    _freeborn_market_price_cache[
+        type_id
+    ] = {
+        "at": now,
+        "data": data,
+    }
+
+    return data
+
+
+def freeborn_market_phase2_page(
+    market_context,
+    token,
+):
     order_type = market_context[
         "order_type"
     ]
@@ -4159,15 +4405,24 @@ def freeborn_market_phase1_page(
         else "MEMBRE"
     )
 
-    title = (
-        f"{operation_label} "
-        f"{scope_label}"
+    # Validated market reference convention:
+    # personal/corp SELL -> lowest Jita Sell
+    # personal/corp BUY  -> highest Jita Buy
+    reference_side = (
+        "buy"
+        if is_buy
+        else "sell"
     )
 
-    accent = (
-        "#64d9ff"
-        if is_buy
-        else "#f0c565"
+    reference_label = (
+        "JITA BUY"
+        if reference_side == "buy"
+        else "JITA SELL"
+    )
+
+    safe_token = escape(
+        str(token),
+        quote=True,
     )
 
     return f"""<!doctype html>
@@ -4175,297 +4430,857 @@ def freeborn_market_phase1_page(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Freeborn Market — {title}</title>
+<title>Freeborn Market — {operation_label} {scope_label}</title>
+<link rel="icon" type="image/png" href="/assets/logo-freeborn-legacy.png">
 <style>
 :root{{
-  --bg:#030911;
-  --panel:#07131e;
-  --line:rgba(67,184,255,.34);
-  --text:#dcecf6;
-  --muted:#8299a8;
-  --accent:{accent};
-  --gold:#d9af54;
+  --bg:#020811;
+  --panel:#04111d;
+  --panel2:#071827;
+  --line:#0d567d;
+  --line2:#148ec6;
+  --cyan:#54d9ff;
+  --cyan2:#80e5ff;
+  --gold:#f0c35b;
+  --green:#80f58b;
+  --red:#ff6f70;
+  --text:#e4f3fb;
+  --muted:#79a2b9;
 }}
 *{{box-sizing:border-box}}
+html,body{{min-height:100%}}
 body{{
   margin:0;
-  background:
-    radial-gradient(circle at 70% 0%,rgba(25,91,142,.18),transparent 35%),
-    linear-gradient(180deg,#02070c,#07101a 70%,#02070c);
   color:var(--text);
-  font-family:Arial,sans-serif;
-  min-height:100vh;
+  font-family:"Rajdhani","Arial Narrow",Arial,sans-serif;
+  background:
+    linear-gradient(rgba(1,8,15,.78),rgba(1,8,15,.88)),
+    url('/assets/bg-space.jpg') center/cover fixed no-repeat,
+    #020811;
 }}
+button,input{{font:inherit}}
 .shell{{
-  width:min(1400px,96vw);
-  margin:28px auto;
+  width:min(1580px,96vw);
+  margin:14px auto 32px;
+  border:1px solid rgba(36,175,234,.62);
+  background:rgba(2,11,19,.86);
+  box-shadow:0 24px 70px rgba(0,0,0,.58);
 }}
-.hero{{
-  border:1px solid var(--line);
-  background:linear-gradient(180deg,rgba(9,25,39,.96),rgba(3,11,18,.96));
-  padding:18px 20px;
-  box-shadow:0 18px 60px rgba(0,0,0,.4);
+.topbar{{
+  min-height:92px;
+  display:flex;
+  align-items:center;
+  gap:22px;
+  padding:12px 18px;
+  border-bottom:1px solid rgba(36,175,234,.45);
+  background:linear-gradient(90deg,rgba(2,17,30,.98),rgba(2,12,21,.91));
+  position:relative;
 }}
-.eyebrow{{
-  color:#6ccfff;
+.topbar:before{{
+  content:"";
+  position:absolute;
+  left:8px;
+  top:8px;
+  width:82px;
+  height:2px;
+  background:#54ddff;
+  box-shadow:0 0 12px rgba(84,221,255,.42);
+}}
+.logo{{
+  width:86px;
+  height:64px;
+  object-fit:contain;
+  filter:drop-shadow(0 0 12px rgba(45,184,255,.3));
+}}
+.brand h1{{
+  margin:0;
+  font-size:34px;
+  letter-spacing:2.2px;
+  font-weight:700;
+}}
+.brand h1 span{{color:var(--gold)}}
+.brand p{{
+  margin:4px 0 0;
+  color:#b7d8e9;
   font-size:12px;
   letter-spacing:2px;
   text-transform:uppercase;
 }}
-h1{{
-  margin:7px 0 4px;
-  font-size:30px;
-  letter-spacing:1px;
+.market-mode{{
+  margin-left:auto;
+  border:1px solid rgba(240,195,91,.65);
+  padding:9px 14px;
+  color:var(--gold);
+  background:rgba(240,195,91,.06);
+  font-size:12px;
+  font-weight:800;
+  letter-spacing:1.1px;
 }}
-.mode{{
-  color:var(--accent);
+.corp-mode{{
+  border-color:rgba(128,245,139,.65);
+  color:var(--green);
+  background:rgba(128,245,139,.06);
+}}
+.subbar{{
+  padding:7px 16px;
+  border-bottom:1px solid rgba(36,175,234,.35);
+  color:#69d9ff;
+  font-size:11px;
+  letter-spacing:1.6px;
+  text-transform:uppercase;
+}}
+.workspace{{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 320px;
+  gap:10px;
+  padding:10px;
+}}
+.panel{{
+  border:1px solid rgba(32,143,194,.48);
+  background:rgba(2,13,23,.94);
+}}
+.panel-title{{
+  min-height:34px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 10px;
+  border-bottom:1px solid rgba(32,143,194,.38);
+  text-transform:uppercase;
+  letter-spacing:1px;
   font-weight:800;
 }}
-.subtitle{{
-  color:var(--muted);
-  margin:0;
+.panel-title .code{{
+  margin-left:auto;
+  color:#6da8c5;
+  font-size:11px;
+  letter-spacing:1.5px;
 }}
-.card{{
-  margin-top:14px;
-  border:1px solid var(--line);
-  background:rgba(5,15,24,.94);
-  padding:14px;
+.symbol{{
+  width:20px;
+  height:20px;
+  border:1px solid #22c9ff;
+  border-radius:50%;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  color:#66e2ff;
+  font-size:11px;
 }}
-.toolbar{{
-  display:grid;
-  grid-template-columns:1fr 240px;
-  gap:12px;
+.controls{{
+  display:flex;
   align-items:end;
+  gap:12px;
+  padding:12px;
 }}
-label{{
+.adjust-wrap label,
+.notes-wrap label{{
   display:block;
-  color:#9fc1d3;
-  font-size:12px;
-  letter-spacing:.6px;
-  margin-bottom:6px;
+  color:#79b7d4;
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:1px;
+  margin-bottom:5px;
 }}
-input{{
-  width:100%;
-  border:1px solid rgba(67,184,255,.4);
+.adjust-control{{
+  display:grid;
+  grid-template-columns:34px 86px 34px 28px;
+  align-items:center;
+}}
+.adjust-control button{{
+  height:38px;
+  border:1px solid rgba(35,160,215,.52);
+  background:#041522;
+  color:#70ddff;
+  cursor:pointer;
+  font-weight:900;
+}}
+.adjust-control input{{
+  height:38px;
+  width:86px;
+  border:1px solid rgba(35,160,215,.52);
+  border-left:0;
+  border-right:0;
+  outline:none;
   background:#020a11;
-  color:#eaf8ff;
-  min-height:40px;
-  padding:8px 10px;
+  color:#fff;
+  text-align:center;
+  font-weight:800;
+}}
+.adjust-control .pct{{
+  height:38px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid rgba(35,160,215,.52);
+  border-left:0;
+  color:#8ecbe5;
+}}
+.reference-pill{{
+  min-height:38px;
+  display:flex;
+  align-items:center;
+  padding:0 12px;
+  border:1px solid rgba(240,195,91,.42);
+  color:var(--gold);
+  background:rgba(240,195,91,.04);
+  font-size:12px;
+  font-weight:800;
 }}
 .lines{{
-  margin-top:12px;
-  display:grid;
-  gap:7px;
+  padding:0 12px 12px;
 }}
-.line{{
+.line-head,.market-row{{
   display:grid;
-  grid-template-columns:42px minmax(240px,1fr) 120px 170px 150px 46px;
+  grid-template-columns:38px minmax(260px,1fr) 92px 170px 180px 44px;
   gap:7px;
   align-items:center;
 }}
 .line-head{{
-  color:#7994a5;
-  font-size:11px;
-  letter-spacing:.6px;
+  min-height:28px;
+  color:#76a9c2;
+  font-size:10px;
+  letter-spacing:1px;
   text-transform:uppercase;
+}}
+.market-row{{
+  min-height:54px;
+  padding:5px 0;
+  border-top:1px solid rgba(23,109,149,.2);
+  position:relative;
 }}
 .num{{
   text-align:center;
-  color:#67d8ff;
-  font-weight:800;
+  color:#5bdcff;
+  font-weight:900;
+  font-size:17px;
 }}
-.placeholder-price{{
-  border:1px solid rgba(255,255,255,.08);
-  min-height:40px;
-  display:flex;
+.search-wrap{{
+  position:relative;
+}}
+.item-input{{
+  width:100%;
+  min-height:42px;
+  padding:7px 9px 7px 48px;
+  border:1px solid rgba(30,137,185,.58);
+  background:#020a12;
+  color:#f2fbff;
+  outline:none;
+}}
+.item-input:focus{{
+  border-color:#4edbff;
+  box-shadow:0 0 0 1px rgba(78,219,255,.12);
+}}
+.item-icon{{
+  position:absolute;
+  left:5px;
+  top:4px;
+  width:34px;
+  height:34px;
+  object-fit:cover;
+  border:1px solid rgba(55,173,225,.4);
+  background:#06131e;
+  display:none;
+}}
+.results{{
+  display:none;
+  position:absolute;
+  z-index:30;
+  left:0;
+  right:0;
+  top:45px;
+  max-height:270px;
+  overflow:auto;
+  border:1px solid rgba(61,195,247,.66);
+  background:rgba(1,10,17,.99);
+  box-shadow:0 15px 35px rgba(0,0,0,.58);
+}}
+.result{{
+  width:100%;
+  display:grid;
+  grid-template-columns:38px 1fr auto;
+  gap:8px;
   align-items:center;
-  justify-content:flex-end;
-  padding:0 10px;
-  color:#6f8795;
-  background:rgba(255,255,255,.02);
-}}
-button{{
-  border:1px solid rgba(217,175,84,.65);
-  background:linear-gradient(180deg,rgba(217,175,84,.14),rgba(217,175,84,.03));
-  color:#f1d487;
-  min-height:40px;
-  padding:8px 12px;
-  font-weight:800;
+  min-height:46px;
+  padding:5px 8px;
+  border:0;
+  border-bottom:1px solid rgba(42,128,167,.22);
+  background:transparent;
+  color:#def5ff;
+  text-align:left;
   cursor:pointer;
 }}
-button:disabled{{
-  opacity:.45;
-  cursor:not-allowed;
+.result:hover{{background:rgba(43,184,238,.11)}}
+.result img{{
+  width:34px;height:34px;object-fit:cover;
 }}
-.remove{{
-  padding:0;
-  color:#ff7777;
-  border-color:rgba(255,90,90,.5);
+.result small{{color:#678da2}}
+.qty{{
+  width:100%;
+  height:42px;
+  border:1px solid rgba(30,137,185,.48);
+  background:#020a12;
+  color:#fff;
+  text-align:right;
+  padding:0 9px;
 }}
-.actions{{
+.value-box{{
+  min-height:42px;
   display:flex;
-  gap:8px;
-  margin-top:12px;
+  flex-direction:column;
+  justify-content:center;
+  align-items:flex-end;
+  padding:5px 9px;
+  border:1px solid rgba(30,137,185,.35);
+  background:rgba(4,17,28,.74);
 }}
-.phase-note{{
-  margin-top:12px;
-  border-left:3px solid #3cbcff;
-  background:rgba(60,188,255,.07);
-  padding:10px 12px;
-  color:#9eb5c4;
-  line-height:1.45;
+.value-box b{{font-size:13px;color:#eaf8ff}}
+.value-box small{{font-size:9px;color:#6f9ab0;letter-spacing:.6px}}
+.subtotal b{{color:var(--gold)}}
+.remove{{
+  height:42px;
+  border:1px solid rgba(255,89,91,.48);
+  background:rgba(255,70,70,.04);
+  color:#ff7375;
+  cursor:pointer;
+  font-size:17px;
 }}
-.summary{{
-  display:grid;
-  grid-template-columns:repeat(3,1fr);
-  gap:8px;
-  margin-top:12px;
+.action-row{{
+  display:flex;
+  gap:7px;
+  padding:0 12px 12px;
 }}
-.summary>div{{
-  border:1px solid rgba(67,184,255,.2);
+.action{{
+  min-height:38px;
+  padding:7px 13px;
+  border:1px solid rgba(240,195,91,.62);
+  background:linear-gradient(180deg,rgba(240,195,91,.12),rgba(240,195,91,.025));
+  color:#f0d27e;
+  font-weight:800;
+  letter-spacing:.5px;
+  cursor:pointer;
+}}
+.action.primary{{
+  margin-left:auto;
+  border-color:rgba(84,217,255,.65);
+  color:#71ddff;
+  background:rgba(50,177,230,.07);
+}}
+.action:disabled{{opacity:.42;cursor:not-allowed}}
+.summary-stack{{display:grid;gap:8px;padding:10px}}
+.summary-card{{
+  border:1px solid rgba(36,144,190,.34);
+  background:#020b13;
   padding:10px;
-  background:#030b12;
 }}
-.summary small{{
+.summary-card small{{
   display:block;
-  color:#6f8795;
+  color:#6f9ab0;
+  font-size:10px;
+  letter-spacing:.9px;
+  text-transform:uppercase;
   margin-bottom:5px;
 }}
-.summary strong{{
-  color:#e8f6ff;
+.summary-card strong{{font-size:15px}}
+.summary-card.total strong{{
+  color:var(--gold);
+  font-size:21px;
 }}
-@media(max-width:900px){{
-  .toolbar{{grid-template-columns:1fr}}
-  .line,.line-head{{
-    grid-template-columns:38px 1fr 90px;
+.notes-wrap{{padding:0 10px 10px}}
+.notes-wrap textarea{{
+  width:100%;
+  min-height:105px;
+  resize:vertical;
+  border:1px solid rgba(30,137,185,.4);
+  background:#020a12;
+  color:#eaf8ff;
+  padding:9px;
+  outline:none;
+}}
+.status-line{{
+  margin:0 12px 12px;
+  min-height:36px;
+  display:flex;
+  align-items:center;
+  padding:7px 10px;
+  border-left:2px solid #37cfff;
+  background:rgba(55,207,255,.06);
+  color:#80a8ba;
+  font-size:11px;
+}}
+.status-line.ok{{border-color:#77e984;color:#9bd9a2}}
+.status-line.err{{border-color:#ff6767;color:#eaa0a0}}
+.footer{{
+  min-height:30px;
+  display:grid;
+  grid-template-columns:1fr auto 1fr;
+  align-items:center;
+  gap:12px;
+  border-top:1px solid rgba(32,143,194,.4);
+  padding:6px 12px;
+  color:#63caee;
+  font-size:9px;
+  letter-spacing:1px;
+  text-transform:uppercase;
+}}
+.footer .center{{color:var(--gold)}}
+.footer .right{{text-align:right}}
+@media(max-width:1050px){{
+  .workspace{{grid-template-columns:1fr}}
+  .line-head,.market-row{{
+    grid-template-columns:34px minmax(200px,1fr) 82px 145px 155px 40px;
   }}
-  .line .price,
-  .line .subtotal,
-  .line-head .price,
-  .line-head .subtotal{{
-    display:none;
+}}
+@media(max-width:760px){{
+  .brand h1{{font-size:25px}}
+  .logo{{width:64px}}
+  .market-mode{{display:none}}
+  .line-head{{display:none}}
+  .market-row{{
+    grid-template-columns:30px 1fr 78px 38px;
+  }}
+  .market-row .price-box,
+  .market-row .subtotal{{
+    grid-column:2 / 4;
   }}
 }}
 </style>
 </head>
 <body>
 <main class="shell">
-  <section class="hero">
-    <div class="eyebrow">FREEBORN MARKET // PHASE 1</div>
-    <h1>{title}</h1>
-    <p class="subtitle">
-      Construction d'une annonce <span class="mode">{operation_label}</span>
-      — portée <span class="mode">{scope_label}</span>.
-    </p>
+  <header class="topbar">
+    <img class="logo" src="/assets/logo-freeborn-legacy.png" alt="Freeborn Legacy">
+    <div class="brand">
+      <h1>FREEBORN <span>MARKET</span></h1>
+      <p>Marché corporation • Par les Free • Pour les Free</p>
+    </div>
+    <div class="market-mode {'corp-mode' if is_corp else ''}">
+      {operation_label} // {scope_label}
+    </div>
+  </header>
+
+  <div class="subbar">
+    FREEBORN LEGACY // MARKET // {operation_label} {scope_label} // {reference_label}
+  </div>
+
+  <section class="workspace">
+    <div class="panel">
+      <div class="panel-title">
+        <span class="symbol">M</span>
+        Construction de l'annonce
+        <span class="code">MARKET ORDER</span>
+      </div>
+
+      <div class="controls">
+        <div class="adjust-wrap">
+          <label>Ajustement global</label>
+          <div class="adjust-control">
+            <button type="button" id="adjustMinus">−</button>
+            <input id="adjustment" type="text" inputmode="decimal" value="0,00"
+                   maxlength="7" aria-label="Ajustement global en pourcentage">
+            <button type="button" id="adjustPlus">+</button>
+            <div class="pct">%</div>
+          </div>
+        </div>
+        <div class="reference-pill">
+          Référence : {reference_label} • Jita 4-4
+        </div>
+      </div>
+
+      <div class="lines" id="lines">
+        <div class="line-head">
+          <div>#</div>
+          <div>Item EVE</div>
+          <div>Qté</div>
+          <div>Prix Jita</div>
+          <div>Sous-total</div>
+          <div></div>
+        </div>
+      </div>
+
+      <div class="action-row">
+        <button class="action" type="button" id="addLine">＋ Ajouter un item</button>
+        <button class="action primary" type="button" id="validateOrder" disabled>
+          Valider l'annonce — Phase 3
+        </button>
+      </div>
+
+      <div class="status-line" id="marketStatus">
+        Recherche EVE et prix Jita actifs. Commence par saisir au moins 2 caractères.
+      </div>
+    </div>
+
+    <aside class="panel">
+      <div class="panel-title">
+        <span class="symbol">Σ</span>
+        Récapitulatif
+        <span class="code">LIVE</span>
+      </div>
+      <div class="summary-stack">
+        <div class="summary-card">
+          <small>Type</small>
+          <strong>{operation_label} — {scope_label}</strong>
+        </div>
+        <div class="summary-card">
+          <small>Référence Jita</small>
+          <strong>{reference_label}</strong>
+        </div>
+        <div class="summary-card">
+          <small>Ajustement global</small>
+          <strong id="adjustmentPreview">0,00 %</strong>
+        </div>
+        <div class="summary-card">
+          <small>Lignes utilisées</small>
+          <strong id="lineCount">1 / {FREEBORN_MARKET_MAX_LINES}</strong>
+        </div>
+        <div class="summary-card total">
+          <small>Total général</small>
+          <strong id="grandTotal">0,00 ISK</strong>
+        </div>
+      </div>
+
+      <div class="notes-wrap">
+        <label>Notes de l'annonce (facultatif)</label>
+        <textarea id="marketNotes" maxlength="1000"
+          placeholder="Ex. Disponible à Jita, livraison possible, lot indivisible..."></textarea>
+      </div>
+    </aside>
   </section>
 
-  <section class="card">
-    <div class="toolbar">
-      <div>
-        <label>Ajustement global (%)</label>
-        <input id="adjustment" type="number" step="0.1" value="0"
-               min="-100" max="100" placeholder="-10 / 0 / +10">
-      </div>
-      <div>
-        <label>Limite de lignes</label>
-        <input value="{FREEBORN_MARKET_MAX_LINES} maximum" disabled>
-      </div>
-    </div>
-
-    <div class="lines" id="lines">
-      <div class="line line-head">
-        <div>#</div>
-        <div>Item EVE</div>
-        <div>Qté</div>
-        <div class="price">Prix Jita</div>
-        <div class="subtotal">Sous-total</div>
-        <div></div>
-      </div>
-    </div>
-
-    <div class="actions">
-      <button type="button" id="addLine">＋ Ajouter un item</button>
-      <button type="button" disabled>Valider l'annonce — Phase suivante</button>
-    </div>
-
-    <div class="summary">
-      <div>
-        <small>Référence marché</small>
-        <strong>Créée à la validation</strong>
-      </div>
-      <div>
-        <small>Ajustement</small>
-        <strong id="adjustmentPreview">0 % global</strong>
-      </div>
-      <div>
-        <small>Total général</small>
-        <strong>Calcul Jita — Phase 2</strong>
-      </div>
-    </div>
-
-    <div class="phase-note">
-      <strong>Phase 1 active.</strong>
-      La structure Discord/Neon, les quatre commandes et les lignes dynamiques
-      sont en place. La recherche EVE + icônes + moteur de prix Jita seront
-      branchés dans la phase suivante.
-    </div>
-  </section>
+  <footer class="footer">
+    <span>Libres par choix • Unis par volonté</span>
+    <span class="center">FREEBORN MARKET</span>
+    <span class="right">PHASE 2 • JITA ENGINE</span>
+  </footer>
 </main>
 
 <script>
+const token = {json.dumps(str(token))};
+const orderType = {json.dumps(order_type)};
+const referenceSide = {json.dumps(reference_side)};
 const maxLines = {FREEBORN_MARKET_MAX_LINES};
-const lines = document.getElementById('lines');
-const addButton = document.getElementById('addLine');
-const adjustment = document.getElementById('adjustment');
-const adjustmentPreview = document.getElementById('adjustmentPreview');
 
-function refreshNumbers() {{
-  const rows = [...lines.querySelectorAll('.line.market-row')];
+const lines = document.getElementById('lines');
+const addLineButton = document.getElementById('addLine');
+const adjustmentInput = document.getElementById('adjustment');
+const adjustmentPreview = document.getElementById('adjustmentPreview');
+const lineCount = document.getElementById('lineCount');
+const grandTotal = document.getElementById('grandTotal');
+const marketStatus = document.getElementById('marketStatus');
+
+let rowSequence = 0;
+
+function money(value) {{
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) {{
+    return '—';
+  }}
+  return Number(value).toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }}) + ' ISK';
+}}
+
+function parseAdjustment() {{
+  let raw = String(adjustmentInput.value || '0')
+    .trim()
+    .replace(',', '.')
+    .replace(/[^0-9+.-]/g, '');
+
+  let value = Number(raw);
+  if (!Number.isFinite(value)) value = 0;
+  value = Math.max(-100, Math.min(100, value));
+  return Math.round(value * 100) / 100;
+}}
+
+function showAdjustment() {{
+  const value = parseAdjustment();
+  adjustmentPreview.textContent =
+    (value > 0 ? '+' : '') +
+    value.toLocaleString('fr-FR', {{
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }}) +
+    ' %';
+}}
+
+function updateTotals() {{
+  const adjustment = parseAdjustment();
+  const multiplier = 1 + adjustment / 100;
+  let total = 0;
+
+  document.querySelectorAll('.market-row').forEach(row => {{
+    const qty = Math.max(1, Number(row.querySelector('.qty').value || 1));
+    const price = Number(row.dataset.referencePrice || 0);
+
+    const adjustedUnit = price > 0 ? price * multiplier : 0;
+    const subtotal = adjustedUnit * qty;
+
+    row.dataset.adjustedUnit = adjustedUnit;
+    row.dataset.subtotal = subtotal;
+
+    row.querySelector('.subtotal b').textContent =
+      subtotal > 0 ? money(subtotal) : '—';
+
+    row.querySelector('.subtotal small').textContent =
+      price > 0
+      ? (
+          (adjustment > 0 ? '+' : '') +
+          adjustment.toLocaleString('fr-FR', {{
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+          }}) +
+          ' %'
+        )
+      : 'AJUSTEMENT';
+
+    total += subtotal;
+  }});
+
+  grandTotal.textContent = money(total);
+  showAdjustment();
+}}
+
+function refreshRows() {{
+  const rows = [...document.querySelectorAll('.market-row')];
   rows.forEach((row, index) => {{
     row.querySelector('.num').textContent = index + 1;
   }});
-  addButton.disabled = rows.length >= maxLines;
+  lineCount.textContent = `${{rows.length}} / ${{maxLines}}`;
+  addLineButton.disabled = rows.length >= maxLines;
+  updateTotals();
 }}
 
-function addLine() {{
-  const rows = lines.querySelectorAll('.line.market-row');
-  if (rows.length >= maxLines) return;
+function setStatus(message, mode='') {{
+  marketStatus.className = 'status-line' + (mode ? ' ' + mode : '');
+  marketStatus.textContent = message;
+}}
+
+async function searchEve(query) {{
+  const response = await fetch(
+    '/market/api/search?q=' +
+    encodeURIComponent(query) +
+    '&token=' +
+    encodeURIComponent(token),
+    {{credentials:'same-origin'}}
+  );
+
+  if (!response.ok) {{
+    throw new Error('Recherche EVE indisponible');
+  }}
+
+  return await response.json();
+}}
+
+async function fetchPrice(typeId) {{
+  const response = await fetch(
+    '/market/api/price/' +
+    encodeURIComponent(typeId) +
+    '?token=' +
+    encodeURIComponent(token),
+    {{credentials:'same-origin'}}
+  );
+
+  if (!response.ok) {{
+    throw new Error('Prix Jita indisponible');
+  }}
+
+  return await response.json();
+}}
+
+function makeRow() {{
+  rowSequence += 1;
+  const rowId = 'market-row-' + rowSequence;
 
   const row = document.createElement('div');
-  row.className = 'line market-row';
+  row.className = 'market-row';
+  row.id = rowId;
+  row.dataset.typeId = '';
+  row.dataset.referencePrice = '0';
+
   row.innerHTML = `
     <div class="num"></div>
-    <input type="text" placeholder="Ex. Endurance, Tritanium, Invulnerability Field II...">
-    <input type="number" min="1" step="1" value="1">
-    <div class="placeholder-price price">Phase 2</div>
-    <div class="placeholder-price subtotal">— ISK</div>
+    <div class="search-wrap">
+      <img class="item-icon" alt="">
+      <input class="item-input" type="text" autocomplete="off"
+        placeholder="Ex. Endurance, Tritanium, Veldspar...">
+      <div class="results"></div>
+    </div>
+    <input class="qty" type="number" min="1" step="1" value="1">
+    <div class="value-box price-box">
+      <b>—</b>
+      <small>{reference_label}</small>
+    </div>
+    <div class="value-box subtotal">
+      <b>—</b>
+      <small>AJUSTEMENT</small>
+    </div>
     <button type="button" class="remove" title="Retirer cette ligne">×</button>
   `;
 
-  row.querySelector('.remove').addEventListener('click', () => {{
-    if (lines.querySelectorAll('.line.market-row').length <= 1) return;
+  const input = row.querySelector('.item-input');
+  const results = row.querySelector('.results');
+  const icon = row.querySelector('.item-icon');
+  const qty = row.querySelector('.qty');
+  const remove = row.querySelector('.remove');
+
+  let debounceTimer = null;
+  let searchSerial = 0;
+
+  input.addEventListener('input', () => {{
+    row.dataset.typeId = '';
+    row.dataset.referencePrice = '0';
+    icon.style.display = 'none';
+    row.querySelector('.price-box b').textContent = '—';
+    results.innerHTML = '';
+    results.style.display = 'none';
+    updateTotals();
+
+    const query = input.value.trim();
+    if (query.length < 2) return;
+
+    clearTimeout(debounceTimer);
+    const mySerial = ++searchSerial;
+
+    debounceTimer = setTimeout(async () => {{
+      try {{
+        const data = await searchEve(query);
+        if (mySerial !== searchSerial) return;
+
+        results.innerHTML = '';
+
+        (data.items || []).forEach(item => {{
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'result';
+          button.innerHTML = `
+            <img src="${{item.icon_url}}" alt="">
+            <span>${{item.name}}</span>
+            <small>#${{item.type_id}}</small>
+          `;
+
+          button.addEventListener('click', async () => {{
+            input.value = item.name;
+            row.dataset.typeId = item.type_id;
+            icon.src = item.icon_url;
+            icon.alt = item.name;
+            icon.style.display = 'block';
+            results.style.display = 'none';
+            setStatus('Récupération du prix Jita 4-4…');
+
+            try {{
+              const priceData = await fetchPrice(item.type_id);
+              const selectedPrice =
+                referenceSide === 'buy'
+                  ? priceData.jita_buy
+                  : priceData.jita_sell;
+
+              row.dataset.referencePrice =
+                selectedPrice == null ? '0' : String(selectedPrice);
+
+              row.querySelector('.price-box b').textContent =
+                selectedPrice == null ? 'Aucun ordre' : money(selectedPrice);
+
+              updateTotals();
+
+              if (selectedPrice == null) {{
+                setStatus(
+                  'Aucun ordre ' +
+                  (referenceSide === 'buy' ? 'BUY' : 'SELL') +
+                  ' trouvé à Jita 4-4 pour ' + item.name + '.',
+                  'err'
+                );
+              }} else {{
+                setStatus(
+                  item.name + ' — prix Jita chargé.',
+                  'ok'
+                );
+              }}
+            }} catch (error) {{
+              row.dataset.referencePrice = '0';
+              row.querySelector('.price-box b').textContent = 'Erreur';
+              updateTotals();
+              setStatus(String(error.message || error), 'err');
+            }}
+          }});
+
+          results.appendChild(button);
+        }});
+
+        results.style.display =
+          results.children.length ? 'block' : 'none';
+
+        if (!results.children.length) {{
+          setStatus('Aucun item commercialisable trouvé.', 'err');
+        }}
+      }} catch (error) {{
+        setStatus(String(error.message || error), 'err');
+      }}
+    }}, 280);
+  }});
+
+  input.addEventListener('focus', () => {{
+    if (results.children.length) {{
+      results.style.display = 'block';
+    }}
+  }});
+
+  qty.addEventListener('input', updateTotals);
+
+  remove.addEventListener('click', () => {{
+    const allRows = document.querySelectorAll('.market-row');
+    if (allRows.length <= 1) return;
     row.remove();
-    refreshNumbers();
+    refreshRows();
+  }});
+
+  document.addEventListener('click', event => {{
+    if (!row.contains(event.target)) {{
+      results.style.display = 'none';
+    }}
   }});
 
   lines.appendChild(row);
-  refreshNumbers();
+  refreshRows();
 }}
 
-addButton.addEventListener('click', addLine);
-adjustment.addEventListener('input', () => {{
-  const value = Number(adjustment.value || 0);
-  const prefix = value > 0 ? '+' : '';
-  adjustmentPreview.textContent = `${{prefix}}${{value}} % global`;
+document.getElementById('adjustMinus').addEventListener('click', () => {{
+  const value = parseAdjustment() - 0.25;
+  adjustmentInput.value = value.toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }});
+  updateTotals();
 }});
 
-addLine();
+document.getElementById('adjustPlus').addEventListener('click', () => {{
+  const value = parseAdjustment() + 0.25;
+  adjustmentInput.value = value.toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }});
+  updateTotals();
+}});
+
+adjustmentInput.addEventListener('input', updateTotals);
+adjustmentInput.addEventListener('blur', () => {{
+  const value = parseAdjustment();
+  adjustmentInput.value = value.toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }});
+  updateTotals();
+}});
+
+addLineButton.addEventListener('click', makeRow);
+
+makeRow();
 </script>
 </body>
 </html>"""
 
 
 def create_fit_web_token(guild_id, fit_id):
+
     return fit_web_serializer.dumps({
         "guild_id": str(guild_id),
         "fit_id": int(fit_id),
@@ -20774,7 +21589,7 @@ def freeborn_market_new_page():
 
     try:
         market_context = (
-            read_market_web_token(
+            freeborn_market_validate_token(
                 token
             )
         )
@@ -20794,18 +21609,104 @@ def freeborn_market_new_page():
             status="error",
         ), 403
 
-    if (
-        market_context["guild_id"]
-        != str(DISCORD_GUILD_ID)
-    ):
-        return freeborn_web_page(
-            "Accès Freeborn Market refusé",
-            "Ce lien ne correspond pas au serveur Freeborn Legacy.",
-            status="error",
-        ), 403
+    return freeborn_market_phase2_page(
+        market_context,
+        token,
+    )
 
-    return freeborn_market_phase1_page(
-        market_context
+
+@app.route("/market/api/search")
+def freeborn_market_api_search():
+    token = request.args.get(
+        "token",
+        "",
+    )
+
+    query = request.args.get(
+        "q",
+        "",
+    )
+
+    try:
+        freeborn_market_validate_token(
+            token
+        )
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return jsonify({
+            "error":
+                "invalid_token",
+        }), 403
+
+    try:
+        items = freeborn_market_search_types(
+            query
+        )
+    except Exception as error:
+        print(
+            "Freeborn Market search error:",
+            repr(error),
+        )
+
+        return jsonify({
+            "error":
+                "search_failed",
+            "items":
+                [],
+        }), 502
+
+    return jsonify({
+        "items":
+            items,
+    })
+
+
+@app.route("/market/api/price/<int:type_id>")
+def freeborn_market_api_price(type_id):
+    token = request.args.get(
+        "token",
+        "",
+    )
+
+    try:
+        freeborn_market_validate_token(
+            token
+        )
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return jsonify({
+            "error":
+                "invalid_token",
+        }), 403
+
+    try:
+        data = freeborn_market_jita_price(
+            type_id
+        )
+    except Exception as error:
+        print(
+            "Freeborn Market Jita price error:",
+            type_id,
+            repr(error),
+        )
+
+        return jsonify({
+            "error":
+                "jita_price_failed",
+        }), 502
+
+    return jsonify(
+        data
     )
 
 
