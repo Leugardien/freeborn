@@ -10479,7 +10479,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4R-C2-1"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-A-1"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -10680,6 +10680,221 @@ def freeborn_snapshot_module_rows(
     return rows
 
 
+
+def freeborn_type_volume_m3(type_id):
+    """Return inventory volume from cached EVE type metadata."""
+    if not type_id:
+        return 0.0
+
+    payload = get_eve_type_metadata(
+        type_id
+    )
+
+    try:
+        return float(
+            payload.get("volume")
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def freeborn_bay_used_volume(
+    lines,
+    type_ids,
+):
+    """Sum item volume × EFT quantity for one bay."""
+    total = 0.0
+    unresolved = []
+
+    for raw_line in lines or []:
+        display_line, quantity = (
+            parse_eft_display_quantity(
+                raw_line
+            )
+        )
+
+        item_name = normalize_eft_item_name(
+            display_line
+        )
+
+        type_id = type_ids.get(
+            item_name.casefold()
+        )
+
+        if not type_id:
+            unresolved.append(
+                item_name
+            )
+            continue
+
+        total += (
+            freeborn_type_volume_m3(
+                type_id
+            )
+            * int(quantity)
+        )
+
+    return {
+        "used_m3": total,
+        "unresolved": unresolved,
+        "complete": not unresolved,
+    }
+
+
+def build_freeborn_ship_resource_usage(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+):
+    """
+    Workbench-style static resource usage:
+      - Cargo Bay used / available
+      - Drone Bay used / available
+      - Drone Bandwidth available
+    """
+    ship_metadata = get_eve_type_metadata(
+        ship_type_id
+    )
+
+    try:
+        cargo_capacity = float(
+            ship_metadata.get(
+                "capacity"
+            )
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        cargo_capacity = 0.0
+
+    drone_capacity_attr = (
+        find_dogma_attribute_by_names(
+            ship_type_id,
+            exact_names=(
+                "droneCapacity",
+                "Drone Capacity",
+                "Drone Bay Capacity",
+            ),
+            contains_names=(
+                "drone capacity",
+                "drone bay capacity",
+            ),
+        )
+    )
+
+    drone_bandwidth_attr = (
+        find_dogma_attribute_by_names(
+            ship_type_id,
+            exact_names=(
+                "droneBandwidth",
+                "Drone Bandwidth",
+            ),
+            contains_names=(
+                "drone bandwidth",
+            ),
+        )
+    )
+
+    drone_capacity = (
+        float(
+            drone_capacity_attr[
+                "value"
+            ]
+        )
+        if drone_capacity_attr
+        else None
+    )
+
+    drone_bandwidth = (
+        float(
+            drone_bandwidth_attr[
+                "value"
+            ]
+        )
+        if drone_bandwidth_attr
+        else None
+    )
+
+    drone_lines, cargo_lines = (
+        split_eft_drone_and_cargo(
+            eft_sections.get(
+                "extras",
+                [],
+            ),
+            type_ids,
+        )
+    )
+
+    drone_usage = (
+        freeborn_bay_used_volume(
+            drone_lines,
+            type_ids,
+        )
+    )
+
+    cargo_usage = (
+        freeborn_bay_used_volume(
+            cargo_lines,
+            type_ids,
+        )
+    )
+
+    return {
+        "cargo_used_m3":
+            cargo_usage["used_m3"],
+        "cargo_capacity_m3":
+            cargo_capacity,
+        "cargo_complete":
+            cargo_usage["complete"],
+        "drone_bay_used_m3":
+            drone_usage["used_m3"],
+        "drone_bay_capacity_m3":
+            drone_capacity,
+        "drone_bay_complete":
+            drone_usage["complete"],
+        "drone_bandwidth_used_mbps":
+            0.0,
+        "drone_bandwidth_available_mbps":
+            drone_bandwidth,
+    }
+
+
+def format_resource_usage_value(
+    used,
+    available,
+    unit,
+):
+    if available is None:
+        return "—"
+
+    used = float(
+        used or 0.0
+    )
+    available = float(
+        available
+    )
+
+    def fmt(value):
+        if abs(
+            value - round(value)
+        ) < 0.05:
+            return (
+                f"{int(round(value)):,}"
+                .replace(",", " ")
+            )
+
+        return (
+            f"{value:,.1f}"
+            .replace(",", " ")
+            .replace(".", ",")
+        )
+
+    return (
+        f"{fmt(used)} / "
+        f"{fmt(available)} {unit}"
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -10791,6 +11006,14 @@ def build_freeborn_technical_snapshot(
         )
     )
 
+    ship_resource_usage = (
+        build_freeborn_ship_resource_usage(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
     return {
         "version":
             FREEBORN_TECHNICAL_SNAPSHOT_VERSION,
@@ -10810,6 +11033,8 @@ def build_freeborn_technical_snapshot(
         },
         "skill_ids": skill_ids,
         "module_rows": module_rows,
+        "ship_resource_usage":
+            ship_resource_usage,
         "base_resources": base_resources,
         "base_velocity": base_velocity,
         "all_v_velocity": all_v_velocity,
@@ -11642,7 +11867,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4R-C2 — FITTING / CAP / VITESSE</div>
+              <div class="pilot-engine-title">MOTEUR 4S-A — FITTING / RESSOURCES / CAP / VITESSE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -11794,6 +12019,52 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         technical_snapshot[
             "base_resources"
         ]
+    )
+
+    ship_resource_usage = dict(
+        technical_snapshot.get(
+            "ship_resource_usage",
+            {},
+        )
+    )
+
+    cargo_usage_value = escape(
+        format_resource_usage_value(
+            ship_resource_usage.get(
+                "cargo_used_m3",
+                0.0,
+            ),
+            ship_resource_usage.get(
+                "cargo_capacity_m3"
+            ),
+            "m³",
+        )
+    )
+
+    drone_bay_usage_value = escape(
+        format_resource_usage_value(
+            ship_resource_usage.get(
+                "drone_bay_used_m3",
+                0.0,
+            ),
+            ship_resource_usage.get(
+                "drone_bay_capacity_m3"
+            ),
+            "m³",
+        )
+    )
+
+    drone_bandwidth_value = escape(
+        format_resource_usage_value(
+            ship_resource_usage.get(
+                "drone_bandwidth_used_mbps",
+                0.0,
+            ),
+            ship_resource_usage.get(
+                "drone_bandwidth_available_mbps"
+            ),
+            "Mbit/s",
+        )
     )
     cpu_value = escape(
         format_fitting_resource_value(
@@ -13116,7 +13387,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4R-C2</strong>
+            <strong>ALL V — VALIDATION 4S-A</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -13136,6 +13407,19 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             </div>
           </div>
           <div class="allv-status">{all_v_compat}</div>
+          <div class="allv-warning resource-usage-audit" style="margin-top:10px">
+            <strong>RESSOURCES DU VAISSEAU — 4S-A</strong><br>
+            <span class="cap-audit-key">Cargo Bay :</span>
+            {cargo_usage_value}<br>
+            <span class="cap-audit-key">Drone Bay :</span>
+            {drone_bay_usage_value}<br>
+            <span class="cap-audit-key">Drone Bandwidth :</span>
+            {drone_bandwidth_value}<br>
+            <span class="cap-audit-muted">
+              Bandwidth utilisé = 0 dans une fiche statique :
+              il dépend des drones effectivement déployés.
+            </span>
+          </div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
             ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
@@ -13224,7 +13508,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4R-C2</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-A</span>
   </footer>
 </main>
 
