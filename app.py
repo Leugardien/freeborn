@@ -11764,8 +11764,9 @@ def freeborn_render_pilotability_badge(result):
         badge_text = "NON PILOTABLE"
         missing_count = len(result.get("missing") or [])
         summary = (
-            f"{missing_count} compétence"
-            + (" manque." if missing_count == 1 else "s manquent.")
+            f"{missing_count} compétence manquante."
+            if missing_count == 1
+            else f"{missing_count} compétences manquantes."
         )
 
     return (
@@ -17431,11 +17432,18 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
     )
 
+    speed_all_v_raw = all_v_velocity.get(
+        "propulsion_active_velocity_ms"
+    )
+
+    if speed_all_v_raw is None:
+        speed_all_v_raw = all_v_velocity.get(
+            "propulsion_off_velocity_ms"
+        )
+
     speed_all_v_display = escape(
         format_velocity(
-            all_v_velocity.get(
-                "propulsion_active_velocity_ms"
-            )
+            speed_all_v_raw
         )
     )
 
@@ -17763,27 +17771,28 @@ button{{font:inherit}}
 .ship-stage{{position:relative;min-height:225px;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,145,255,.14),transparent 44%),linear-gradient(90deg,transparent 49.8%,rgba(49,185,255,.08) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(49,185,255,.06) 50%,transparent 50.2%)}}
 .ship-stage:before{{content:"";position:absolute;width:64%;aspect-ratio:1;border:1px solid rgba(49,185,255,.09);border-radius:50%;box-shadow:0 0 0 45px rgba(49,185,255,.018),0 0 0 90px rgba(49,185,255,.012)}}
 .ship-render{{width:96%;height:225px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 18px 26px rgba(0,0,0,.84))}}
+.panel-title-spacer{{flex:1 1 auto}}
+.panel-title .panel-code{{margin-left:7px;flex:0 0 auto}}
 .pilotability-badge{{
-  position:absolute;
-  z-index:4;
-  right:10px;
-  top:10px;
-  display:flex;
+  position:relative;
+  z-index:6;
+  display:inline-flex;
   align-items:center;
-  gap:7px;
-  min-height:30px;
-  padding:5px 9px;
+  flex:0 0 auto;
+  gap:5px;
+  min-height:23px;
+  padding:3px 7px;
   border:1px solid rgba(41,169,255,.58);
   background:rgba(1,13,24,.93);
   font-family:"Rajdhani","Arial Narrow",Arial,sans-serif;
-  font-size:12px;
+  font-size:10px;
   font-weight:800;
-  letter-spacing:.8px;
+  letter-spacing:.65px;
   cursor:help;
   outline:none;
-  box-shadow:0 8px 24px rgba(0,0,0,.42);
+  box-shadow:0 5px 16px rgba(0,0,0,.32);
 }}
-.pilotability-mark{{font-size:15px;line-height:1}}
+.pilotability-mark{{font-size:12px;line-height:1}}
 .pilotability-ok{{border-color:rgba(121,221,115,.72);color:#8df187}}
 .pilotability-no{{border-color:rgba(255,174,52,.82);color:#ffc65b}}
 .pilotability-unknown{{border-color:rgba(137,150,163,.72);color:#a9b5bf}}
@@ -17791,7 +17800,7 @@ button{{font:inherit}}
   position:absolute;
   display:none;
   right:0;
-  top:calc(100% + 8px);
+  top:calc(100% + 7px);
   width:340px;
   max-height:360px;
   overflow:auto;
@@ -18165,8 +18174,8 @@ button{{font:inherit}}
 .resist.exp .resist-icon{{color:#ffc13b}}
 .resist span{{display:block;color:#6b879d;font-size:10px;text-transform:uppercase;letter-spacing:.08em}}
 .resist b{{display:block;margin-top:3px;color:#aebfcd;font:12px Consolas,monospace}}
-.actionbar{{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:6px;padding:0 7px 7px}}
-.action{{appearance:none;min-height:34px;border:1px solid rgba(214,168,60,.75);background:linear-gradient(180deg,rgba(214,168,60,.14),rgba(214,168,60,.025));color:#f4d576;padding:8px 11px;font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;transition:.16s ease}}
+.actionbar{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;padding:4px 7px 7px}}
+.action{{appearance:none;min-height:38px;border:1px solid rgba(214,168,60,.75);background:linear-gradient(180deg,rgba(214,168,60,.14),rgba(214,168,60,.025));color:#f4d576;padding:8px 8px;font-size:11.5px;font-weight:800;letter-spacing:.065em;text-transform:uppercase;white-space:nowrap;cursor:pointer;transition:.16s ease}}
 .action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 15px rgba(214,168,60,.14)}}
 .action.blue{{border-color:rgba(49,185,255,.80);background:linear-gradient(180deg,rgba(21,156,255,.15),rgba(21,156,255,.025));color:#71d2ff}}
 .action.green{{border-color:rgba(121,221,115,.70);background:linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.02));color:#9cec94}}
@@ -18688,8 +18697,8 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
       </article>
 
       <article class="hud-panel ship-panel center-ship-panel">
-        <div class="panel-title"><span class="slot-symbol">S</span>{safe_ship}<span class="panel-code">SHIP</span></div>
-        <div class="ship-stage">{ship_html}{pilotability_html}</div>
+        <div class="panel-title"><span class="slot-symbol">S</span>{safe_ship}<span class="panel-title-spacer"></span>{pilotability_html}<span class="panel-code">SHIP</span></div>
+        <div class="ship-stage">{ship_html}</div>
       </article>
 
       <article class="hud-panel compact-meta-panel usage-meta-panel">
@@ -18935,7 +18944,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-N-B</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-N-C2</span>
   </footer>
 </main>
 
