@@ -616,7 +616,15 @@ def init_database():
                         eft_text TEXT NOT NULL,
                         notes TEXT,
                         status TEXT NOT NULL DEFAULT 'proposed'
-                            CHECK (status IN ('proposed', 'testing', 'approved')),
+                            CHECK (
+                                status IN (
+                                    'proposed',
+                                    'testing',
+                                    'approved',
+                                    'rejected',
+                                    'archived'
+                                )
+                            ),
                         created_by_discord_user_id TEXT NOT NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -666,6 +674,33 @@ def init_database():
                     """
                     ALTER TABLE fits
                     ADD COLUMN IF NOT EXISTS technical_snapshot_updated_at TIMESTAMPTZ;
+                    """
+                )
+
+                # FREEBORN FITTINGS — 4T-C STATUS MIGRATION
+                # The original Phase 1 constraint only allowed
+                # proposed/testing/approved. The workflow now also uses
+                # rejected (and keeps archived reserved for lifecycle cleanup).
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    DROP CONSTRAINT IF EXISTS fits_status_check;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD CONSTRAINT fits_status_check
+                    CHECK (
+                        status IN (
+                            'proposed',
+                            'testing',
+                            'approved',
+                            'rejected',
+                            'archived'
+                        )
+                    );
                     """
                 )
 
@@ -18185,7 +18220,7 @@ def interactions():
                     f"Statut actuel : {fit_status_label(fit['status'])}\n\n"
                     f"{action_emoji} Cette action fera passer ce fit de **PROPOSÉ** à "
                     f"**{'FREEBORN APPROVED' if new_status == 'approved' else 'REFUSÉ'}**.\n"
-                    "L'identifiant FREE-xxxx sera conservé."
+                    f"L'identifiant {format_fit_reference(fit_id)} sera conservé."
                 ),
                 "flags": 64,
                 "components": [
