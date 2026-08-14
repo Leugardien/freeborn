@@ -3534,7 +3534,8 @@ def save_fit_phase1(
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s,
-                    'proposed', %s, NOW(), NOW()
+                    'proposed', %s, NOW(), NOW(),
+                    NULL, NULL, NULL
                 )
                 RETURNING fit_id;
                 """,
@@ -3610,7 +3611,10 @@ def get_fit(guild_id, fit_id):
                     status,
                     created_by_discord_user_id,
                     created_at,
-                    updated_at
+                    updated_at,
+                    technical_snapshot,
+                    technical_snapshot_version,
+                    technical_snapshot_updated_at
                 FROM fits
                 WHERE guild_id = %s
                 AND fit_id = %s
