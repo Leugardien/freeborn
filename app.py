@@ -10483,7 +10483,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-H-1"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-I-1"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -12750,6 +12750,126 @@ def freeborn_render_targeting_character_audit(
     )
 
 
+
+def freeborn_ship_mobility_base(ship_type_id):
+    """
+    Resolve static hull mass / inertia and derive BASE align time.
+
+    No skill modifier is applied in 4S-I.
+    """
+    metadata = get_eve_type_metadata(
+        ship_type_id
+    )
+
+    try:
+        mass_kg = float(
+            metadata.get(
+                "mass"
+            )
+        )
+    except (TypeError, ValueError):
+        mass_kg = None
+
+    inertia_row = (
+        find_dogma_attribute_by_names(
+            ship_type_id,
+            exact_names=(
+                "agility",
+                "Agility",
+                "Inertia Modifier",
+                "inertiaModifier",
+            ),
+            contains_names=(
+                "agility",
+                "inertia modifier",
+            ),
+        )
+    )
+
+    inertia_modifier = None
+
+    if inertia_row:
+        try:
+            inertia_modifier = float(
+                inertia_row.get(
+                    "value"
+                )
+            )
+        except (TypeError, ValueError):
+            inertia_modifier = None
+
+    align_seconds = None
+
+    if (
+        mass_kg is not None
+        and inertia_modifier is not None
+        and mass_kg > 0
+        and inertia_modifier > 0
+    ):
+        align_seconds = (
+            1.3862943611198906
+            * mass_kg
+            * inertia_modifier
+            / 1_000_000.0
+        )
+
+    return {
+        "mass_kg":
+            mass_kg,
+        "inertia_modifier":
+            inertia_modifier,
+        "align_time_base_seconds":
+            align_seconds,
+    }
+
+
+def freeborn_render_mobility_base_audit(
+    mobility,
+):
+    return (
+        '<strong>MOBILITÉ — MOTEUR 4S-I</strong>'
+        '<br><span class="cap-audit-key">Masse hull :</span> '
+        + (
+            freeborn_format_misc_number(
+                mobility.get(
+                    "mass_kg"
+                ),
+                0,
+            )
+            + ' kg'
+            if mobility.get(
+                "mass_kg"
+            ) is not None
+            else '—'
+        )
+        + '<br><span class="cap-audit-key">Inertia modifier BASE :</span> '
+        + freeborn_format_misc_number(
+            mobility.get(
+                "inertia_modifier"
+            ),
+            4,
+        )
+        + '<br><span class="cap-audit-key">Align time BASE :</span> '
+        + (
+            freeborn_format_misc_number(
+                mobility.get(
+                    "align_time_base_seconds"
+                ),
+                2,
+            )
+            + ' s'
+            if mobility.get(
+                "align_time_base_seconds"
+            ) is not None
+            else '—'
+        )
+        + '<br><span class="cap-audit-muted">'
+          '4S-I utilise uniquement masse + inertia du hull. '
+          'Les compétences/agility du pilote ne sont pas encore appliquées.'
+          '</span>'
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -12881,6 +13001,12 @@ def build_freeborn_technical_snapshot(
         )
     )
 
+    mobility_base = (
+        freeborn_ship_mobility_base(
+            fit.get("ship_type_id")
+        )
+    )
+
     tank_module_audit = (
         freeborn_tank_module_audit(
             eft_sections,
@@ -12920,6 +13046,8 @@ def build_freeborn_technical_snapshot(
             tank_base,
         "targeting_misc_base":
             targeting_misc_base,
+        "mobility_base":
+            mobility_base,
         "tank_module_audit":
             tank_module_audit,
         "final_resistances":
@@ -13756,7 +13884,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-H — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE</div>
+              <div class="pilot-engine-title">MOTEUR 4S-I — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE / MOBILITÉ</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -13933,6 +14061,19 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         technical_snapshot.get(
             "targeting_misc_base",
             {},
+        )
+    )
+
+    mobility_base = dict(
+        technical_snapshot.get(
+            "mobility_base",
+            {},
+        )
+    )
+
+    mobility_base_audit_html = (
+        freeborn_render_mobility_base_audit(
+            mobility_base
         )
     )
 
@@ -15477,7 +15618,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-H</strong>
+            <strong>ALL V — VALIDATION 4S-I</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -15539,6 +15680,10 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             if targeting_character_audit_html
             else ''
           }
+
+          <div class="allv-warning" style="margin-top:10px">
+            {mobility_base_audit_html}
+          </div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
             ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
@@ -15627,7 +15772,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-H</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-I</span>
   </footer>
 </main>
 
