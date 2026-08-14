@@ -9538,6 +9538,10 @@ FREEBORN_FITTING_NAMED_SKILLS = (
     "Navigation",
     "Acceleration Control",
     "Controlled Bursts",
+    "Long Range Targeting",
+    "Signature Analysis",
+    "Target Management",
+    "Advanced Target Management",
 )
 
 
@@ -10479,7 +10483,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-F-1"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-H-1"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -12560,6 +12564,192 @@ def freeborn_render_targeting_all_v_audit(
     )
 
 
+
+def freeborn_calculate_targeting_character(
+    technical_snapshot,
+    skills_snapshot,
+):
+    """Real ESI pilot targeting values compared with the ALL V reference."""
+    base = dict(
+        technical_snapshot.get(
+            "targeting_misc_base",
+            {},
+        )
+    )
+
+    lrt = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Long Range Targeting",
+    )
+    sig = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Signature Analysis",
+    )
+    tm = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Target Management",
+    )
+    atm = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Advanced Target Management",
+    )
+
+    base_range = base.get(
+        "targeting_range_km"
+    )
+    base_scan = base.get(
+        "scan_resolution_mm"
+    )
+    ship_target_cap = base.get(
+        "max_locked_targets"
+    )
+
+    range_km = (
+        float(base_range)
+        * (1.0 + 0.05 * lrt)
+        if base_range is not None
+        else None
+    )
+
+    scan_mm = (
+        float(base_scan)
+        * (1.0 + 0.05 * sig)
+        if base_scan is not None
+        else None
+    )
+
+    pilot_target_capacity = (
+        2
+        + int(tm)
+        + int(atm)
+    )
+
+    locked_targets = (
+        min(
+            int(round(float(ship_target_cap))),
+            pilot_target_capacity,
+        )
+        if ship_target_cap is not None
+        else None
+    )
+
+    return {
+        "long_range_targeting_level": lrt,
+        "signature_analysis_level": sig,
+        "target_management_level": tm,
+        "advanced_target_management_level": atm,
+        "max_locked_targets": locked_targets,
+        "targeting_range_km": range_km,
+        "scan_resolution_mm": scan_mm,
+        "signature_radius_m": base.get(
+            "signature_radius_m"
+        ),
+        "warp_speed_au_s": base.get(
+            "warp_speed_au_s"
+        ),
+    }
+
+
+def freeborn_format_targeting_delta(
+    character_value,
+    all_v_value,
+    unit="",
+    decimals=1,
+):
+    if (
+        character_value is None
+        or all_v_value is None
+    ):
+        return "—"
+
+    delta = (
+        float(character_value)
+        - float(all_v_value)
+    )
+
+    if abs(delta) < 0.0001:
+        return "Identique à ALL V"
+
+    sign = "+" if delta > 0 else ""
+    value = (
+        f"{sign}{delta:.{decimals}f}"
+        .replace(".", ",")
+    )
+
+    return (
+        value
+        + (f" {unit}" if unit else "")
+        + " vs ALL V"
+    )
+
+
+def freeborn_render_targeting_character_audit(
+    values,
+    all_v_values,
+):
+    return (
+        '<strong>CIBLAGE PERSONNAGE — MOTEUR 4S-H</strong>'
+        '<br><span class="cap-audit-key">Long Range Targeting :</span> '
+        + str(values.get("long_range_targeting_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Signature Analysis :</span> '
+        + str(values.get("signature_analysis_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Target Management :</span> '
+        + str(values.get("target_management_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Advanced Target Management :</span> '
+        + str(values.get("advanced_target_management_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Cibles verrouillables :</span> '
+        + freeborn_format_misc_number(
+            values.get("max_locked_targets"),
+            0,
+        )
+        + ' • '
+        + escape(
+            freeborn_format_targeting_delta(
+                values.get("max_locked_targets"),
+                all_v_values.get("max_locked_targets"),
+                "",
+                0,
+            )
+        )
+        + '<br><span class="cap-audit-key">Portée de ciblage :</span> '
+        + freeborn_format_misc_number(
+            values.get("targeting_range_km"),
+            1,
+        )
+        + ' km • '
+        + escape(
+            freeborn_format_targeting_delta(
+                values.get("targeting_range_km"),
+                all_v_values.get("targeting_range_km"),
+                "km",
+                1,
+            )
+        )
+        + '<br><span class="cap-audit-key">Résolution de scan :</span> '
+        + freeborn_format_misc_number(
+            values.get("scan_resolution_mm"),
+            0,
+        )
+        + ' mm • '
+        + escape(
+            freeborn_format_targeting_delta(
+                values.get("scan_resolution_mm"),
+                all_v_values.get("scan_resolution_mm"),
+                "mm",
+                0,
+            )
+        )
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -13566,7 +13756,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-G — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE</div>
+              <div class="pilot-engine-title">MOTEUR 4S-H — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -13639,6 +13829,11 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                   <span>Vitesse prop. ACTIVE</span><b id="pilot-velocity-active">—</b>
                   <span>Acceleration Control</span><b id="pilot-acceleration-control">—</b>
                   <span>Écart ACTIVE vs ALL V</span><b id="pilot-delta-velocity">—</b>
+                  <span>Cibles verrouillables</span><b id="pilot-targets">—</b>
+                  <span>Portée de ciblage</span><b id="pilot-target-range">—</b>
+                  <span>Écart portée vs ALL V</span><b id="pilot-delta-target-range">—</b>
+                  <span>Résolution de scan</span><b id="pilot-scan-resolution">—</b>
+                  <span>Écart scan vs ALL V</span><b id="pilot-delta-scan-resolution">—</b>
                 </div>
               </div>
 
@@ -14166,8 +14361,26 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
 
     character_velocity = None
+    character_targeting = None
+    targeting_character_audit_html = ""
 
     if pilot_profile:
+        character_targeting = (
+            freeborn_calculate_targeting_character(
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
+        )
+
+        targeting_character_audit_html = (
+            freeborn_render_targeting_character_audit(
+                character_targeting,
+                targeting_all_v,
+            )
+        )
+
         character_velocity = (
             calculate_character_velocity_from_snapshot(
                 technical_snapshot,
@@ -14472,6 +14685,81 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                         ] is not None
                     )
                     else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-targets">—</b>',
+                '<b id="pilot-targets">'
+                + escape(
+                    freeborn_format_misc_number(
+                        character_targeting.get(
+                            "max_locked_targets"
+                        ),
+                        0,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-target-range">—</b>',
+                '<b id="pilot-target-range">'
+                + escape(
+                    freeborn_format_misc_number(
+                        character_targeting.get(
+                            "targeting_range_km"
+                        ),
+                        1,
+                    )
+                    + " km"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-target-range">—</b>',
+                '<b id="pilot-delta-target-range">'
+                + escape(
+                    freeborn_format_targeting_delta(
+                        character_targeting.get(
+                            "targeting_range_km"
+                        ),
+                        targeting_all_v.get(
+                            "targeting_range_km"
+                        ),
+                        "km",
+                        1,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-scan-resolution">—</b>',
+                '<b id="pilot-scan-resolution">'
+                + escape(
+                    freeborn_format_misc_number(
+                        character_targeting.get(
+                            "scan_resolution_mm"
+                        ),
+                        0,
+                    )
+                    + " mm"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-scan-resolution">—</b>',
+                '<b id="pilot-delta-scan-resolution">'
+                + escape(
+                    freeborn_format_targeting_delta(
+                        character_targeting.get(
+                            "scan_resolution_mm"
+                        ),
+                        targeting_all_v.get(
+                            "scan_resolution_mm"
+                        ),
+                        "mm",
+                        0,
+                    )
                 )
                 + '</b>',
             )
@@ -15189,7 +15477,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-G</strong>
+            <strong>ALL V — VALIDATION 4S-H</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -15246,6 +15534,11 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           <div class="allv-warning" style="margin-top:10px">
             {targeting_all_v_audit_html}
           </div>
+          {
+            f'<div class="allv-warning" style="margin-top:10px">{targeting_character_audit_html}</div>'
+            if targeting_character_audit_html
+            else ''
+          }
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
             ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
@@ -15334,7 +15627,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-G</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-H</span>
   </footer>
 </main>
 
