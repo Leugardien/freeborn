@@ -9136,8 +9136,140 @@ _eve_group_category_cache = {}
 _eve_type_metadata_cache = {}
 _eve_group_metadata_cache = {}
 
-# EVE inventory category 18 = Drone.
+# EVE inventory categories used by the 4S-N-A bay router.
+# 18 = Drone, 87 = Fighter.
 EVE_CATEGORY_DRONE = 18
+EVE_CATEGORY_FIGHTER = 87
+
+
+FREEBORN_SPECIALIZED_HOLD_SPECS = (
+    {
+        "key": "fighter_hangar",
+        "label": "Fighter Hangar",
+        "code": "FIGHTERS",
+        "icon": "✦",
+        "exact_names": (
+            "fighterCapacity",
+            "Fighter Capacity",
+            "Fighter Hangar Capacity",
+            "Fighter Bay Capacity",
+        ),
+        "contains_names": (
+            "fighter capacity",
+            "fighter hangar capacity",
+            "fighter bay capacity",
+        ),
+        "router": "fighter",
+    },
+    {
+        "key": "fuel_bay",
+        "label": "Fuel Bay",
+        "code": "FUEL",
+        "icon": "◉",
+        "exact_names": (
+            "fuelBayCapacity",
+            "Fuel Bay Capacity",
+            "Fuel Capacity",
+        ),
+        "contains_names": (
+            "fuel bay capacity",
+            "fuel capacity",
+        ),
+        "router": "fuel",
+    },
+    {
+        "key": "fleet_hangar",
+        "label": "Fleet Hangar",
+        "code": "FLEET",
+        "icon": "▣",
+        "exact_names": (
+            "fleetHangarCapacity",
+            "Fleet Hangar Capacity",
+        ),
+        "contains_names": (
+            "fleet hangar capacity",
+            "fleet hangar",
+        ),
+        "router": None,
+    },
+    {
+        "key": "ore_hold",
+        "label": "Ore Hold",
+        "code": "ORE",
+        "icon": "◆",
+        "exact_names": (
+            "oreHoldCapacity",
+            "Ore Hold Capacity",
+        ),
+        "contains_names": (
+            "ore hold capacity",
+            "ore hold",
+        ),
+        "router": "ore",
+    },
+    {
+        "key": "gas_hold",
+        "label": "Gas Hold",
+        "code": "GAS",
+        "icon": "◇",
+        "exact_names": (
+            "gasHoldCapacity",
+            "Gas Hold Capacity",
+        ),
+        "contains_names": (
+            "gas hold capacity",
+            "gas hold",
+        ),
+        "router": "gas",
+    },
+    {
+        "key": "ice_hold",
+        "label": "Ice Hold",
+        "code": "ICE",
+        "icon": "❄",
+        "exact_names": (
+            "iceHoldCapacity",
+            "Ice Hold Capacity",
+        ),
+        "contains_names": (
+            "ice hold capacity",
+            "ice hold",
+        ),
+        "router": "ice",
+    },
+    {
+        "key": "mineral_hold",
+        "label": "Mineral Hold",
+        "code": "MINERALS",
+        "icon": "⬡",
+        "exact_names": (
+            "mineralHoldCapacity",
+            "Mineral Hold Capacity",
+        ),
+        "contains_names": (
+            "mineral hold capacity",
+            "mineral hold",
+        ),
+        "router": "mineral",
+    },
+    {
+        "key": "planetary_hold",
+        "label": "Planetary Commodities Hold",
+        "code": "PI",
+        "icon": "◈",
+        "exact_names": (
+            "planetaryCommoditiesHoldCapacity",
+            "Planetary Commodities Hold Capacity",
+            "Planetary Hold Capacity",
+        ),
+        "contains_names": (
+            "planetary commodities hold capacity",
+            "planetary hold capacity",
+            "planetary commodities hold",
+        ),
+        "router": "planetary",
+    },
+)
 
 
 def get_eve_type_metadata(type_id):
@@ -9444,14 +9576,135 @@ def get_eve_type_category_id(type_id):
         return None
 
 
-def split_eft_drone_and_cargo(extras, type_ids):
-    """
-    Separate post-rig EFT contents into Drone Bay and Cargo Bay.
+def freeborn_inventory_type_context(type_id):
+    if not type_id:
+        return {"category_id": None, "type_name": "", "group_name": ""}
 
-    Classification uses EVE inventory metadata, so sentry drones and other
-    drone families do not depend on fragile name heuristics. Unknown types
-    fall back to Cargo Bay so no item disappears from the fitting.
+    try:
+        metadata = get_eve_type_metadata(type_id)
+        group_id = metadata.get("group_id")
+        group = get_eve_group_metadata(group_id) if group_id else {}
+
+        return {
+            "category_id": get_eve_type_category_id(type_id),
+            "type_name": str(metadata.get("name") or "").casefold(),
+            "group_name": str(group.get("name") or "").casefold(),
+        }
+    except Exception as error:
+        print(
+            "Freeborn specialized bay metadata lookup failed:",
+            type_id,
+            repr(error),
+        )
+        return {"category_id": None, "type_name": "", "group_name": ""}
+
+
+def freeborn_detect_specialized_holds(ship_type_id):
     """
+    Detect supported specialized holds directly from hull Dogma attributes.
+    Empty holds remain visible because capacity is a hull property.
+    """
+    holds = []
+
+    for spec in FREEBORN_SPECIALIZED_HOLD_SPECS:
+        attribute = find_dogma_attribute_by_names(
+            ship_type_id,
+            exact_names=spec["exact_names"],
+            contains_names=spec["contains_names"],
+        )
+
+        if not attribute:
+            continue
+
+        try:
+            capacity = float(attribute["value"])
+        except (TypeError, ValueError, KeyError):
+            continue
+
+        if capacity <= 0:
+            continue
+
+        hold = dict(spec)
+        hold["capacity_m3"] = capacity
+        holds.append(hold)
+
+    return holds
+
+
+def freeborn_specialized_hold_route(type_id, active_holds):
+    """
+    Conservative EFT routing.
+    Unknown/ambiguous content stays in Cargo Bay.
+    Fleet Hangar content is never guessed because EFT does not encode it.
+    """
+    routes = {
+        hold.get("router")
+        for hold in active_holds
+        if hold.get("router")
+    }
+
+    if not routes:
+        return None
+
+    ctx = freeborn_inventory_type_context(type_id)
+    category_id = ctx["category_id"]
+    type_name = ctx["type_name"]
+    group_name = ctx["group_name"]
+    combined = f"{type_name} {group_name}"
+
+    if "fighter" in routes and category_id == EVE_CATEGORY_FIGHTER:
+        return "fighter_hangar"
+
+    if "fuel" in routes and any(
+        token in combined
+        for token in (
+            "isotope",
+            "liquid ozone",
+            "strontium clathrates",
+            "heavy water",
+        )
+    ):
+        return "fuel_bay"
+
+    if "ore" in routes and (
+        "ore" in group_name
+        or "asteroid" in group_name
+        or ("compressed" in type_name and "ore" in combined)
+    ):
+        return "ore_hold"
+
+    if "gas" in routes and (
+        "gas" in group_name
+        or "harvestable cloud" in group_name
+        or "fullerite" in combined
+        or "cytoserocin" in combined
+        or "mykoserocin" in combined
+    ):
+        return "gas_hold"
+
+    if "ice" in routes and (
+        "ice" in group_name
+        or "ice product" in group_name
+    ):
+        return "ice_hold"
+
+    if "mineral" in routes and "mineral" in group_name:
+        return "mineral_hold"
+
+    if "planetary" in routes and "planetary" in group_name:
+        return "planetary_hold"
+
+    return None
+
+
+def split_eft_dynamic_bays(extras, type_ids, ship_type_id):
+    active_holds = freeborn_detect_specialized_holds(ship_type_id)
+
+    buckets = {
+        hold["key"]: []
+        for hold in active_holds
+    }
+
     drones = []
     cargo = []
 
@@ -9461,6 +9714,32 @@ def split_eft_drone_and_cargo(extras, type_ids):
         category_id = get_eve_type_category_id(type_id)
 
         if category_id == EVE_CATEGORY_DRONE:
+            drones.append(line)
+            continue
+
+        routed_key = freeborn_specialized_hold_route(
+            type_id,
+            active_holds,
+        )
+
+        if routed_key and routed_key in buckets:
+            buckets[routed_key].append(line)
+        else:
+            cargo.append(line)
+
+    return drones, buckets, cargo, active_holds
+
+
+def split_eft_drone_and_cargo(extras, type_ids):
+    """Compatibility wrapper retained for older callers."""
+    drones = []
+    cargo = []
+
+    for line in extras or []:
+        item_name = normalize_eft_item_name(line)
+        type_id = type_ids.get(item_name.casefold())
+
+        if get_eve_type_category_id(type_id) == EVE_CATEGORY_DRONE:
             drones.append(line)
         else:
             cargo.append(line)
@@ -11846,7 +12125,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-K-1"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-A-DYNAMIC"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -12115,10 +12394,7 @@ def build_freeborn_ship_resource_usage(
     type_ids,
 ):
     """
-    Workbench-style static resource usage:
-      - Cargo Bay used / available
-      - Drone Bay used / available
-      - Drone Bandwidth available
+    FREEBORN FITTINGS — 4S-N-A Dynamic Specialized Bays Engine.
     """
     ship_metadata = get_eve_type_metadata(
         ship_type_id
@@ -12126,103 +12402,99 @@ def build_freeborn_ship_resource_usage(
 
     try:
         cargo_capacity = float(
-            ship_metadata.get(
-                "capacity"
-            )
-            or 0.0
+            ship_metadata.get("capacity") or 0.0
         )
     except (TypeError, ValueError):
         cargo_capacity = 0.0
 
-    drone_capacity_attr = (
-        find_dogma_attribute_by_names(
-            ship_type_id,
-            exact_names=(
-                "droneCapacity",
-                "Drone Capacity",
-                "Drone Bay Capacity",
-            ),
-            contains_names=(
-                "drone capacity",
-                "drone bay capacity",
-            ),
-        )
+    drone_capacity_attr = find_dogma_attribute_by_names(
+        ship_type_id,
+        exact_names=(
+            "droneCapacity",
+            "Drone Capacity",
+            "Drone Bay Capacity",
+        ),
+        contains_names=(
+            "drone capacity",
+            "drone bay capacity",
+        ),
     )
 
-    drone_bandwidth_attr = (
-        find_dogma_attribute_by_names(
-            ship_type_id,
-            exact_names=(
-                "droneBandwidth",
-                "Drone Bandwidth",
-            ),
-            contains_names=(
-                "drone bandwidth",
-            ),
-        )
+    drone_bandwidth_attr = find_dogma_attribute_by_names(
+        ship_type_id,
+        exact_names=(
+            "droneBandwidth",
+            "Drone Bandwidth",
+        ),
+        contains_names=(
+            "drone bandwidth",
+        ),
     )
 
     drone_capacity = (
-        float(
-            drone_capacity_attr[
-                "value"
-            ]
-        )
+        float(drone_capacity_attr["value"])
         if drone_capacity_attr
         else None
     )
 
     drone_bandwidth = (
-        float(
-            drone_bandwidth_attr[
-                "value"
-            ]
-        )
+        float(drone_bandwidth_attr["value"])
         if drone_bandwidth_attr
         else None
     )
 
-    drone_lines, cargo_lines = (
-        split_eft_drone_and_cargo(
-            eft_sections.get(
-                "extras",
-                [],
-            ),
+    drone_lines, specialized_buckets, cargo_lines, active_holds = (
+        split_eft_dynamic_bays(
+            eft_sections.get("extras", []),
             type_ids,
+            ship_type_id,
         )
     )
 
-    drone_usage = (
-        freeborn_bay_used_volume(
-            drone_lines,
-            type_ids,
-        )
+    drone_usage = freeborn_bay_used_volume(
+        drone_lines,
+        type_ids,
     )
 
-    cargo_usage = (
-        freeborn_bay_used_volume(
-            cargo_lines,
+    cargo_usage = freeborn_bay_used_volume(
+        cargo_lines,
+        type_ids,
+    )
+
+    specialized_holds = []
+
+    for hold in active_holds:
+        hold_lines = specialized_buckets.get(
+            hold["key"],
+            [],
+        )
+        usage = freeborn_bay_used_volume(
+            hold_lines,
             type_ids,
         )
-    )
+
+        specialized_holds.append({
+            "key": hold["key"],
+            "label": hold["label"],
+            "code": hold["code"],
+            "icon": hold["icon"],
+            "capacity_m3": hold["capacity_m3"],
+            "used_m3": usage["used_m3"],
+            "complete": usage["complete"],
+            "items": hold_lines,
+            "routed": bool(hold.get("router")),
+        })
 
     return {
-        "cargo_used_m3":
-            cargo_usage["used_m3"],
-        "cargo_capacity_m3":
-            cargo_capacity,
-        "cargo_complete":
-            cargo_usage["complete"],
-        "drone_bay_used_m3":
-            drone_usage["used_m3"],
-        "drone_bay_capacity_m3":
-            drone_capacity,
-        "drone_bay_complete":
-            drone_usage["complete"],
-        "drone_bandwidth_used_mbps":
-            0.0,
-        "drone_bandwidth_available_mbps":
-            drone_bandwidth,
+        "cargo_used_m3": cargo_usage["used_m3"],
+        "cargo_capacity_m3": cargo_capacity,
+        "cargo_complete": cargo_usage["complete"],
+        "drone_bay_used_m3": drone_usage["used_m3"],
+        "drone_bay_capacity_m3": drone_capacity,
+        "drone_bay_complete": drone_usage["complete"],
+        "drone_bandwidth_used_mbps": 0.0,
+        "drone_bandwidth_available_mbps": drone_bandwidth,
+        "specialized_holds": specialized_holds,
     }
 
 
@@ -16797,6 +17069,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     drone_bw_available = ship_resource_usage.get(
         "drone_bandwidth_available_mbps"
     )
+    specialized_holds = ship_resource_usage.get(
+        "specialized_holds",
+        [],
+    ) or []
 
     cargo_usage_pct = freeborn_usage_percent(
         cargo_used,
@@ -16953,9 +17229,12 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     rigs_html = format_eft_web_items(
         eft_sections["rigs"], eft_type_ids
     )
-    drone_items, cargo_items = split_eft_drone_and_cargo(
-        eft_sections["extras"],
-        eft_type_ids,
+    drone_items, specialized_buckets, cargo_items, active_holds = (
+        split_eft_dynamic_bays(
+            eft_sections["extras"],
+            eft_type_ids,
+            ship_type_id,
+        )
     )
 
     drones_html = format_eft_bay_items(
@@ -16965,6 +17244,69 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     cargo_html = format_eft_bay_items(
         cargo_items,
         eft_type_ids,
+    )
+
+    specialized_center_panels = []
+    specialized_resource_rows = []
+
+    for hold in specialized_holds:
+        hold_items = specialized_buckets.get(
+            hold.get("key"),
+            [],
+        )
+        hold_items_html = format_eft_bay_items(
+            hold_items,
+            eft_type_ids,
+        )
+
+        hold_label = escape(
+            str(hold.get("label") or "Specialized Hold")
+        )
+        hold_code = escape(
+            str(hold.get("code") or "HOLD")
+        )
+        hold_icon = escape(
+            str(hold.get("icon") or "◇")
+        )
+        hold_value = escape(
+            format_resource_usage_value(
+                hold.get("used_m3"),
+                hold.get("capacity_m3"),
+                "m³",
+            )
+        )
+        hold_pct = freeborn_usage_percent(
+            hold.get("used_m3"),
+            hold.get("capacity_m3"),
+        )
+
+        specialized_center_panels.append(
+            f"""
+      <article class="hud-panel hold-panel specialized-hold-panel">
+        <div class="panel-title"><span class="slot-symbol">{hold_icon}</span>{hold_label}<span class="panel-code">{hold_code}</span></div>
+        <div class="slot-body bay-grid">{hold_items_html}</div>
+      </article>"""
+        )
+
+        specialized_resource_rows.append(
+            f"""
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">{hold_icon}</span>
+                <strong>{hold_label}</strong>
+              </div>
+              <div class="resource-values">
+                <b>{hold_value}</b>
+              </div>
+              <div class="resource-gauge"><i style="width:{hold_pct:.1f}%"></i></div>
+            </div>"""
+        )
+
+    specialized_center_html = "".join(
+        specialized_center_panels
+    )
+    specialized_resource_html = "".join(
+        specialized_resource_rows
     )
 
     return f'''<!doctype html>
@@ -17078,6 +17420,7 @@ button{{font:inherit}}
 .notes-body{{min-height:86px;padding:13px 15px;color:#dbeaf5;white-space:pre-wrap;font-size:16px;line-height:1.58}}
 .hold-panel .slot-body{{overflow:visible}}
 .drone-bay-panel .panel-title{{color:#a9e7ff}}
+.specialized-hold-panel .panel-title{{color:#d8efff}}
 .cargo-bay-panel .panel-title{{color:#d8e8f3}}
 .bay-grid{{
   display:flex;
@@ -18051,6 +18394,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         <div class="panel-title"><span class="slot-symbol">◈</span>Drone Bay<span class="panel-code">DRONES</span></div>
         <div class="slot-body bay-grid">{drones_html}</div>
       </article>
+{specialized_center_html}
 
       <article class="hud-panel hold-panel cargo-bay-panel">
         <div class="panel-title"><span class="slot-symbol">▦</span>Cargo Bay<span class="panel-code">CARGO</span></div>
@@ -18133,6 +18477,8 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
               </div>
               <div class="resource-gauge"><i style="width:{drone_bw_pct:.1f}%"></i></div>
             </div>
+
+{specialized_resource_html}
 
             <div class="resource-row">
               <div class="resource-label">
@@ -18277,7 +18623,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4T-B</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-N-A</span>
   </footer>
 </main>
 
