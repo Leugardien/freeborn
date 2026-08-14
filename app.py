@@ -14183,7 +14183,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             <span class="pilot-ready">✓ Profil prêt</span>
           </div>
 
-          <div class="pilot-note">
+          <div class="pilot-note pilot-intro-copy">
             Comparaison directe avec la référence corporate ALL V.
             Les valeurs ci-dessous utilisent les compétences réellement
             remontées par ESI pour ce Main.
@@ -14303,7 +14303,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                 <strong>{escape(pilot_updated_display)}</strong>
               </div>
 
-              <a class="pilot-button pilot-refresh" href="{escape(pilot_start_url)}">
+              <a class="pilot-button pilot-refresh pilot-refresh-control" href="{escape(pilot_start_url)}">
                 ↻ Actualiser mon profil EVE
               </a>
             </div>
@@ -16377,6 +16377,120 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 .pilot-compare-title{{
   text-transform:uppercase;
 }}
+
+@media(max-width:760px){{
+  .pilot-refresh-control{{
+    font-size:9px!important;
+    padding:0 6px!important;
+  }}
+  .pilot-intro-copy{{
+    font-size:9.5px!important;
+  }}
+}}
+
+/* =========================================================
+   4S-L2 — UI polish
+   ========================================================= */
+
+/* Blank resistance corner: exact same visual box as EM/THERM/KIN/EXP/EHP */
+.resistance-head{{
+  min-height:26px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  box-sizing:border-box;
+}}
+.resistance-corner{{
+  min-height:26px;
+  padding:5px 3px!important;
+  border:1px solid rgba(49,185,255,.14)!important;
+  background:rgba(0,0,0,.15)!important;
+}}
+
+/* Pilot intro text: present but less dominant */
+.pilot-intro-copy{{
+  font-size:10px!important;
+  line-height:1.42!important;
+  color:#bfd1dd!important;
+  letter-spacing:0!important;
+}}
+
+/* Cohesive typography in both pilot columns */
+.pilot-engine-core,
+.pilot-compare{{
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+}}
+
+.pilot-engine-title,
+.pilot-compare-title{{
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-size:12px!important;
+  line-height:1.08!important;
+  letter-spacing:.085em!important;
+}}
+
+.pilot-engine-row span,
+.pilot-compare-grid span{{
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-size:10px!important;
+  line-height:1.22!important;
+  letter-spacing:.01em!important;
+  color:#c7d9e5;
+}}
+
+.pilot-engine-row b,
+.pilot-compare-grid b{{
+  font-family:Consolas,"Roboto Mono",monospace!important;
+  font-size:10px!important;
+  line-height:1.22!important;
+  letter-spacing:0!important;
+  white-space:nowrap;
+}}
+
+.pilot-compare-grid{{
+  row-gap:6px!important;
+  column-gap:10px!important;
+}}
+
+.compare-delta{{
+  font-family:Consolas,"Roboto Mono",monospace!important;
+  font-size:10px!important;
+  font-weight:700!important;
+}}
+
+/* COMPATIBLE + Refresh: same visual weight and one-line label */
+.pilot-engine-compat,
+.pilot-refresh-control{{
+  min-height:38px!important;
+  height:38px;
+  box-sizing:border-box;
+  display:flex!important;
+  align-items:center!important;
+  justify-content:center!important;
+  text-align:center!important;
+  line-height:1!important;
+  font-size:10px!important;
+  font-weight:850!important;
+  letter-spacing:.035em!important;
+}}
+
+.pilot-refresh-control{{
+  width:100%;
+  padding:0 10px!important;
+  white-space:nowrap!important;
+  text-transform:uppercase;
+}}
+
+/* Slightly reduce surrounding pilot prose, not the identity/header itself */
+.pilot-note{{
+  max-width:96%;
+}}
+
+/* Keep all pilot value columns visually aligned */
+.pilot-engine-row,
+.pilot-compare-grid{{
+  font-variant-numeric:tabular-nums;
+}}
 @media(max-width:1180px){{
   .pilot-tech-grid{{grid-template-columns:1fr}}
   .main-grid{{grid-template-columns:1fr 1fr}}
@@ -16551,7 +16665,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             </div>
 
             <div class="resistance-table">
-              <div class="resistance-head"></div>
+              <div class="resistance-head resistance-corner">&nbsp;</div>
               <div class="resistance-head em">EM</div>
               <div class="resistance-head therm">THERM</div>
               <div class="resistance-head kin">KIN</div>
@@ -16643,9 +16757,9 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           </section>
 
           <div class="telemetry-footnote">
-            <span>Corporate reference: <b>ALL V</b></span>
-            <span>BASE values remain visible where useful.</span>
-            <span>DPS is intentionally not simulated by Freeborn Fittings.</span>
+            <span>Référence corporate : <b>ALL V</b></span>
+            <span>Les valeurs BASE restent visibles lorsqu’elles sont utiles.</span>
+            <span>Le DPS n’est volontairement pas simulé par Freeborn Fittings.</span>
           </div>
         </div>
         {pilot_panel_html}
@@ -16674,7 +16788,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-L</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-L2</span>
   </footer>
 </main>
 
