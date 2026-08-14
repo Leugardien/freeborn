@@ -384,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4-TEST-CEO-SELF-TAKE + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4B-COMPONENT-ROUTER + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -13224,6 +13224,9 @@ def handle_message_component(
         or custom_id.startswith("mc_no:")
         or custom_id.startswith("sa_yes:")
         or custom_id.startswith("sa_no:")
+        or custom_id.startswith("market_take:")
+        or custom_id.startswith("market_complete:")
+        or custom_id.startswith("market_cancel:")
     ):
 
         return jsonify({
