@@ -188,6 +188,12 @@ DISCORD_DIPLOMACY_CATEGORY_ID = os.environ.get(
     "1535676807343374413",
 )
 
+# Dedicated corporate Fittings channel.
+# Required for 4T-D-A automatic publication.
+DISCORD_FITTINGS_CHANNEL_ID = os.environ.get(
+    "DISCORD_FITTINGS_CHANNEL_ID"
+)
+
 DISCORD_DIRECTOR_ROLE_ID = (
     DISCORD_DIRECTION_ROLE_ID
 )
@@ -709,6 +715,43 @@ def init_database():
                             'archived'
                         )
                     );
+                    """
+                )
+
+                # FREEBORN FITTINGS — 4T-D-A
+                # Keep the ONE Discord publication linked to the ONE FREE-xxxx.
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_post_channel_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_post_message_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_thread_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_post_created_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_post_updated_at TIMESTAMPTZ;
                     """
                 )
 
@@ -3657,7 +3700,12 @@ def get_fit(guild_id, fit_id):
                     updated_at,
                     technical_snapshot,
                     technical_snapshot_version,
-                    technical_snapshot_updated_at
+                    technical_snapshot_updated_at,
+                    discord_post_channel_id,
+                    discord_post_message_id,
+                    discord_thread_id,
+                    discord_post_created_at,
+                    discord_post_updated_at
                 FROM fits
                 WHERE guild_id = %s
                 AND fit_id = %s
@@ -3676,6 +3724,9 @@ def get_fit(guild_id, fit_id):
         "created_by_discord_user_id", "created_at", "updated_at",
         "technical_snapshot", "technical_snapshot_version",
         "technical_snapshot_updated_at",
+        "discord_post_channel_id", "discord_post_message_id",
+        "discord_thread_id", "discord_post_created_at",
+        "discord_post_updated_at",
     )
     return dict(zip(keys, row))
 
@@ -3848,6 +3899,402 @@ def build_fit_components(fit_id, guild_id=None):
             "components": components,
         },
     ]
+
+
+
+def discord_bot_headers():
+    return {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+def discord_get_channel(channel_id):
+    response = requests.get(
+        f"{DISCORD_API}/channels/{str(channel_id)}",
+        headers=discord_bot_headers(),
+        timeout=8,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            "Discord channel lookup failed "
+            f"({response.status_code}): "
+            f"{response.text[:300]}"
+        )
+
+    return response.json()
+
+
+def build_fit_publication_embed(fit):
+    """
+    Compact corporate Discord publication.
+    The Web sheet remains the technical source of truth.
+    """
+    fit = ensure_fit_ship_type_id(fit)
+
+    notes = str(
+        fit.get("notes")
+        or "Aucune note particulière."
+    )[:1024]
+
+    embed = {
+        "title": (
+            f"{format_fit_reference(fit['fit_id'])} — "
+            f"{fit['ship_name']} — {fit['name']}"
+        )[:256],
+        "description": notes,
+        "color": fit_embed_color(
+            fit.get("status")
+        ),
+        "fields": [
+            {
+                "name": "Usage",
+                "value": str(
+                    fit.get("usage")
+                    or "—"
+                )[:1024],
+                "inline": True,
+            },
+            {
+                "name": "Créé par",
+                "value": (
+                    f"<@{fit['created_by_discord_user_id']}>"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "Statut",
+                "value": fit_status_label(
+                    fit.get("status")
+                ),
+                "inline": False,
+            },
+        ],
+        "footer": {
+            "text":
+                "Freeborn Legacy • Discussion fitting corporation",
+        },
+    }
+
+    render_url = eve_type_render_url(
+        fit.get("ship_type_id"),
+        512,
+    )
+
+    if render_url:
+        embed["thumbnail"] = {
+            "url": render_url
+        }
+
+    return embed
+
+
+def build_fit_publication_components(
+    guild_id,
+    fit_id,
+):
+    return [
+        {
+            "type": 1,
+            "components": [
+                {
+                    "type": 2,
+                    "style": 5,
+                    "label": "Fiche Web Freeborn",
+                    "emoji": {
+                        "name": "🌐"
+                    },
+                    "url": build_fit_web_url(
+                        guild_id,
+                        fit_id,
+                    ),
+                },
+            ],
+        },
+    ]
+
+
+def save_fit_discord_publication(
+    guild_id,
+    fit_id,
+    channel_id,
+    message_id,
+    thread_id=None,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET
+                    discord_post_channel_id = %s,
+                    discord_post_message_id = %s,
+                    discord_thread_id = %s,
+                    discord_post_created_at =
+                        COALESCE(
+                            discord_post_created_at,
+                            NOW()
+                        ),
+                    discord_post_updated_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                AND fit_id = %s;
+                """,
+                (
+                    str(channel_id),
+                    str(message_id),
+                    (
+                        str(thread_id)
+                        if thread_id
+                        else None
+                    ),
+                    str(guild_id),
+                    int(fit_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def ensure_fit_discord_publication(
+    fit,
+):
+    """
+    Create the ONE corporate Discord publication for this fit.
+
+    Returns a diagnostic dict and NEVER creates a duplicate when the
+    database already contains a linked message/thread.
+    """
+    if not fit:
+        return {
+            "ok": False,
+            "reason": "fit_missing",
+        }
+
+    if (
+        fit.get("discord_post_message_id")
+        or
+        fit.get("discord_thread_id")
+    ):
+        return {
+            "ok": True,
+            "created": False,
+            "reason": "already_linked",
+            "channel_id":
+                fit.get("discord_post_channel_id"),
+            "message_id":
+                fit.get("discord_post_message_id"),
+            "thread_id":
+                fit.get("discord_thread_id"),
+        }
+
+    target_channel_id = str(
+        DISCORD_FITTINGS_CHANNEL_ID
+        or ""
+    ).strip()
+
+    if not target_channel_id:
+        print(
+            "Freeborn Fittings publication skipped: "
+            "DISCORD_FITTINGS_CHANNEL_ID is not configured."
+        )
+
+        return {
+            "ok": False,
+            "created": False,
+            "reason": "channel_not_configured",
+        }
+
+    channel = discord_get_channel(
+        target_channel_id
+    )
+
+    channel_type = int(
+        channel.get("type", -1)
+    )
+
+    ref = format_fit_reference(
+        fit["fit_id"]
+    )
+
+    thread_name = (
+        f"{ref} — {fit['ship_name']} — "
+        f"{fit['name']}"
+    )[:100]
+
+    message_payload = {
+        "content": (
+            f"🛡️ **{ref} — "
+            f"{fit['ship_name']} — {fit['name']}**"
+        ),
+        "embeds": [
+            build_fit_publication_embed(
+                fit
+            )
+        ],
+        "components":
+            build_fit_publication_components(
+                fit["guild_id"],
+                fit["fit_id"],
+            ),
+        "allowed_mentions": {
+            "parse": []
+        },
+    }
+
+    # Discord forum / media channel.
+    if channel_type in {15, 16}:
+        response = requests.post(
+            (
+                f"{DISCORD_API}/channels/"
+                f"{target_channel_id}/threads"
+            ),
+            headers=discord_bot_headers(),
+            json={
+                "name": thread_name,
+                "auto_archive_duration":
+                    10080,
+                "message":
+                    message_payload,
+            },
+            timeout=12,
+        )
+
+        if response.status_code not in {
+            200,
+            201,
+        }:
+            raise RuntimeError(
+                "Discord forum publication failed "
+                f"({response.status_code}): "
+                f"{response.text[:500]}"
+            )
+
+        created = response.json()
+
+        thread_id = str(
+            created["id"]
+        )
+
+        starter_message = (
+            created.get("message")
+            or {}
+        )
+
+        # Forum starter messages commonly map to the thread/post.
+        message_id = str(
+            starter_message.get("id")
+            or
+            thread_id
+        )
+
+        save_fit_discord_publication(
+            fit["guild_id"],
+            fit["fit_id"],
+            thread_id,
+            message_id,
+            thread_id,
+        )
+
+        return {
+            "ok": True,
+            "created": True,
+            "kind": "forum_post",
+            "channel_id": thread_id,
+            "message_id": message_id,
+            "thread_id": thread_id,
+        }
+
+    # Standard guild text / announcement channel.
+    if channel_type not in {
+        0,
+        5,
+    }:
+        raise RuntimeError(
+            "The configured Fittings channel "
+            f"has unsupported Discord type {channel_type}."
+        )
+
+    response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{target_channel_id}/messages"
+        ),
+        headers=discord_bot_headers(),
+        json=message_payload,
+        timeout=12,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Discord fitting message failed "
+            f"({response.status_code}): "
+            f"{response.text[:500]}"
+        )
+
+    message = response.json()
+    message_id = str(
+        message["id"]
+    )
+
+    # Create a discussion thread attached to that ONE publication.
+    thread_response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{target_channel_id}/messages/"
+            f"{message_id}/threads"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "name": thread_name,
+            "auto_archive_duration":
+                10080,
+        },
+        timeout=12,
+    )
+
+    thread_id = None
+
+    if thread_response.status_code in {
+        200,
+        201,
+    }:
+        thread_id = str(
+            thread_response.json()["id"]
+        )
+    else:
+        # Publication itself succeeded. We keep it and log the thread issue.
+        print(
+            "Freeborn Fittings thread creation failed:",
+            thread_response.status_code,
+            thread_response.text[:500],
+        )
+
+    save_fit_discord_publication(
+        fit["guild_id"],
+        fit["fit_id"],
+        target_channel_id,
+        message_id,
+        thread_id,
+    )
+
+    return {
+        "ok": True,
+        "created": True,
+        "kind": "text_message",
+        "channel_id":
+            target_channel_id,
+        "message_id":
+            message_id,
+        "thread_id":
+            thread_id,
+    }
 
 
 def build_fit_list_message(guild_id):
@@ -4387,6 +4834,49 @@ def handle_fit_modal_submit(data):
             saved["fit_id"],
         )
 
+        publication = None
+
+        try:
+            publication = (
+                ensure_fit_discord_publication(
+                    fit
+                )
+            )
+        except Exception as error:
+            # The fit remains safely stored even if Discord publication fails.
+            print(
+                "Freeborn Fittings publication failed:",
+                repr(error),
+            )
+
+            publication = {
+                "ok": False,
+                "reason": "discord_error",
+            }
+
+        publication_note = ""
+
+        if publication.get("ok"):
+            if publication.get("created"):
+                publication_note = (
+                    "\n📣 Le post de discussion corporation "
+                    "a été créé automatiquement."
+                )
+        elif (
+            publication.get("reason")
+            == "channel_not_configured"
+        ):
+            publication_note = (
+                "\n⚠️ Publication Discord en attente : "
+                "le salon Fittings n'est pas encore configuré."
+            )
+        else:
+            publication_note = (
+                "\n⚠️ Le fit est enregistré, mais la publication "
+                "dans le salon Fittings a échoué. "
+                "Consulte les logs Render."
+            )
+
         return jsonify({
             "type": 4,
             "data": {
@@ -4395,6 +4885,7 @@ def handle_fit_modal_submit(data):
                     "enregistré dans Freeborn.**\n"
                     "La fiche ci-dessous peut maintenant être partagée "
                     "avec la corporation."
+                    f"{publication_note}"
                 ),
                 "embeds": [
                     build_fit_embed(fit)
