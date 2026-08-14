@@ -384,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4B-COMPONENT-ROUTER + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4D-SOLO-SELF-TAKE + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -12087,7 +12087,7 @@ def handle_message_component(
                     data,
                     configured_role_ids(DISCORD_CEO_ROLE_ID),
                 )
-                if not is_ceo_test_user:
+                if False and not is_ceo_test_user:  # TEMP P4D SOLO TEST
                     return jsonify({
                         "type": 4,
                         "data": {
@@ -12100,7 +12100,7 @@ def handle_message_component(
                     })
 
                 print(
-                    "Freeborn Market TEST self-take [P4-TEST]:",
+                    "Freeborn Market TEST self-take [P4D-SOLO]:",
                     format_market_reference(market_id),
                     "CEO=",
                     discord_user_id,
@@ -25544,7 +25544,7 @@ def interactions():
                         )
                     )
 
-                    if not is_ceo_test_user:
+                    if False and not is_ceo_test_user:  # TEMP P4D SOLO TEST
                         return jsonify({
                             "type": 4,
                             "data": {
@@ -25559,7 +25559,7 @@ def interactions():
                         })
 
                     print(
-                        "Freeborn Market TEST self-take [P4-TEST]:",
+                        "Freeborn Market TEST self-take [P4D-SOLO]:",
                         format_market_reference(
                             market_id
                         ),
