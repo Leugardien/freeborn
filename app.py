@@ -11557,6 +11557,237 @@ EVE_SKILL_ADVANCED_WEAPON_UPGRADES = 11207
 
 FREEBORN_ALL_V_LEVEL = 5
 
+# CCP-documented Dogma attribute pairs for item/skill requirements.
+FREEBORN_REQUIRED_SKILL_ATTRIBUTE_PAIRS = (
+    (182, 277),
+    (183, 278),
+    (184, 279),
+    (1285, 1286),
+    (1289, 1287),
+    (1290, 1288),
+)
+
+
+def freeborn_direct_required_skills(type_id):
+    """
+    Return the direct skill requirements encoded on one EVE type.
+
+    Output rows:
+      {
+        "skill_id": int,
+        "required_level": int,
+        "skill_name": str,
+      }
+    """
+    if not type_id:
+        return []
+
+    dogma = get_eve_type_dogma(type_id) or {}
+    rows = []
+
+    for skill_attr_id, level_attr_id in FREEBORN_REQUIRED_SKILL_ATTRIBUTE_PAIRS:
+        raw_skill_id = dogma.get(skill_attr_id)
+        raw_level = dogma.get(level_attr_id)
+
+        try:
+            skill_id = int(float(raw_skill_id))
+        except (TypeError, ValueError):
+            continue
+
+        if skill_id <= 0:
+            continue
+
+        try:
+            required_level = int(float(raw_level))
+        except (TypeError, ValueError):
+            required_level = 1
+
+        required_level = max(1, min(5, required_level))
+
+        metadata = get_eve_type_metadata(skill_id) or {}
+        skill_name = str(
+            metadata.get("name")
+            or f"Skill {skill_id}"
+        )
+
+        rows.append({
+            "skill_id": skill_id,
+            "required_level": required_level,
+            "skill_name": skill_name,
+        })
+
+    return rows
+
+
+def freeborn_recursive_required_skills(type_id, _visiting=None):
+    """
+    Expand the complete prerequisite tree for a ship/type.
+
+    CCP documents that the same Required Skill / Required Level Dogma
+    attributes also apply to skill types. Recursing through them reproduces
+    the minimum prerequisite chain much more closely than checking only the
+    ship's direct requirements.
+
+    Duplicate skills are collapsed to the highest required level encountered.
+    """
+    if not type_id:
+        return []
+
+    visiting = set(_visiting or set())
+    type_id = int(type_id)
+
+    if type_id in visiting:
+        return []
+
+    visiting.add(type_id)
+
+    merged = {}
+
+    def merge_row(row):
+        skill_id = int(row["skill_id"])
+        current = merged.get(skill_id)
+
+        if (
+            current is None
+            or int(row["required_level"]) > int(current["required_level"])
+        ):
+            merged[skill_id] = dict(row)
+
+    for row in freeborn_direct_required_skills(type_id):
+        # First include prerequisites of the required skill itself.
+        for parent in freeborn_recursive_required_skills(
+            row["skill_id"],
+            visiting,
+        ):
+            merge_row(parent)
+
+        # Then include the skill required by this type.
+        merge_row(row)
+
+    # Stable output: broad prerequisites first, then alphabetical as fallback.
+    return list(merged.values())
+
+
+def freeborn_pilotability_result(ship_type_id, skills_snapshot):
+    """
+    Compare the complete minimum hull prerequisite tree against one Main's
+    actual ESI trained skill levels.
+    """
+    required = freeborn_recursive_required_skills(
+        ship_type_id
+    )
+    trained = freeborn_skill_level_map(
+        skills_snapshot
+    )
+
+    rows = []
+    missing = []
+
+    for row in required:
+        skill_id = int(row["skill_id"])
+        required_level = int(row["required_level"])
+        trained_level = int(
+            trained.get(skill_id, 0)
+        )
+
+        result_row = {
+            "skill_id": skill_id,
+            "skill_name": row["skill_name"],
+            "required_level": required_level,
+            "trained_level": trained_level,
+            "met": trained_level >= required_level,
+        }
+
+        rows.append(result_row)
+
+        if not result_row["met"]:
+            missing.append(result_row)
+
+    return {
+        "available": bool(required),
+        "pilotable": bool(required) and not missing,
+        "requirements": rows,
+        "missing": missing,
+    }
+
+
+def freeborn_render_pilotability_badge(result):
+    """
+    Compact badge + hover/focus tooltip for the ship image.
+    """
+    if not result or not result.get("available"):
+        return (
+            '<div class="pilotability-badge pilotability-unknown" tabindex="0">'
+            '<span class="pilotability-mark">?</span>'
+            '<span>PILOTABILITÉ</span>'
+            '<div class="pilotability-tooltip">'
+            '<strong>PRÉREQUIS DU VAISSEAU</strong>'
+            '<span>Impossible de résoudre les compétences minimales pour ce hull.</span>'
+            '</div>'
+            '</div>'
+        )
+
+    pilotable = bool(result.get("pilotable"))
+    rows = result.get("requirements") or []
+
+    tooltip_rows = []
+
+    for row in rows:
+        state = "✓" if row.get("met") else "✕"
+        css_class = "ok" if row.get("met") else "missing"
+
+        tooltip_rows.append(
+            '<div class="pilotability-skill-row '
+            + css_class
+            + '">'
+            + '<span>'
+            + state
+            + ' '
+            + escape(str(row.get("skill_name") or "Skill"))
+            + '</span>'
+            + '<b>'
+            + str(int(row.get("trained_level") or 0))
+            + '/'
+            + str(int(row.get("required_level") or 0))
+            + '</b>'
+            + '</div>'
+        )
+
+    if pilotable:
+        badge_class = "pilotability-ok"
+        badge_mark = "✓"
+        badge_text = "PILOTABLE"
+        summary = "Ce Main possède tous les prérequis minimum du hull."
+    else:
+        badge_class = "pilotability-no"
+        badge_mark = "⚠"
+        badge_text = "NON PILOTABLE"
+        missing_count = len(result.get("missing") or [])
+        summary = (
+            f"{missing_count} compétence"
+            + (" manque." if missing_count == 1 else "s manquent.")
+        )
+
+    return (
+        '<div class="pilotability-badge '
+        + badge_class
+        + '" tabindex="0">'
+        + '<span class="pilotability-mark">'
+        + badge_mark
+        + '</span>'
+        + '<span>'
+        + badge_text
+        + '</span>'
+        + '<div class="pilotability-tooltip">'
+        + '<strong>COMPÉTENCES MINIMUM REQUISES</strong>'
+        + '<span class="pilotability-summary">'
+        + escape(summary)
+        + '</span>'
+        + ''.join(tooltip_rows)
+        + '</div>'
+        + '</div>'
+    )
+
 
 def freeborn_skill_level_map(skills_snapshot):
     """
@@ -15974,6 +16205,17 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         (status.upper(), "#29a9ff"),
     )
 
+    pilotability_html = ""
+
+    if pilot_profile:
+        pilotability_result = freeborn_pilotability_result(
+            fit.get("ship_type_id"),
+            pilot_profile.get("skills_snapshot") or [],
+        )
+        pilotability_html = freeborn_render_pilotability_badge(
+            pilotability_result
+        )
+
     render_url = eve_type_render_url(
         fit.get("ship_type_id"),
         512,
@@ -17521,6 +17763,76 @@ button{{font:inherit}}
 .ship-stage{{position:relative;min-height:225px;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,145,255,.14),transparent 44%),linear-gradient(90deg,transparent 49.8%,rgba(49,185,255,.08) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(49,185,255,.06) 50%,transparent 50.2%)}}
 .ship-stage:before{{content:"";position:absolute;width:64%;aspect-ratio:1;border:1px solid rgba(49,185,255,.09);border-radius:50%;box-shadow:0 0 0 45px rgba(49,185,255,.018),0 0 0 90px rgba(49,185,255,.012)}}
 .ship-render{{width:96%;height:225px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 18px 26px rgba(0,0,0,.84))}}
+.pilotability-badge{{
+  position:absolute;
+  z-index:4;
+  right:10px;
+  top:10px;
+  display:flex;
+  align-items:center;
+  gap:7px;
+  min-height:30px;
+  padding:5px 9px;
+  border:1px solid rgba(41,169,255,.58);
+  background:rgba(1,13,24,.93);
+  font-family:"Rajdhani","Arial Narrow",Arial,sans-serif;
+  font-size:12px;
+  font-weight:800;
+  letter-spacing:.8px;
+  cursor:help;
+  outline:none;
+  box-shadow:0 8px 24px rgba(0,0,0,.42);
+}}
+.pilotability-mark{{font-size:15px;line-height:1}}
+.pilotability-ok{{border-color:rgba(121,221,115,.72);color:#8df187}}
+.pilotability-no{{border-color:rgba(255,174,52,.82);color:#ffc65b}}
+.pilotability-unknown{{border-color:rgba(137,150,163,.72);color:#a9b5bf}}
+.pilotability-tooltip{{
+  position:absolute;
+  display:none;
+  right:0;
+  top:calc(100% + 8px);
+  width:340px;
+  max-height:360px;
+  overflow:auto;
+  padding:12px;
+  border:1px solid rgba(41,169,255,.65);
+  background:rgba(2,12,22,.985);
+  color:#d9f2ff;
+  text-align:left;
+  font-family:"Rajdhani","Arial Narrow",Arial,sans-serif;
+  font-size:12px;
+  font-weight:500;
+  letter-spacing:.15px;
+  box-shadow:0 16px 42px rgba(0,0,0,.62);
+}}
+.pilotability-badge:hover .pilotability-tooltip,
+.pilotability-badge:focus .pilotability-tooltip,
+.pilotability-badge:focus-within .pilotability-tooltip{{display:block}}
+.pilotability-tooltip>strong{{
+  display:block;
+  margin-bottom:4px;
+  color:#62d8ff;
+  font-size:13px;
+  letter-spacing:.8px;
+}}
+.pilotability-summary{{
+  display:block;
+  margin-bottom:9px;
+  color:#9fb8c7;
+}}
+.pilotability-skill-row{{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:12px;
+  padding:4px 0;
+  border-top:1px solid rgba(49,185,255,.12);
+}}
+.pilotability-skill-row b{{font-variant-numeric:tabular-nums}}
+.pilotability-skill-row.ok span,
+.pilotability-skill-row.ok b{{color:#8df187}}
+.pilotability-skill-row.missing span,
+.pilotability-skill-row.missing b{{color:#ff796f}}
 .ship-placeholder{{color:#6d879b;letter-spacing:.15em;text-align:center}}
 .telemetry-reference{{margin:7px 7px 0;padding:9px 11px;border:1px solid rgba(214,168,60,.34);background:rgba(214,168,60,.045)}}
 .telemetry-reference strong{{display:block;color:var(--gold2);font-size:11px;letter-spacing:.09em;text-transform:uppercase}}
@@ -18377,7 +18689,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 
       <article class="hud-panel ship-panel center-ship-panel">
         <div class="panel-title"><span class="slot-symbol">S</span>{safe_ship}<span class="panel-code">SHIP</span></div>
-        <div class="ship-stage">{ship_html}</div>
+        <div class="ship-stage">{ship_html}{pilotability_html}</div>
       </article>
 
       <article class="hud-panel compact-meta-panel usage-meta-panel">
@@ -18623,7 +18935,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-N-A</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-N-B</span>
   </footer>
 </main>
 
