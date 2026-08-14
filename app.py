@@ -9542,6 +9542,8 @@ FREEBORN_FITTING_NAMED_SKILLS = (
     "Signature Analysis",
     "Target Management",
     "Advanced Target Management",
+    "Evasive Maneuvering",
+    "Spaceship Command",
 )
 
 
@@ -10483,7 +10485,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-I-1"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-K-1"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -12997,6 +12999,109 @@ def freeborn_render_align_all_v_audit(
     )
 
 
+
+def freeborn_calculate_align_character(
+    mobility_base,
+    technical_snapshot,
+    skills_snapshot,
+):
+    """
+    4S-K: real ESI pilot align time using the same universal agility layer
+    validated in 4S-J.
+    """
+    mass_kg = mobility_base.get("mass_kg")
+    inertia_base = mobility_base.get("inertia_modifier")
+
+    evasive_level = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Evasive Maneuvering",
+    )
+    spaceship_level = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Spaceship Command",
+    )
+
+    if mass_kg is None or inertia_base is None:
+        return {
+            "mass_kg": mass_kg,
+            "inertia_base": inertia_base,
+            "inertia_character": None,
+            "align_time_character_seconds": None,
+            "evasive_maneuvering_level": evasive_level,
+            "spaceship_command_level": spaceship_level,
+        }
+
+    mass_kg = float(mass_kg)
+    inertia_base = float(inertia_base)
+
+    inertia_character = (
+        inertia_base
+        * (1.0 - 0.05 * evasive_level)
+        * (1.0 - 0.02 * spaceship_level)
+    )
+
+    align_seconds = (
+        1.3862943611198906
+        * mass_kg
+        * inertia_character
+        / 1_000_000.0
+    )
+
+    return {
+        "mass_kg": mass_kg,
+        "inertia_base": inertia_base,
+        "inertia_character": inertia_character,
+        "align_time_character_seconds": align_seconds,
+        "evasive_maneuvering_level": evasive_level,
+        "spaceship_command_level": spaceship_level,
+    }
+
+
+def freeborn_render_align_character_audit(
+    values,
+    all_v_values,
+):
+    align_character = values.get("align_time_character_seconds")
+    align_all_v = all_v_values.get("align_time_all_v_seconds")
+
+    return (
+        '<strong>MOBILITÉ PERSONNAGE — MOTEUR 4S-K</strong>'
+        '<br><span class="cap-audit-key">Evasive Maneuvering :</span> '
+        + str(values.get("evasive_maneuvering_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Spaceship Command :</span> '
+        + str(values.get("spaceship_command_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Inertia personnage :</span> '
+        + freeborn_format_misc_number(
+            values.get("inertia_character"),
+            4,
+        )
+        + '<br><span class="cap-audit-key">Align time personnage :</span> '
+        + (
+            freeborn_format_misc_number(align_character, 2) + ' s'
+            if align_character is not None
+            else '—'
+        )
+        + '<br><span class="cap-audit-key">Écart align vs ALL V :</span> '
+        + escape(
+            freeborn_format_targeting_delta(
+                align_character,
+                align_all_v,
+                "s",
+                2,
+            )
+        )
+        + '<br><span class="cap-audit-muted">'
+          '4S-K applique les niveaux ESI réels de Evasive Maneuvering et '
+          'Spaceship Command. Modules, rigs, implants, boosts et compétences '
+          'spécifiques de hull restent exclus.'
+          '</span>'
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -14011,7 +14116,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-J — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE / MOBILITÉ</div>
+              <div class="pilot-engine-title">MOTEUR 4S-K — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE / MOBILITÉ</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -14089,6 +14194,8 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                   <span>Écart portée vs ALL V</span><b id="pilot-delta-target-range">—</b>
                   <span>Résolution de scan</span><b id="pilot-scan-resolution">—</b>
                   <span>Écart scan vs ALL V</span><b id="pilot-delta-scan-resolution">—</b>
+                  <span>Align time</span><b id="pilot-align-time">—</b>
+                  <span>Écart align vs ALL V</span><b id="pilot-delta-align-time">—</b>
                 </div>
               </div>
 
@@ -14642,7 +14749,9 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
     character_velocity = None
     character_targeting = None
+    character_mobility = None
     targeting_character_audit_html = ""
+    mobility_character_audit_html = ""
 
     if pilot_profile:
         character_targeting = (
@@ -14658,6 +14767,23 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             freeborn_render_targeting_character_audit(
                 character_targeting,
                 targeting_all_v,
+            )
+        )
+
+        character_mobility = (
+            freeborn_calculate_align_character(
+                mobility_base,
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
+        )
+
+        mobility_character_audit_html = (
+            freeborn_render_align_character_audit(
+                character_mobility,
+                mobility_all_v,
             )
         )
 
@@ -15039,6 +15165,39 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                         ),
                         "mm",
                         0,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-align-time">—</b>',
+                '<b id="pilot-align-time">'
+                + escape(
+                    (
+                        freeborn_format_misc_number(
+                            character_mobility.get(
+                                "align_time_character_seconds"
+                            ),
+                            2,
+                        )
+                        + " s"
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-align-time">—</b>',
+                '<b id="pilot-delta-align-time">'
+                + escape(
+                    freeborn_format_targeting_delta(
+                        character_mobility.get(
+                            "align_time_character_seconds"
+                        ),
+                        mobility_all_v.get(
+                            "align_time_all_v_seconds"
+                        ),
+                        "s",
+                        2,
                     )
                 )
                 + '</b>',
@@ -15757,7 +15916,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-J</strong>
+            <strong>ALL V — VALIDATION 4S-K</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -15827,6 +15986,11 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           <div class="allv-warning" style="margin-top:10px">
             {mobility_all_v_audit_html}
           </div>
+          {
+            f'<div class="allv-warning" style="margin-top:10px">{mobility_character_audit_html}</div>'
+            if mobility_character_audit_html
+            else ''
+          }
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
             ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
@@ -15915,7 +16079,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-J</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-K</span>
   </footer>
 </main>
 
