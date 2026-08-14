@@ -3,7 +3,9 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import escape
 from urllib.parse import urlencode
@@ -380,7 +382,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2C-SEARCH-COMPAT + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2D-SDE-SEARCH + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -928,6 +930,37 @@ def init_database():
                     ON market_order_items (
                         market_id,
                         line_number
+                    );
+                    """
+                )
+
+                # ----------------------------------------------------
+                # FREEBORN MARKET — STATIC EVE TYPE SEARCH INDEX
+                #
+                # /search/ is no longer available on current ESI.
+                # Market autocomplete therefore uses CCP's official SDE,
+                # imported once into the existing Neon database.
+                # ----------------------------------------------------
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS market_type_index (
+                        type_id BIGINT PRIMARY KEY,
+                        type_name TEXT NOT NULL,
+                        type_name_lower TEXT NOT NULL,
+                        group_id BIGINT,
+                        market_group_id BIGINT NOT NULL,
+                        sde_build TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_market_type_index_name_lower
+                    ON market_type_index (
+                        type_name_lower
                     );
                     """
                 )
@@ -4144,13 +4177,401 @@ def freeborn_market_validate_token(token):
     return context
 
 
+FREEBORN_SDE_LATEST_JSONL_URL = (
+    "https://developers.eveonline.com/static-data/"
+    "eve-online-static-data-latest-jsonl.zip"
+)
+
+_freeborn_market_sde_sync_lock = False
+
+
+def freeborn_market_type_index_count():
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM market_type_index;
+                """
+            )
+            row = cur.fetchone()
+
+    return int(
+        row[0]
+        if row
+        else 0
+    )
+
+
+def freeborn_market_extract_localized_name(value):
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, dict):
+        for key in (
+            "en",
+            "en-us",
+            "en_US",
+            "enUS",
+        ):
+            candidate = value.get(
+                key
+            )
+
+            if candidate:
+                return str(
+                    candidate
+                ).strip()
+
+        # Last-resort deterministic first non-empty localization.
+        for candidate in value.values():
+            if candidate:
+                return str(
+                    candidate
+                ).strip()
+
+    return ""
+
+
+def freeborn_market_sde_record_value(
+    record,
+    *names,
+):
+    for name in names:
+        if name in record:
+            return record.get(
+                name
+            )
+
+    return None
+
+
+def freeborn_market_sync_type_index():
+    """
+    Populate market_type_index from CCP's official JSONL SDE.
+
+    This is intentionally a persistent Neon index:
+      - the large SDE download happens only when the index is absent;
+      - subsequent Render restarts keep using the same tiny searchable table;
+      - no second database/service is created.
+
+    Only published types with a Market Group are imported.
+    """
+    global _freeborn_market_sde_sync_lock
+
+    if _freeborn_market_sde_sync_lock:
+        return
+
+    _freeborn_market_sde_sync_lock = True
+    temp_path = None
+
+    try:
+        print(
+            "Freeborn Market SDE type index: download start"
+        )
+
+        response = requests.get(
+            FREEBORN_SDE_LATEST_JSONL_URL,
+            headers={
+                "User-Agent":
+                    "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            stream=True,
+            timeout=90,
+        )
+        response.raise_for_status()
+
+        build_hint = (
+            response.url
+            or FREEBORN_SDE_LATEST_JSONL_URL
+        )
+
+        with tempfile.NamedTemporaryFile(
+            prefix="freeborn-sde-",
+            suffix=".zip",
+            delete=False,
+        ) as temp_file:
+            temp_path = temp_file.name
+
+            for chunk in response.iter_content(
+                chunk_size=1024 * 1024
+            ):
+                if chunk:
+                    temp_file.write(
+                        chunk
+                    )
+
+        with zipfile.ZipFile(
+            temp_path,
+            "r",
+        ) as archive:
+            candidates = [
+                name
+                for name in archive.namelist()
+                if name.casefold().endswith(
+                    "types.jsonl"
+                )
+            ]
+
+            if not candidates:
+                raise RuntimeError(
+                    "types.jsonl absent du SDE CCP"
+                )
+
+            # Prefer the shortest path if the archive contains aliases/copies.
+            types_member = sorted(
+                candidates,
+                key=lambda value: (
+                    value.count("/"),
+                    len(value),
+                ),
+            )[0]
+
+            rows = []
+
+            with archive.open(
+                types_member,
+                "r",
+            ) as raw_types:
+                for raw_line in raw_types:
+                    if not raw_line.strip():
+                        continue
+
+                    try:
+                        record = json.loads(
+                            raw_line.decode(
+                                "utf-8"
+                            )
+                        )
+                    except Exception:
+                        continue
+
+                    raw_type_id = (
+                        record.get("_key")
+                        if isinstance(record, dict)
+                        else None
+                    )
+
+                    if raw_type_id is None:
+                        raw_type_id = (
+                            freeborn_market_sde_record_value(
+                                record,
+                                "typeID",
+                                "typeId",
+                                "id",
+                            )
+                            if isinstance(record, dict)
+                            else None
+                        )
+
+                    try:
+                        type_id = int(
+                            raw_type_id
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        continue
+
+                    published = (
+                        freeborn_market_sde_record_value(
+                            record,
+                            "published",
+                            "isPublished",
+                        )
+                    )
+
+                    if published is False:
+                        continue
+
+                    market_group_id = (
+                        freeborn_market_sde_record_value(
+                            record,
+                            "marketGroupID",
+                            "marketGroupId",
+                            "market_group_id",
+                        )
+                    )
+
+                    try:
+                        market_group_id = int(
+                            market_group_id
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        continue
+
+                    group_id = (
+                        freeborn_market_sde_record_value(
+                            record,
+                            "groupID",
+                            "groupId",
+                            "group_id",
+                        )
+                    )
+
+                    try:
+                        group_id = (
+                            int(group_id)
+                            if group_id is not None
+                            else None
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        group_id = None
+
+                    type_name = (
+                        freeborn_market_extract_localized_name(
+                            freeborn_market_sde_record_value(
+                                record,
+                                "name",
+                                "typeName",
+                            )
+                        )
+                    )
+
+                    if not type_name:
+                        continue
+
+                    rows.append((
+                        type_id,
+                        type_name,
+                        type_name.casefold(),
+                        group_id,
+                        market_group_id,
+                        build_hint,
+                    ))
+
+        if not rows:
+            raise RuntimeError(
+                "Aucun type commercialisable trouvé dans le SDE CCP"
+            )
+
+        with psycopg.connect(
+            DATABASE_URL
+        ) as conn:
+            with conn.cursor() as cur:
+                # Atomic refresh: do not leave a partial index.
+                cur.execute(
+                    """
+                    CREATE TEMP TABLE
+                    market_type_index_stage (
+                        type_id BIGINT PRIMARY KEY,
+                        type_name TEXT NOT NULL,
+                        type_name_lower TEXT NOT NULL,
+                        group_id BIGINT,
+                        market_group_id BIGINT NOT NULL,
+                        sde_build TEXT
+                    ) ON COMMIT DROP;
+                    """
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO market_type_index_stage (
+                        type_id,
+                        type_name,
+                        type_name_lower,
+                        group_id,
+                        market_group_id,
+                        sde_build
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (type_id) DO UPDATE
+                    SET
+                        type_name =
+                            EXCLUDED.type_name,
+                        type_name_lower =
+                            EXCLUDED.type_name_lower,
+                        group_id =
+                            EXCLUDED.group_id,
+                        market_group_id =
+                            EXCLUDED.market_group_id,
+                        sde_build =
+                            EXCLUDED.sde_build;
+                    """,
+                    rows,
+                )
+
+                cur.execute(
+                    """
+                    DELETE FROM market_type_index;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO market_type_index (
+                        type_id,
+                        type_name,
+                        type_name_lower,
+                        group_id,
+                        market_group_id,
+                        sde_build,
+                        updated_at
+                    )
+                    SELECT
+                        type_id,
+                        type_name,
+                        type_name_lower,
+                        group_id,
+                        market_group_id,
+                        sde_build,
+                        NOW()
+                    FROM market_type_index_stage;
+                    """
+                )
+
+            conn.commit()
+
+        print(
+            "Freeborn Market SDE type index ready:",
+            len(rows),
+            "market types",
+        )
+
+    finally:
+        _freeborn_market_sde_sync_lock = False
+
+        if temp_path:
+            try:
+                os.remove(
+                    temp_path
+                )
+            except OSError:
+                pass
+
+
+def freeborn_market_ensure_type_index():
+    count = freeborn_market_type_index_count()
+
+    if count >= 1000:
+        return count
+
+    freeborn_market_sync_type_index()
+
+    count = freeborn_market_type_index_count()
+
+    if count < 1000:
+        raise RuntimeError(
+            "Index SDE Freeborn Market incomplet"
+        )
+
+    return count
+
+
 def freeborn_market_search_types(query):
     """
-    Search public EVE inventory types through ESI and keep only types that
-    actually belong to a Market Group.
+    Fast local autocomplete from CCP's official SDE, persisted in Neon.
 
-    Search results are cached briefly in-process to avoid hammering ESI while
-    a member is typing.
+    No ESI /search route is used.
     """
     normalized = " ".join(
         str(query or "").strip().split()
@@ -4161,6 +4582,7 @@ def freeborn_market_search_types(query):
 
     cache_key = normalized.casefold()
     now = time.time()
+
     cached = _freeborn_market_search_cache.get(
         cache_key
     )
@@ -4173,96 +4595,70 @@ def freeborn_market_search_types(query):
     ):
         return cached["items"]
 
-    response = requests.get(
-        "https://esi.evetech.net/search/",
-        params={
-            "categories": "inventory_type",
-            "search": normalized,
-            "strict": "false",
-            "datasource": "tranquility",
-        },
-        headers={
-            "User-Agent":
-                "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
-            # ESI moved to compatibility-date versioning in 2025.
-            # Using an unversioned path + compatibility date is now the
-            # preferred form for current ESI routes.
-            "X-Compatibility-Date":
-                "2026-08-14",
-        },
-        timeout=12,
+    freeborn_market_ensure_type_index()
+
+    contains_pattern = (
+        "%"
+        + cache_key
+        + "%"
     )
-    if response.status_code != 200:
-        print(
-            "Freeborn Market EVE search HTTP error [P2C]:",
-            response.status_code,
-            response.text[:500],
-            "query=",
-            normalized,
-        )
-
-    response.raise_for_status()
-
-    ids = (
-        response.json()
-        .get("inventory_type", [])
-        or []
+    prefix_pattern = (
+        cache_key
+        + "%"
     )
 
-    # Inspect a bounded candidate set. get_eve_type_metadata already uses
-    # Freeborn's type cache, so repeated searches remain inexpensive.
-    items = []
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    type_id,
+                    type_name,
+                    group_id,
+                    market_group_id
+                FROM market_type_index
+                WHERE type_name_lower LIKE %s
+                ORDER BY
+                    CASE
+                        WHEN type_name_lower LIKE %s
+                        THEN 0
+                        ELSE 1
+                    END,
+                    LENGTH(type_name),
+                    type_name
+                LIMIT %s;
+                """,
+                (
+                    contains_pattern,
+                    prefix_pattern,
+                    int(
+                        FREEBORN_MARKET_SEARCH_LIMIT
+                    ),
+                ),
+            )
 
-    for type_id in ids[:30]:
-        try:
-            metadata = get_eve_type_metadata(
-                int(type_id)
-            ) or {}
-        except Exception:
-            continue
+            rows = cur.fetchall()
 
-        # Only real market types belong in Freeborn Market.
-        if not metadata.get(
-            "market_group_id"
-        ):
-            continue
-
-        name = str(
-            metadata.get("name")
-            or ""
-        ).strip()
-
-        if not name:
-            continue
-
-        items.append({
-            "type_id": int(type_id),
-            "name": name,
-            "group_id": metadata.get(
-                "group_id"
-            ),
-            "market_group_id": metadata.get(
-                "market_group_id"
-            ),
-            "icon_url": eve_type_icon_url(
-                int(type_id),
-                64,
-            ),
-        })
-
-        if len(items) >= FREEBORN_MARKET_SEARCH_LIMIT:
-            break
-
-    # Prefer prefix matches, then short names, then alphabetical order.
-    qfold = normalized.casefold()
-
-    items.sort(
-        key=lambda item: (
-            0 if item["name"].casefold().startswith(qfold) else 1,
-            len(item["name"]),
-            item["name"].casefold(),
-        )
-    )
+    items = [
+        {
+            "type_id":
+                int(row[0]),
+            "name":
+                str(row[1]),
+            "group_id":
+                row[2],
+            "market_group_id":
+                row[3],
+            "icon_url":
+                eve_type_icon_url(
+                    int(row[0]),
+                    64,
+                ),
+        }
+        for row in rows
+    ]
 
     _freeborn_market_search_cache[
         cache_key
@@ -21743,7 +22139,7 @@ def freeborn_market_api_search():
         )
     except Exception as error:
         print(
-            "Freeborn Market search error:",
+            "Freeborn Market SDE search error [P2D]:",
             repr(error),
         )
 
