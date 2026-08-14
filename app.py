@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import base64
 import hashlib
 import json
@@ -382,7 +383,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2E-JITA-COMPAT + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2F-JITA-DATETIME + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
