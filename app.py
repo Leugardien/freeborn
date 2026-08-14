@@ -383,7 +383,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2G-UI-FINAL + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2H-UI-POLISH + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -5209,6 +5209,12 @@ button,input{{font:inherit}}
   text-align:center;
   font-weight:500;
 }}
+.adjust-control input.adjust-negative{{color:#ff6f70}}
+.adjust-control input.adjust-zero{{color:#ffffff}}
+.adjust-control input.adjust-positive{{color:#80f58b}}
+.adjust-negative-text{{color:#ff6f70 !important}}
+.adjust-zero-text{{color:#ffffff !important}}
+.adjust-positive-text{{color:#80f58b !important}}
 .adjust-control .pct{{
   height:38px;
   display:flex;
@@ -5234,7 +5240,7 @@ button,input{{font:inherit}}
 }}
 .line-head,.market-row{{
   display:grid;
-  grid-template-columns:32px minmax(220px,1fr) 112px 165px 165px 185px 38px;
+  grid-template-columns:32px minmax(210px,1fr) 132px 172px 172px 195px 38px;
   gap:7px;
   align-items:center;
 }}
@@ -5329,7 +5335,7 @@ button,input{{font:inherit}}
   text-align:right;
   padding:0 8px;
   font-family:"Roboto Mono","Consolas","Courier New",monospace;
-  font-size:12px;
+  font-size:13px;
   font-weight:400;
   font-variant-numeric:tabular-nums;
 }}
@@ -5343,7 +5349,7 @@ button,input{{font:inherit}}
   padding:0 8px;
   outline:none;
   font-family:"Roboto Mono","Consolas","Courier New",monospace;
-  font-size:11px;
+  font-size:12px;
   font-weight:400;
   font-variant-numeric:tabular-nums;
 }}
@@ -5367,7 +5373,7 @@ button,input{{font:inherit}}
   text-overflow:ellipsis;
   white-space:nowrap;
   font-family:"Roboto Mono","Consolas","Courier New",monospace;
-  font-size:11px;
+  font-size:12px;
   font-weight:400;
   color:#eaf8ff;
   font-variant-numeric:tabular-nums;
@@ -5472,7 +5478,7 @@ button,input{{font:inherit}}
 @media(max-width:1050px){{
   .workspace{{grid-template-columns:1fr}}
   .line-head,.market-row{{
-    grid-template-columns:28px minmax(180px,1fr) 100px 145px 145px 165px 36px;
+    grid-template-columns:28px minmax(170px,1fr) 116px 152px 152px 175px 36px;
   }}
 }}
 @media(max-width:760px){{
@@ -5591,7 +5597,7 @@ button,input{{font:inherit}}
 
       <div class="notes-wrap">
         <label>Notes de l'annonce (facultatif)</label>
-        <textarea id="marketNotes" maxlength="1000"
+        <textarea id="marketNotes" maxlength="500"
           placeholder="Ex. Disponible à Jita, livraison possible, lot indivisible..."></textarea>
       </div>
     </aside>
@@ -5630,6 +5636,23 @@ function money(value) {{
   }}) + ' ISK';
 }}
 
+function parseIntegerInput(value) {{
+  const raw = String(value ?? '')
+    .replace(/\s/g, '')
+    .replace(/[^0-9]/g, '');
+
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1
+    ? Math.floor(parsed)
+    : 1;
+}}
+
+function formatIntegerFR(value) {{
+  return Number(value).toLocaleString('fr-FR', {{
+    maximumFractionDigits: 0
+  }});
+}}
+
 function parseISKInput(value) {{
   let raw = String(value ?? '')
     .trim()
@@ -5664,6 +5687,27 @@ function parseAdjustment() {{
 
 function showAdjustment() {{
   const value = parseAdjustment();
+  const stateClass =
+    value < 0
+      ? 'adjust-negative'
+      : value > 0
+        ? 'adjust-positive'
+        : 'adjust-zero';
+
+  adjustmentInput.classList.remove(
+    'adjust-negative',
+    'adjust-zero',
+    'adjust-positive'
+  );
+  adjustmentInput.classList.add(stateClass);
+
+  adjustmentPreview.classList.remove(
+    'adjust-negative-text',
+    'adjust-zero-text',
+    'adjust-positive-text'
+  );
+  adjustmentPreview.classList.add(stateClass + '-text');
+
   adjustmentPreview.textContent =
     (value > 0 ? '+' : '') +
     value.toLocaleString('fr-FR', {{
@@ -5679,7 +5723,7 @@ function updateTotals() {{
   let total = 0;
 
   document.querySelectorAll('.market-row').forEach(row => {{
-    const qty = Math.max(1, Number(row.querySelector('.qty').value || 1));
+    const qty = parseIntegerInput(row.querySelector('.qty').value);
     const referencePrice = Number(row.dataset.referencePrice || 0);
     const manualPriceInput = row.querySelector('.manual-price');
     const chosenUnitPrice = parseISKInput(manualPriceInput.value);
@@ -5781,7 +5825,8 @@ function makeRow() {{
         placeholder="Ex. Endurance, Tritanium, Veldspar...">
       <div class="results"></div>
     </div>
-    <input class="qty" type="number" min="1" step="1" value="1">
+    <input class="qty" type="text" inputmode="numeric" value="1"
+      aria-label="Quantité">
     <div class="value-box price-box">
       <b>—</b>
       <small>{reference_label}</small>
@@ -5913,6 +5958,15 @@ function makeRow() {{
   }});
 
   qty.addEventListener('input', updateTotals);
+  qty.addEventListener('blur', () => {{
+    const value = parseIntegerInput(qty.value);
+    qty.value = formatIntegerFR(value);
+    updateTotals();
+  }});
+  qty.addEventListener('focus', () => {{
+    const value = parseIntegerInput(qty.value);
+    qty.value = String(value);
+  }});
 
   manualPrice.addEventListener('input', updateTotals);
   manualPrice.addEventListener('blur', () => {{
