@@ -10479,7 +10479,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-B-1"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-C-1"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -11330,6 +11330,484 @@ def freeborn_render_tank_audit(
     return "".join(chunks)
 
 
+
+def freeborn_resistance_stacking_penalty(rank):
+    """
+    Standard EVE stacking effectiveness, rank is 1-based.
+    """
+    try:
+        rank = max(
+            1,
+            int(rank),
+        )
+    except (TypeError, ValueError):
+        rank = 1
+
+    return 0.5 ** (
+        (
+            0.45
+            * (rank - 1)
+        ) ** 2
+    )
+
+
+def freeborn_resistance_bonus_from_attribute_name(
+    name,
+):
+    """
+    Map one Dogma resistance-bonus attribute label to damage type.
+    Returns None for non-resistance attributes.
+    """
+    normalized = str(
+        name or ""
+    ).casefold()
+
+    if "damage resistance bonus" not in normalized:
+        return None
+
+    if "em " in normalized or normalized.startswith("em"):
+        return "em"
+
+    if "thermal" in normalized:
+        return "therm"
+
+    if "kinetic" in normalized:
+        return "kin"
+
+    if "explosive" in normalized:
+        return "exp"
+
+    return None
+
+
+def freeborn_tank_module_resistance_layer(
+    module_row,
+):
+    """
+    Determine the resistance layer affected by a validated module family.
+
+    4S-C explicitly covers:
+      - Shield Hardener -> shield
+      - Armor Hardener / energized armor -> armor
+      - Damage Control -> all three layers, if Dogma exposes direct bonuses
+
+    Unknown families are excluded from the numeric result.
+    """
+    group = str(
+        module_row.get(
+            "group_name",
+            "",
+        )
+    ).casefold()
+
+    name = str(
+        module_row.get(
+            "name",
+            "",
+        )
+    ).casefold()
+
+    haystack = (
+        group
+        + " "
+        + name
+    )
+
+    if "damage control" in haystack:
+        return "all"
+
+    if (
+        "shield hardener" in haystack
+        or "shield resistance" in haystack
+    ):
+        return "shield"
+
+    if (
+        "armor hardener" in haystack
+        or "energized" in haystack
+        or "armor resistance" in haystack
+    ):
+        return "armor"
+
+    return None
+
+
+def freeborn_calculate_final_resistances(
+    tank_base,
+    tank_modules,
+):
+    """
+    Calculate final resistances from base hull + direct resistance modifiers.
+
+    EVE resistance modules modify DAMAGE RESONANCE, not resistance points:
+        final_resonance = base_resonance × Π(1 + bonus × stacking_penalty)
+        final_resistance = 1 - final_resonance
+
+    Dogma bonuses in the audited hardeners are negative percentages
+    (e.g. -45.38), therefore factor = 1 + (-0.4538 × penalty).
+    """
+    damage_types = (
+        "em",
+        "therm",
+        "kin",
+        "exp",
+    )
+    layers = (
+        "shield",
+        "armor",
+        "structure",
+    )
+
+    final = {
+        layer: {
+            damage: tank_base.get(
+                f"{layer}_{damage}"
+            )
+            for damage in damage_types
+        }
+        for layer in layers
+    }
+
+    effect_buckets = {
+        layer: {
+            damage: []
+            for damage in damage_types
+        }
+        for layer in layers
+    }
+
+    excluded_modules = []
+
+    for module in tank_modules or []:
+        layer = (
+            freeborn_tank_module_resistance_layer(
+                module
+            )
+        )
+
+        if layer is None:
+            continue
+
+        found_effect = False
+        quantity = max(
+            1,
+            int(
+                module.get(
+                    "quantity",
+                    1,
+                )
+                or 1
+            ),
+        )
+
+        for attr in module.get(
+            "attributes",
+            [],
+        ):
+            damage = (
+                freeborn_resistance_bonus_from_attribute_name(
+                    attr.get(
+                        "name"
+                    )
+                )
+            )
+
+            if not damage:
+                continue
+
+            try:
+                bonus_percent = float(
+                    attr.get(
+                        "value"
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+
+            # The current audited resistance modifiers are negative percentages.
+            raw_bonus = (
+                bonus_percent
+                / 100.0
+            )
+
+            target_layers = (
+                layers
+                if layer == "all"
+                else (layer,)
+            )
+
+            for target_layer in target_layers:
+                for _ in range(quantity):
+                    effect_buckets[
+                        target_layer
+                    ][
+                        damage
+                    ].append({
+                        "module":
+                            module.get(
+                                "name",
+                                "",
+                            ),
+                        "raw_bonus":
+                            raw_bonus,
+                    })
+
+            found_effect = True
+
+        if not found_effect and layer is not None:
+            excluded_modules.append(
+                module.get(
+                    "name",
+                    "",
+                )
+            )
+
+    audit = []
+
+    for layer in layers:
+        for damage in damage_types:
+            base_resistance = final[
+                layer
+            ][
+                damage
+            ]
+
+            if base_resistance is None:
+                continue
+
+            base_resonance = (
+                1.0
+                - (
+                    float(
+                        base_resistance
+                    )
+                    / 100.0
+                )
+            )
+
+            effects = effect_buckets[
+                layer
+            ][
+                damage
+            ]
+
+            # Strongest modifier first.
+            effects.sort(
+                key=lambda row: abs(
+                    row["raw_bonus"]
+                ),
+                reverse=True,
+            )
+
+            resonance = (
+                base_resonance
+            )
+
+            applied = []
+
+            for rank, row in enumerate(
+                effects,
+                start=1,
+            ):
+                penalty = (
+                    freeborn_resistance_stacking_penalty(
+                        rank
+                    )
+                )
+
+                effective_bonus = (
+                    float(
+                        row[
+                            "raw_bonus"
+                        ]
+                    )
+                    * penalty
+                )
+
+                factor = (
+                    1.0
+                    + effective_bonus
+                )
+
+                # Do not allow invalid negative resonance.
+                factor = max(
+                    0.0,
+                    factor,
+                )
+
+                resonance *= (
+                    factor
+                )
+
+                applied.append({
+                    "rank": rank,
+                    "module":
+                        row["module"],
+                    "penalty":
+                        penalty,
+                    "raw_bonus":
+                        row[
+                            "raw_bonus"
+                        ],
+                    "effective_bonus":
+                        effective_bonus,
+                    "factor":
+                        factor,
+                })
+
+            resistance = (
+                1.0
+                - resonance
+            ) * 100.0
+
+            resistance = min(
+                100.0,
+                max(
+                    0.0,
+                    resistance,
+                ),
+            )
+
+            final[
+                layer
+            ][
+                damage
+            ] = resistance
+
+            if applied:
+                audit.append({
+                    "layer": layer,
+                    "damage": damage,
+                    "base_resistance":
+                        base_resistance,
+                    "final_resistance":
+                        resistance,
+                    "effects":
+                        applied,
+                })
+
+    return {
+        "final": final,
+        "audit": audit,
+        "excluded_modules":
+            excluded_modules,
+    }
+
+
+def freeborn_render_final_resistance_audit(
+    result,
+):
+    final = result.get(
+        "final",
+        {},
+    )
+
+    chunks = [
+        '<strong>RÉSISTANCES FINALES — 4S-C</strong>',
+        '<br>Calcul : résonance de base × modificateurs Dogma '
+        'avec stacking penalties.',
+    ]
+
+    for layer, label in (
+        ("shield", "Shield"),
+        ("armor", "Armor"),
+        ("structure", "Structure"),
+    ):
+        row = final.get(
+            layer,
+            {},
+        )
+
+        chunks.append(
+            '<br><span class="cap-audit-key">'
+            + label
+            + ' :</span> '
+            + 'EM '
+            + format_tank_resistance(
+                row.get("em")
+            )
+            + ' • THERM '
+            + format_tank_resistance(
+                row.get("therm")
+            )
+            + ' • KIN '
+            + format_tank_resistance(
+                row.get("kin")
+            )
+            + ' • EXP '
+            + format_tank_resistance(
+                row.get("exp")
+            )
+        )
+
+    if result.get(
+        "audit"
+    ):
+        chunks.append(
+            '<br><strong>STACKING APPLIQUÉ</strong>'
+        )
+
+        for row in result[
+            "audit"
+        ]:
+            chunks.append(
+                '<br>'
+                + escape(
+                    row["layer"].upper()
+                )
+                + ' '
+                + escape(
+                    row["damage"].upper()
+                )
+                + ' : '
+                + format_tank_resistance(
+                    row[
+                        "base_resistance"
+                    ]
+                )
+                + ' → '
+                + format_tank_resistance(
+                    row[
+                        "final_resistance"
+                    ]
+                )
+            )
+
+            for effect in row[
+                "effects"
+            ]:
+                chunks.append(
+                    '<br>&nbsp;&nbsp;#'
+                    + str(
+                        effect["rank"]
+                    )
+                    + ' '
+                    + escape(
+                        str(
+                            effect[
+                                "module"
+                            ]
+                        )
+                    )
+                    + ' • efficacité '
+                    + f'{effect["penalty"] * 100:.3f}%'
+                    + ' • bonus brut '
+                    + f'{effect["raw_bonus"] * 100:+.3f}%'
+                    + ' → effectif '
+                    + f'{effect["effective_bonus"] * 100:+.3f}%'
+                )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">Couverture 4S-C :</span> '
+        'résistances directes des hardeners/armure/damage control détectés. '
+        'Reactive effects, heat, fleet boosts et effets conditionnels restent exclus.'
+    )
+
+    return "".join(
+        chunks
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -11462,6 +11940,13 @@ def build_freeborn_technical_snapshot(
         )
     )
 
+    final_resistances = (
+        freeborn_calculate_final_resistances(
+            tank_base,
+            tank_module_audit,
+        )
+    )
+
     return {
         "version":
             FREEBORN_TECHNICAL_SNAPSHOT_VERSION,
@@ -11487,6 +11972,8 @@ def build_freeborn_technical_snapshot(
             tank_base,
         "tank_module_audit":
             tank_module_audit,
+        "final_resistances":
+            final_resistances,
         "base_resources": base_resources,
         "base_velocity": base_velocity,
         "all_v_velocity": all_v_velocity,
@@ -12319,7 +12806,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-B — FITTING / RESSOURCES / CAP / VITESSE / TANK</div>
+              <div class="pilot-engine-title">MOTEUR 4S-C — FITTING / RESSOURCES / CAP / VITESSE / TANK</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -12498,6 +12985,33 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         freeborn_render_tank_audit(
             tank_base,
             tank_module_audit,
+        )
+    )
+
+    final_resistance_result = dict(
+        technical_snapshot.get(
+            "final_resistances",
+            {},
+        )
+    )
+
+    final_resistance_audit_html = (
+        freeborn_render_final_resistance_audit(
+            final_resistance_result
+        )
+    )
+
+    final_resistance_values = (
+        final_resistance_result.get(
+            "final",
+            {},
+        )
+    )
+
+    final_shield_resistance = (
+        final_resistance_values.get(
+            "shield",
+            {},
         )
     )
 
@@ -13860,7 +14374,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-B</strong>
+            <strong>ALL V — VALIDATION 4S-C</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -13896,6 +14410,10 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 
           <div class="allv-warning" style="margin-top:10px">
             {tank_audit_html}
+          </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            {final_resistance_audit_html}
           </div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
@@ -13985,7 +14503,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-B</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-C</span>
   </footer>
 </main>
 
