@@ -17233,7 +17233,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         split_eft_dynamic_bays(
             eft_sections["extras"],
             eft_type_ids,
-            ship_type_id,
+            fit.get("ship_type_id"),
         )
     )
 
