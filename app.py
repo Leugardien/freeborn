@@ -382,7 +382,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2D-SDE-SEARCH + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2E-JITA-COMPAT + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -4674,12 +4674,15 @@ def freeborn_market_jita_price(type_id):
     """
     Return Jita 4-4 station-local reference prices for one type.
 
+    Current ESI uses compatibility-date versioning. Do NOT use Freeborn's
+    legacy global ESI_BASE_URL (/latest) for this market-order route.
+
     SELL = lowest sell order physically located at Jita 4-4.
     BUY  = highest buy order physically located at Jita 4-4.
 
-    The ESI market-order route is cached for about five minutes; Freeborn uses
-    an aligned local five-minute cache so repeated UI calculations do not
-    generate unnecessary market-order traffic.
+    The market-order endpoint is rate-limited and cached by ESI. Freeborn keeps
+    its own aligned five-minute cache and fetches additional pages only when
+    ESI explicitly reports them.
     """
     type_id = int(type_id)
     now = time.time()
@@ -4696,88 +4699,268 @@ def freeborn_market_jita_price(type_id):
     ):
         return cached["data"]
 
-    response = requests.get(
-        (
-            f"{ESI_BASE_URL}/markets/"
-            f"{FREEBORN_JITA_REGION_ID}/orders/"
-        ),
-        params={
-            "datasource": "tranquility",
-            "order_type": "all",
-            "type_id": type_id,
-        },
-        headers={
-            "User-Agent":
-                "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
-        },
-        timeout=15,
+    market_url = (
+        "https://esi.evetech.net/markets/"
+        f"{FREEBORN_JITA_REGION_ID}/orders"
     )
-    response.raise_for_status()
 
-    orders = response.json() or []
+    headers = {
+        "User-Agent":
+            "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+        "X-Compatibility-Date":
+            "2026-08-14",
+    }
 
-    station_orders = [
-        order
-        for order in orders
-        if int(
-            order.get("location_id")
-            or 0
-        ) == FREEBORN_JITA_44_LOCATION_ID
-    ]
+    base_params = {
+        "datasource":
+            "tranquility",
+        "order_type":
+            "all",
+        "type_id":
+            type_id,
+    }
 
-    sell_prices = [
-        float(order["price"])
-        for order in station_orders
-        if not order.get("is_buy_order")
-        and order.get("price") is not None
-    ]
+    orders = []
+    page = 1
+    total_pages = 1
 
-    buy_prices = [
-        float(order["price"])
-        for order in station_orders
-        if order.get("is_buy_order")
-        and order.get("price") is not None
-    ]
+    while page <= total_pages:
+        params = dict(
+            base_params
+        )
+        params["page"] = page
+
+        response = requests.get(
+            market_url,
+            params=params,
+            headers=headers,
+            timeout=15,
+        )
+
+        if response.status_code != 200:
+            print(
+                "Freeborn Market Jita ESI HTTP error [P2E]:",
+                response.status_code,
+                response.text[:800],
+                "type_id=",
+                type_id,
+                "page=",
+                page,
+                "url=",
+                response.url,
+                "compat=",
+                response.headers.get(
+                    "X-Compatibility-Date"
+                ),
+            )
+
+        response.raise_for_status()
+
+        page_orders = (
+            response.json()
+            or []
+        )
+
+        if isinstance(
+            page_orders,
+            list,
+        ):
+            orders.extend(
+                page_orders
+            )
+
+        try:
+            total_pages = max(
+                1,
+                int(
+                    response.headers.get(
+                        "X-Pages",
+                        "1",
+                    )
+                ),
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            total_pages = 1
+
+        # Safety bound. One market type should never require anything close to
+        # this, but this protects Freeborn from a malformed X-Pages response.
+        total_pages = min(
+            total_pages,
+            25,
+        )
+
+        page += 1
+
+    station_orders = []
+
+    for order in orders:
+        try:
+            location_id = int(
+                order.get(
+                    "location_id"
+                )
+                or 0
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+        if (
+            location_id
+            == FREEBORN_JITA_44_LOCATION_ID
+        ):
+            station_orders.append(
+                order
+            )
+
+    sell_prices = []
+
+    for order in station_orders:
+        if order.get(
+            "is_buy_order"
+        ):
+            continue
+
+        try:
+            sell_prices.append(
+                float(
+                    order["price"]
+                )
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+    buy_prices = []
+
+    for order in station_orders:
+        if not order.get(
+            "is_buy_order"
+        ):
+            continue
+
+        try:
+            buy_prices.append(
+                float(
+                    order["price"]
+                )
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            continue
 
     best_sell = (
-        min(sell_prices)
+        min(
+            sell_prices
+        )
         if sell_prices
         else None
     )
 
     best_buy = (
-        max(buy_prices)
+        max(
+            buy_prices
+        )
         if buy_prices
         else None
     )
 
-    metadata = get_eve_type_metadata(
-        type_id
-    ) or {}
+    # Search index already contains the authoritative type name, so avoid
+    # depending on a legacy /latest type route just to label the response.
+    type_name = None
+
+    try:
+        with psycopg.connect(
+            DATABASE_URL
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT type_name
+                    FROM market_type_index
+                    WHERE type_id = %s
+                    LIMIT 1;
+                    """,
+                    (
+                        type_id,
+                    ),
+                )
+                row = cur.fetchone()
+
+        if row:
+            type_name = str(
+                row[0]
+            )
+
+    except Exception as error:
+        print(
+            "Freeborn Market type-name lookup warning:",
+            type_id,
+            repr(error),
+        )
+
+    if not type_name:
+        type_name = (
+            f"Type {type_id}"
+        )
+
+    fetched_at = datetime.now(
+        timezone.utc
+    ).isoformat()
 
     data = {
-        "type_id": type_id,
-        "type_name": str(
-            metadata.get("name")
-            or f"Type {type_id}"
-        ),
-        "jita_sell": best_sell,
-        "jita_buy": best_buy,
+        "type_id":
+            type_id,
+        "type_name":
+            type_name,
+        "jita_sell":
+            best_sell,
+        "jita_buy":
+            best_buy,
         "location_id":
             FREEBORN_JITA_44_LOCATION_ID,
         "region_id":
             FREEBORN_JITA_REGION_ID,
         "fetched_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+            fetched_at,
+        "orders_checked":
+            len(orders),
+        "jita_44_orders":
+            len(station_orders),
     }
+
+    print(
+        "Freeborn Market Jita price [P2E]:",
+        type_id,
+        type_name,
+        "sell=",
+        best_sell,
+        "buy=",
+        best_buy,
+        "orders=",
+        len(orders),
+        "jita44=",
+        len(station_orders),
+    )
 
     _freeborn_market_price_cache[
         type_id
     ] = {
-        "at": now,
-        "data": data,
+        "at":
+            now,
+        "data":
+            data,
     }
 
     return data
