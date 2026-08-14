@@ -384,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4D-SOLO-SELF-TAKE + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4E-WITHDRAW-WORKFLOW + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -6360,8 +6360,18 @@ def freeborn_market_build_components(
                     },
                     {
                         "type": 2,
+                        "style": 2,
+                        "label": "Se désister",
+                        "emoji": {
+                            "name": "↩️"
+                        },
+                        "custom_id":
+                            f"market_withdraw:{int(market_id)}",
+                    },
+                    {
+                        "type": 2,
                         "style": 4,
-                        "label": "Annuler",
+                        "label": "Annuler l'annonce",
                         "emoji": {
                             "name": "✖️"
                         },
@@ -6665,6 +6675,41 @@ def freeborn_market_take_order(
     return bool(
         row
     )
+
+
+def freeborn_market_withdraw_order(
+    guild_id,
+    market_id,
+    discord_user_id,
+):
+    """
+    The member who took an IN PROGRESS order withdraws.
+    The order returns to OPEN and becomes available again.
+    """
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE freeborn_market_orders
+                SET
+                    status = 'open',
+                    accepted_by_discord_user_id = NULL,
+                    accepted_at = NULL
+                WHERE guild_id = %s
+                  AND market_id = %s
+                  AND status = 'in_progress'
+                  AND accepted_by_discord_user_id = %s
+                RETURNING market_id;
+                """,
+                (
+                    str(guild_id),
+                    int(market_id),
+                    str(discord_user_id),
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return bool(row)
 
 
 def freeborn_market_complete_order(
@@ -12134,6 +12179,52 @@ def handle_message_component(
                 },
             })
 
+        if action == "withdraw":
+            if order["status"] != "in_progress":
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Seule une annonce **EN COURS** peut faire l'objet d'un désistement.",
+                        "flags": 64,
+                    },
+                })
+
+            if str(order.get("accepted_by_discord_user_id") or "") != str(discord_user_id):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "⛔ Seul le membre ayant pris cette annonce peut se désister.",
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_withdraw_order(
+                guild_id,
+                market_id,
+                discord_user_id,
+            ):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Le statut de cette annonce a déjà changé.",
+                        "flags": 64,
+                    },
+                })
+
+            order = freeborn_market_get_order(guild_id, market_id)
+            freeborn_market_update_forum_post(order)
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"↩️ **{format_market_reference(market_id)} est de nouveau OUVERT.**\n"
+                        "Ton attribution a été retirée et l'annonce peut être prise par un autre membre."
+                    ),
+                    "flags": 64,
+                },
+            })
+
         if action == "complete":
             if order["status"] != "in_progress":
                 return jsonify({
@@ -13432,6 +13523,7 @@ def handle_message_component(
         or custom_id.startswith("sa_no:")
         or custom_id.startswith("market_take:")
         or custom_id.startswith("market_complete:")
+        or custom_id.startswith("market_withdraw:")
         or custom_id.startswith("market_cancel:")
     ):
 
@@ -25605,6 +25697,66 @@ def interactions():
                             ),
                         "flags":
                             64,
+                    },
+                })
+
+            # ------------------------------------------------
+            # WITHDRAW — taker gives up, order returns OPEN
+            # ------------------------------------------------
+            if action == "withdraw":
+                if order["status"] != "in_progress":
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content": (
+                                "ℹ️ Seule une annonce **EN COURS** "
+                                "peut faire l'objet d'un désistement."
+                            ),
+                            "flags": 64,
+                        },
+                    })
+
+                if str(order.get("accepted_by_discord_user_id") or "") != str(discord_user_id):
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content": (
+                                "⛔ Seul le membre ayant pris cette annonce "
+                                "peut se désister."
+                            ),
+                            "flags": 64,
+                        },
+                    })
+
+                if not freeborn_market_withdraw_order(
+                    guild_id,
+                    market_id,
+                    discord_user_id,
+                ):
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content": "ℹ️ Le statut de cette annonce a déjà changé.",
+                            "flags": 64,
+                        },
+                    })
+
+                order = freeborn_market_get_order(
+                    guild_id,
+                    market_id,
+                )
+                freeborn_market_update_forum_post(order)
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": (
+                            f"↩️ **{format_market_reference(market_id)} "
+                            "est de nouveau OUVERT.**\n"
+                            "Ton attribution a été retirée et l'annonce "
+                            "peut être prise par un autre membre."
+                        ),
+                        "flags": 64,
                     },
                 })
 
