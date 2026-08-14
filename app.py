@@ -10479,7 +10479,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4R-C-1"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4R-C2-1"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -10752,16 +10752,17 @@ def build_freeborn_technical_snapshot(
         )
     )
 
-    capacitor_activity_audit = dict(
-        technical_snapshot[
-            "capacitor_activity_audit"
-        ]
+    capacitor_activity_audit = (
+        build_fitted_capacitor_activity_audit(
+            eft_sections
+        )
     )
 
-    conditional_source_dogma_probe = list(
-        technical_snapshot.get(
-            "conditional_source_dogma_probe",
-            [],
+    conditional_source_dogma_probe = (
+        build_conditional_capacitor_source_dogma_probe(
+            eft_sections,
+            eft_type_ids,
+            capacitor_activity_audit,
         )
     )
 
@@ -11641,7 +11642,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4R-C — FITTING / CAP / VITESSE</div>
+              <div class="pilot-engine-title">MOTEUR 4R-C2 — FITTING / CAP / VITESSE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -11917,10 +11918,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         capacitor_audit_coverage = "Données indisponibles"
 
 
-    capacitor_activity_audit = (
-        build_fitted_capacitor_activity_audit(
-            eft_sections
-        )
+    capacitor_activity_audit = dict(
+        technical_snapshot[
+            "capacitor_activity_audit"
+        ]
     )
 
     conditional_sources_html = (
@@ -11945,11 +11946,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
     )
 
-    conditional_source_dogma_probe = (
-        build_conditional_capacitor_source_dogma_probe(
-            eft_sections,
-            eft_type_ids,
-            capacitor_activity_audit,
+    conditional_source_dogma_probe = list(
+        technical_snapshot.get(
+            "conditional_source_dogma_probe",
+            [],
         )
     )
 
@@ -13116,7 +13116,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4R-C</strong>
+            <strong>ALL V — VALIDATION 4R-C2</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -13224,7 +13224,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4R-C</span>
+    <span class="version">Freeborn Legacy • Fittings 4R-C2</span>
   </footer>
 </main>
 
