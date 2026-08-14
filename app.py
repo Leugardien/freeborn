@@ -10479,7 +10479,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-C-1"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-F-1"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -12301,6 +12301,109 @@ def freeborn_render_repairs_audit(
     )
 
 
+
+def freeborn_ship_targeting_misc_base(ship_type_id):
+    """Phase 4S-F: static hull targeting/navigation values from cached Dogma."""
+    dogma = get_eve_type_dogma(ship_type_id)
+    if not dogma:
+        return {}
+
+    def value(exact_names=(), contains_names=()):
+        row = find_dogma_attribute_by_names(
+            ship_type_id,
+            exact_names=exact_names,
+            contains_names=contains_names,
+        )
+        if not row:
+            return None
+        try:
+            return float(row.get("value"))
+        except (TypeError, ValueError):
+            return None
+
+    target_range_m = value(
+        exact_names=("maxTargetRange", "Maximum Targeting Range"),
+        contains_names=("target range",),
+    )
+
+    return {
+        "max_locked_targets": value(
+            exact_names=("maxLockedTargets", "Max Locked Targets"),
+            contains_names=("max locked targets",),
+        ),
+        "targeting_range_km": (
+            target_range_m / 1000.0
+            if target_range_m is not None
+            else None
+        ),
+        "scan_resolution_mm": value(
+            exact_names=("scanResolution", "Scan Resolution"),
+            contains_names=("scan resolution",),
+        ),
+        "signature_radius_m": value(
+            exact_names=("signatureRadius", "Signature Radius"),
+            contains_names=("signature radius",),
+        ),
+        "warp_speed_au_s": value(
+            exact_names=("warpSpeedMultiplier", "Warp Speed Multiplier"),
+            contains_names=("warp speed",),
+        ),
+    }
+
+
+def freeborn_format_misc_number(value, decimals=1):
+    if value is None:
+        return "—"
+    value = float(value)
+    if decimals == 0:
+        return f"{value:,.0f}".replace(",", " ")
+    return (
+        f"{value:,.{decimals}f}"
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+
+def freeborn_render_targeting_misc_audit(
+    values,
+    ship_resource_usage,
+    base_velocity,
+):
+    return (
+        '<strong>CIBLAGE & DIVERS — MOTEUR 4S-F</strong>'
+        '<br><span class="cap-audit-key">Cibles verrouillables BASE :</span> '
+        + freeborn_format_misc_number(values.get("max_locked_targets"), 0)
+        + '<br><span class="cap-audit-key">Portée de ciblage BASE :</span> '
+        + freeborn_format_misc_number(values.get("targeting_range_km"), 1)
+        + ' km'
+        + '<br><span class="cap-audit-key">Résolution de scan BASE :</span> '
+        + freeborn_format_misc_number(values.get("scan_resolution_mm"), 0)
+        + ' mm'
+        + '<br><span class="cap-audit-key">Rayon de signature BASE :</span> '
+        + freeborn_format_misc_number(values.get("signature_radius_m"), 0)
+        + ' m'
+        + '<br><span class="cap-audit-key">Vitesse BASE :</span> '
+        + freeborn_format_misc_number(base_velocity, 0)
+        + ' m/s'
+        + '<br><span class="cap-audit-key">Warp speed BASE :</span> '
+        + freeborn_format_misc_number(values.get("warp_speed_au_s"), 2)
+        + ' AU/s'
+        + '<br><span class="cap-audit-key">Cargo :</span> '
+        + escape(
+            format_resource_usage_value(
+                ship_resource_usage.get("cargo_used_m3"),
+                ship_resource_usage.get("cargo_capacity_m3"),
+                "m³",
+            )
+        )
+        + '<br><span class="cap-audit-muted">'
+          '4S-F valide d’abord les attributs statiques du hull. '
+          'Les bonus ALL V de ciblage restent volontairement séparés '
+          'jusqu’à validation de cette couche.'
+          '</span>'
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -12426,6 +12529,12 @@ def build_freeborn_technical_snapshot(
         )
     )
 
+    targeting_misc_base = (
+        freeborn_ship_targeting_misc_base(
+            fit.get("ship_type_id")
+        )
+    )
+
     tank_module_audit = (
         freeborn_tank_module_audit(
             eft_sections,
@@ -12463,6 +12572,8 @@ def build_freeborn_technical_snapshot(
             ship_resource_usage,
         "tank_base":
             tank_base,
+        "targeting_misc_base":
+            targeting_misc_base,
         "tank_module_audit":
             tank_module_audit,
         "final_resistances":
@@ -13299,7 +13410,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-E — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS</div>
+              <div class="pilot-engine-title">MOTEUR 4S-F — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -13467,6 +13578,13 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
     )
 
+    targeting_misc_base = dict(
+        technical_snapshot.get(
+            "targeting_misc_base",
+            {},
+        )
+    )
+
     tank_module_audit = list(
         technical_snapshot.get(
             "tank_module_audit",
@@ -13594,6 +13712,14 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     base_velocity = (
         technical_snapshot.get(
             "base_velocity"
+        )
+    )
+
+    targeting_misc_audit_html = (
+        freeborn_render_targeting_misc_audit(
+            targeting_misc_base,
+            ship_resource_usage,
+            base_velocity,
         )
     )
 
@@ -14895,7 +15021,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-E</strong>
+            <strong>ALL V — VALIDATION 4S-F</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -14943,6 +15069,10 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 
           <div class="allv-warning" style="margin-top:10px">
             {repairs_audit_html}
+          </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            {targeting_misc_audit_html}
           </div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
@@ -15032,7 +15162,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-E</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-F</span>
   </footer>
 </main>
 
