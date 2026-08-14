@@ -384,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4-LIFECYCLE + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4-TEST-CEO-SELF-TAKE + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -25303,7 +25303,7 @@ def interactions():
                         },
                     })
 
-                if (
+                creator_is_taker = (
                     str(
                         order[
                             "created_by_discord_user_id"
@@ -25312,19 +25312,51 @@ def interactions():
                     == str(
                         discord_user_id
                     )
-                ):
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                (
-                                    "ℹ️ Tu es déjà le créateur de cette annonce. "
-                                    "Un autre membre doit la prendre."
-                                ),
-                            "flags":
-                                64,
-                        },
-                    })
+                )
+
+                # ------------------------------------------------
+                # PHASE 4 TEST MODE
+                #
+                # Normal rule:
+                #   a creator cannot take their own Market order.
+                #
+                # Temporary solo-test exception:
+                #   CEO may take their own order so the full
+                #   OUVERT -> EN COURS -> TERMINÉ flow can be
+                #   validated without a second Discord member.
+                # ------------------------------------------------
+                if creator_is_taker:
+                    is_ceo_test_user = (
+                        interaction_has_any_role(
+                            data,
+                            configured_role_ids(
+                                DISCORD_CEO_ROLE_ID,
+                            ),
+                        )
+                    )
+
+                    if not is_ceo_test_user:
+                        return jsonify({
+                            "type": 4,
+                            "data": {
+                                "content":
+                                    (
+                                        "ℹ️ Tu es déjà le créateur de cette annonce. "
+                                        "Un autre membre doit la prendre."
+                                    ),
+                                "flags":
+                                    64,
+                            },
+                        })
+
+                    print(
+                        "Freeborn Market TEST self-take [P4-TEST]:",
+                        format_market_reference(
+                            market_id
+                        ),
+                        "CEO=",
+                        discord_user_id,
+                    )
 
                 if not freeborn_market_take_order(
                     guild_id,
