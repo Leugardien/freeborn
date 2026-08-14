@@ -3846,6 +3846,30 @@ def read_fit_delete_token(token):
     return int(fit_id), requester_user_id
 
 
+def create_fit_status_token(fit_id, requester_user_id, new_status):
+    """
+    Signed 5-minute confirmation token for CEO-only fitting validation.
+    The requested status is embedded in the token so the confirmation
+    cannot be reused for another action.
+    """
+    clean_status = str(new_status or "").lower()
+    if clean_status not in {"approved", "rejected"}:
+        raise ValueError("Statut de validation invalide.")
+
+    payload = f"{int(fit_id)}:{requester_user_id}:{clean_status}"
+    return fit_delete_signer.sign(payload.encode()).decode()
+
+
+def read_fit_status_token(token):
+    payload = fit_delete_signer.unsign(token, max_age=300).decode()
+    fit_id, requester_user_id, new_status = payload.split(":", 2)
+
+    if new_status not in {"approved", "rejected"}:
+        raise ValueError("Statut de validation invalide.")
+
+    return int(fit_id), requester_user_id, new_status
+
+
 def can_delete_fit(data, fit):
     try:
         actor_user_id = str(data["member"]["user"]["id"])
@@ -7605,6 +7629,111 @@ def handle_message_component(
                     f"```\n{safe_eft}\n```{suffix}"
                 ),
                 "flags": 64,
+            },
+        })
+
+    if custom_id.startswith("fit_status_yes:") or custom_id.startswith("fit_status_no:"):
+        try:
+            actor_user_id = str(data["member"]["user"]["id"])
+            guild_id = str(data["guild_id"])
+            token = custom_id.split(":", 1)[1]
+            fit_id, requester_user_id, new_status = read_fit_status_token(token)
+        except SignatureExpired:
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "⌛ **Confirmation expirée**\n\nLe statut du fit n'a pas été modifié.",
+                    "components": [],
+                },
+            })
+        except (BadSignature, ValueError, KeyError, TypeError):
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "⛔ **Confirmation invalide**\n\nLe statut du fit n'a pas été modifié.",
+                    "components": [],
+                },
+            })
+
+        if actor_user_id != requester_user_id:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": "⛔ Cette confirmation ne t'appartient pas.",
+                    "flags": 64,
+                },
+            })
+
+        # Re-check CEO permission at confirmation time.
+        if not interaction_has_any_role(data, FITTING_MANAGER_ROLE_IDS):
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "⛔ **Validation refusée**\n\nApprouver ou refuser un fitting est réservé au CEO.",
+                    "components": [],
+                },
+            })
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "❌ Ce fit n'existe plus dans Freeborn.",
+                    "components": [],
+                },
+            })
+
+        if custom_id.startswith("fit_status_no:"):
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "🛡️ **Validation annulée**\n\nLe statut du fit reste inchangé.",
+                    "components": [],
+                },
+            })
+
+        current_status = str(fit.get("status") or "").lower()
+        if current_status != "proposed":
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": (
+                        f"ℹ️ **Aucune modification**\n\n"
+                        f"{format_fit_reference(fit_id)} est déjà au statut "
+                        f"{fit_status_label(current_status)}.\n"
+                        "Seul un fit PROPOSÉ peut être approuvé ou refusé."
+                    ),
+                    "components": [],
+                },
+            })
+
+        updated = set_fit_status(guild_id, fit_id, new_status)
+        if not updated:
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "❌ Mise à jour impossible.",
+                    "components": [],
+                },
+            })
+
+        action_text = (
+            "🟢 **FREEBORN APPROVED**"
+            if new_status == "approved"
+            else "🔴 **FIT REFUSÉ**"
+        )
+
+        return jsonify({
+            "type": 7,
+            "data": {
+                "content": (
+                    f"{action_text} — **{format_fit_reference(fit_id)}**\n\n"
+                    f"**{updated['ship_name']} — {updated['name']}**\n"
+                    f"Statut : {fit_status_label(updated['status'])}\n\n"
+                    "L'identifiant Freeborn est conservé : aucune nouvelle fiche n'a été créée."
+                ),
+                "components": [],
             },
         })
 
@@ -16620,6 +16749,8 @@ button{{font:inherit}}
 .action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 15px rgba(214,168,60,.14)}}
 .action.blue{{border-color:rgba(49,185,255,.80);background:linear-gradient(180deg,rgba(21,156,255,.15),rgba(21,156,255,.025));color:#71d2ff}}
 .action.green{{border-color:rgba(121,221,115,.70);background:linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.02));color:#9cec94}}
+.action.red{{border-color:rgba(255,92,92,.55);color:#ff7777}}
+.action.red:hover{{border-color:#ff7777;color:#ffffff}}
 .action:disabled{{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}}
 .eft-wrap{{padding:0 9px 9px}}
 .eft-panel{{display:none;border:1px solid var(--line2);background:rgba(2,8,15,.96);padding:9px}}
@@ -17363,7 +17494,8 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
     <button class="action" type="button" onclick="copyEft()">▤ Copier EFT</button>
     <button class="action blue" type="button" onclick="exportEft()">⇩ Exporter EFT</button>
     <button class="action blue" type="button" onclick="copyEditCommand()" title="Copier la commande Discord de modification">✎ Modifier</button>
-    <button class="action green" type="button" disabled title="Validation Web prévue après authentification Discord">✓ Approuver / Refuser</button>
+    <button class="action green" type="button" onclick="copyApproveCommand()" title="Copier la commande Discord CEO d'approbation">✓ Approuver</button>
+    <button class="action red" type="button" onclick="copyRejectCommand()" title="Copier la commande Discord CEO de refus">✕ Refuser</button>
   </nav>
 
   <section class="eft-wrap">
@@ -17379,7 +17511,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4T-B1</span>
+    <span class="version">Freeborn Legacy • Fittings 4T-B</span>
   </footer>
 </main>
 
@@ -17450,7 +17582,7 @@ document.addEventListener(
 );
 
 function copyEditCommand() {{
-  const command = "/fit-modifier ref:{safe_ref}";
+  const command = `/fit-modifier ref:${fitRef}`;
 
   navigator.clipboard.writeText(command).then(() => {{
     const toast = document.getElementById('toast');
@@ -17463,6 +17595,34 @@ function copyEditCommand() {{
       command
     );
   }});
+}}
+
+function copyFitCommand(command, successMessage) {{
+  navigator.clipboard.writeText(command).then(() => {{
+    const toast = document.getElementById('toast');
+    toast.textContent = successMessage;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 1800);
+  }}).catch(() => {{
+    window.prompt(
+      'Copie cette commande dans Discord :',
+      command
+    );
+  }});
+}}
+
+function copyApproveCommand() {{
+  copyFitCommand(
+    `/fit-approuver ref:${{fitRef}}`,
+    'Commande /fit-approuver copiée — validation CEO requise dans Discord'
+  );
+}}
+
+function copyRejectCommand() {{
+  copyFitCommand(
+    `/fit-refuser ref:${{fitRef}}`,
+    'Commande /fit-refuser copiée — validation CEO requise dans Discord'
+  );
 }}
 
 function toggleEft() {{
@@ -17945,7 +18105,8 @@ def interactions():
 
     # ========================================================
     # /fit-approuver + /fit-refuser — FREEBORN FITTINGS
-    # Staff workflow: PROPOSÉ -> FREEBORN APPROVED / REFUSÉ.
+    # 4T-C: CEO only + explicit confirmation.
+    # PROPOSÉ -> APPROUVÉ or PROPOSÉ -> REFUSÉ.
     # ========================================================
 
     if command_name in {"fit-approuver", "fit-refuser"}:
@@ -17955,8 +18116,7 @@ def interactions():
                 "data": {
                     "content": (
                         "⛔ **Accès refusé**\n\n"
-                        "La validation des fittings est réservée au staff Fittings "
-                        "(Fleet Commander et hiérarchie supérieure)."
+                        "Approuver ou refuser un fitting est réservé au **CEO**."
                     ),
                     "flags": 64,
                 },
@@ -17971,33 +18131,78 @@ def interactions():
         try:
             fit_id = parse_fit_reference(fit_ref)
         except ValueError as error:
-            return jsonify({"type": 4, "data": {"content": f"❌ {error}", "flags": 64}})
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": f"❌ {error}",
+                    "flags": 64,
+                },
+            })
 
         fit = get_fit(guild_id, fit_id)
         if not fit:
-            return jsonify({"type": 4, "data": {"content": f"❌ {format_fit_reference(fit_id)} n'existe pas dans Freeborn.", "flags": 64}})
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": f"❌ {format_fit_reference(fit_id)} n'existe pas dans Freeborn.",
+                    "flags": 64,
+                },
+            })
 
+        current_status = str(fit.get("status") or "").lower()
+        if current_status != "proposed":
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"ℹ️ **Aucune modification**\n\n"
+                        f"{format_fit_reference(fit_id)} est déjà au statut "
+                        f"{fit_status_label(current_status)}.\n"
+                        "Seul un fit **PROPOSÉ** peut être approuvé ou refusé."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        actor_user_id = str(data["member"]["user"]["id"])
         new_status = "approved" if command_name == "fit-approuver" else "rejected"
-        updated = set_fit_status(guild_id, fit_id, new_status)
+        token = create_fit_status_token(fit_id, actor_user_id, new_status)
 
-        if not updated:
-            return jsonify({"type": 4, "data": {"content": "❌ Mise à jour impossible.", "flags": 64}})
-
-        action_text = (
-            "🟢 **FREEBORN APPROVED**"
-            if new_status == "approved"
-            else "🔴 **FIT REFUSÉ**"
-        )
+        action_label = "APPROUVER" if new_status == "approved" else "REFUSER"
+        action_emoji = "🟢" if new_status == "approved" else "🔴"
+        confirm_style = 3 if new_status == "approved" else 4
 
         return jsonify({
             "type": 4,
             "data": {
                 "content": (
-                    f"{action_text} — **{format_fit_reference(fit_id)}**\n\n"
-                    f"**{updated['ship_name']} — {updated['name']}**\n"
-                    f"Statut : {fit_status_label(updated['status'])}"
+                    f"⚠️ **CONFIRMATION — {action_label} {format_fit_reference(fit_id)} ?**\n\n"
+                    f"**{fit['ship_name']} — {fit['name']}**\n"
+                    f"Statut actuel : {fit_status_label(fit['status'])}\n\n"
+                    f"{action_emoji} Cette action fera passer ce fit de **PROPOSÉ** à "
+                    f"**{'FREEBORN APPROVED' if new_status == 'approved' else 'REFUSÉ'}**.\n"
+                    "L'identifiant FREE-xxxx sera conservé."
                 ),
                 "flags": 64,
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 2,
+                                "style": confirm_style,
+                                "label": f"Confirmer : {action_label}",
+                                "custom_id": f"fit_status_yes:{token}",
+                            },
+                            {
+                                "type": 2,
+                                "style": 2,
+                                "label": "Annuler",
+                                "custom_id": f"fit_status_no:{token}",
+                            },
+                        ],
+                    },
+                ],
             },
         })
 
