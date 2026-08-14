@@ -12806,7 +12806,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-C — FITTING / RESSOURCES / CAP / VITESSE / TANK</div>
+              <div class="pilot-engine-title">MOTEUR 4S-C2 — FITTING / RESSOURCES / CAP / VITESSE / TANK</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -14366,15 +14366,15 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           <div class="metric" title="DPS volontairement non calculé par Freeborn Fittings. Utilise l'EFT dans EVE pour les statistiques exactes."><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">----</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP</small><strong class="pending">À calculer</strong></div>
           <div class="resists">
-            <div class="resist em"><i class="resist-icon" aria-hidden="true">✦</i><span>EM</span><b>—</b></div>
-            <div class="resist therm"><i class="resist-icon" aria-hidden="true">♨</i><span>Therm</span><b>—</b></div>
-            <div class="resist kin"><i class="resist-icon" aria-hidden="true">◈</i><span>Kin</span><b>—</b></div>
-            <div class="resist exp"><i class="resist-icon" aria-hidden="true">✹</i><span>Exp</span><b>—</b></div>
+            <div class="resist em"><i class="resist-icon" aria-hidden="true">✦</i><span>EM</span><b>{escape(format_tank_resistance(final_shield_resistance.get("em")))}</b></div>
+            <div class="resist therm"><i class="resist-icon" aria-hidden="true">♨</i><span>Therm</span><b>{escape(format_tank_resistance(final_shield_resistance.get("therm")))}</b></div>
+            <div class="resist kin"><i class="resist-icon" aria-hidden="true">◈</i><span>Kin</span><b>{escape(format_tank_resistance(final_shield_resistance.get("kin")))}</b></div>
+            <div class="resist exp"><i class="resist-icon" aria-hidden="true">✹</i><span>Exp</span><b>{escape(format_tank_resistance(final_shield_resistance.get("exp")))}</b></div>
           </div>
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-C</strong>
+            <strong>ALL V — VALIDATION 4S-C2</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -14503,7 +14503,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-C</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-C2</span>
   </footer>
 </main>
 
