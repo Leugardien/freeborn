@@ -12480,7 +12480,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-C4-SPEED-FRESH"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-C5-SPEED-DISPLAY"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -17564,6 +17564,56 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             "propulsion_off_velocity_ms"
         )
 
+    # FREEBORN FITTINGS — 4S-N-C5
+    # Final display fallback for hulls whose persisted snapshot still carries
+    # no velocity. Resolve the hull base speed directly and apply the ALL V
+    # Navigation bonus (5% per level, level V = +25%).
+    #
+    # This fallback is deliberately display-only and runs only when the normal
+    # technical snapshot contains no usable speed, so it does not disturb the
+    # validated propulsion engine or normal cached pages.
+    if (
+        speed_all_v_raw is None
+        or (
+            isinstance(speed_all_v_raw, (int, float))
+            and float(speed_all_v_raw) <= 0
+        )
+    ):
+        direct_base_velocity = get_ship_base_max_velocity(
+            fit.get("ship_type_id")
+        )
+
+        if (
+            direct_base_velocity is not None
+            and float(direct_base_velocity) > 0
+        ):
+            speed_all_v_raw = (
+                float(direct_base_velocity)
+                * 1.25
+            )
+
+            print(
+                "Freeborn Speed display fallback:",
+                format_fit_reference(
+                    fit.get("fit_id")
+                ),
+                "base=",
+                direct_base_velocity,
+                "all_v=",
+                speed_all_v_raw,
+            )
+        else:
+            print(
+                "Freeborn Speed unresolved after display fallback:",
+                format_fit_reference(
+                    fit.get("fit_id")
+                ),
+                "ship_type_id=",
+                fit.get("ship_type_id"),
+                "base=",
+                direct_base_velocity,
+            )
+
     speed_all_v_display = escape(
         format_velocity(
             speed_all_v_raw
@@ -19067,7 +19117,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-N-C4</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-N-C5</span>
   </footer>
 </main>
 
