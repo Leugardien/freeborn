@@ -10278,55 +10278,35 @@ def find_dogma_attribute_by_names(
 
 def get_ship_base_max_velocity(ship_type_id):
     """
-    Return the hull's raw maxVelocity Dogma attribute in m/s.
+    Return the hull's TRUE base maxVelocity in m/s.
 
-    Resolution order:
-      1. named Dogma metadata lookup,
-      2. cached Dogma attribute 37 (maxVelocity),
-      3. fresh /universe/types/{type_id}/ ESI read, bypassing process cache.
+    EVE Dogma attribute 37 is the canonical maxVelocity attribute.
+    It is intentionally read BEFORE any name-based metadata lookup because
+    fuzzy/name resolution can accidentally match a derived/bonus velocity
+    attribute and return an ALL-V-like value instead of the raw hull value.
 
-    The fresh fallback is intentionally used only when the cached path cannot
-    resolve speed. This keeps normal pages fast while preventing a stale or
-    incomplete cached payload from leaving SPEED blank.
+    Example validated in-game:
+      Thanatos raw hull speed = 80 m/s
+      Navigation V => 80 × 1.25 = 100 m/s
     """
     if not ship_type_id:
         return None
 
     ship_type_id = int(ship_type_id)
 
-    row = find_dogma_attribute_by_names(
-        ship_type_id,
-        exact_names=(
-            "maxVelocity",
-            "Max Velocity",
-        ),
-        contains_names=(
-            "max velocity",
-            "maximum velocity",
-        ),
-    )
-
-    if row:
-        try:
-            value = float(row["value"])
-            if value >= 0:
-                return value
-        except (TypeError, ValueError, KeyError):
-            pass
-
+    # 1) Canonical cached Dogma attribute: 37 = maxVelocity.
     dogma = get_eve_type_dogma(
         ship_type_id
     )
 
     try:
         value = float(dogma.get(37))
-        if value >= 0:
+        if value > 0:
             return value
     except (TypeError, ValueError):
         pass
 
-    # Last-resort authoritative public ESI read.
-    # Attribute 37 = maxVelocity in EVE Dogma.
+    # 2) Fresh public ESI type payload, still using attribute 37 explicitly.
     try:
         response = requests.get(
             f"{ESI_BASE_URL}/universe/types/{ship_type_id}/",
@@ -10343,6 +10323,8 @@ def get_ship_base_max_velocity(ship_type_id):
         response.raise_for_status()
         payload = response.json() or {}
 
+        refreshed_dogma = {}
+
         for attribute in payload.get(
             "dogma_attributes",
             [],
@@ -10351,72 +10333,61 @@ def get_ship_base_max_velocity(ship_type_id):
                 attribute_id = int(
                     attribute.get("attribute_id")
                 )
-            except (TypeError, ValueError):
-                continue
-
-            if attribute_id != 37:
-                continue
-
-            try:
-                value = float(
+                attribute_value = float(
                     attribute.get("value")
                 )
             except (TypeError, ValueError):
                 continue
 
-            # Refresh both caches with the fresh authoritative payload.
-            _eve_type_metadata_cache[
+            refreshed_dogma[
+                attribute_id
+            ] = attribute_value
+
+        if refreshed_dogma:
+            _eve_type_dogma_cache[
                 ship_type_id
-            ] = payload
+            ] = refreshed_dogma
 
-            refreshed_dogma = {}
+        _eve_type_metadata_cache[
+            ship_type_id
+        ] = payload
 
-            for dogma_row in payload.get(
-                "dogma_attributes",
-                [],
-            ) or []:
-                try:
-                    refreshed_dogma[
-                        int(dogma_row["attribute_id"])
-                    ] = float(
-                        dogma_row["value"]
-                    )
-                except (
-                    KeyError,
-                    TypeError,
-                    ValueError,
-                ):
-                    continue
+        value = refreshed_dogma.get(37)
 
-            if refreshed_dogma:
-                _eve_type_dogma_cache[
-                    ship_type_id
-                ] = refreshed_dogma
-
+        if value is not None and float(value) > 0:
             print(
-                "Freeborn velocity fresh ESI fallback:",
+                "Freeborn base velocity attr37:",
                 ship_type_id,
-                value,
+                float(value),
                 "m/s",
             )
-
-            return value
-
-        print(
-            "Freeborn velocity unresolved: maxVelocity attribute 37 "
-            "absent from fresh ESI type payload:",
-            ship_type_id,
-        )
+            return float(value)
 
     except Exception as error:
         print(
-            "Freeborn velocity fresh ESI fallback failed:",
+            "Freeborn base velocity attr37 fresh lookup failed:",
             ship_type_id,
             repr(error),
         )
 
-    return None
+    # 3) Last fallback: exact metadata name only, NO fuzzy contains lookup.
+    row = find_dogma_attribute_by_names(
+        ship_type_id,
+        exact_names=(
+            "maxVelocity",
+            "Max Velocity",
+        ),
+    )
 
+    if row:
+        try:
+            value = float(row["value"])
+            if value > 0:
+                return value
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    return None
 
 
 def get_ship_base_mass(ship_type_id):
@@ -12480,7 +12451,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-C5-SPEED-DISPLAY"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-C7-SPEED-ATTR37"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -17564,21 +17535,63 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             "propulsion_off_velocity_ms"
         )
 
-    # FREEBORN FITTINGS — 4S-N-C5
-    # Final display fallback for hulls whose persisted snapshot still carries
-    # no velocity. Resolve the hull base speed directly and apply the ALL V
-    # Navigation bonus (5% per level, level V = +25%).
+    # FREEBORN FITTINGS — 4S-N-C6
+    # If the propulsion engine has no usable speed, first reuse the BASE hull
+    # velocity already stored in the SAME technical snapshot. This is the exact
+    # value displayed successfully in "Targeting & Miscellaneous" and therefore
+    # avoids a redundant ESI/Dogma lookup.
     #
-    # This fallback is deliberately display-only and runs only when the normal
-    # technical snapshot contains no usable speed, so it does not disturb the
-    # validated propulsion engine or normal cached pages.
-    if (
+    # ALL V Navigation = +5% per level => +25% at level V.
+    speed_missing = (
         speed_all_v_raw is None
         or (
             isinstance(speed_all_v_raw, (int, float))
             and float(speed_all_v_raw) <= 0
         )
-    ):
+    )
+
+    if speed_missing:
+        snapshot_base_velocity = technical_snapshot.get(
+            "base_velocity"
+        )
+
+        try:
+            snapshot_base_velocity = float(
+                snapshot_base_velocity
+            )
+        except (TypeError, ValueError):
+            snapshot_base_velocity = None
+
+        if (
+            snapshot_base_velocity is not None
+            and snapshot_base_velocity > 0
+        ):
+            speed_all_v_raw = (
+                snapshot_base_velocity
+                * 1.25
+            )
+
+            print(
+                "Freeborn Speed snapshot-base fallback:",
+                format_fit_reference(
+                    fit.get("fit_id")
+                ),
+                "base=",
+                snapshot_base_velocity,
+                "all_v=",
+                speed_all_v_raw,
+            )
+
+    # Last-resort fallback only if even the snapshot BASE value is absent.
+    speed_missing = (
+        speed_all_v_raw is None
+        or (
+            isinstance(speed_all_v_raw, (int, float))
+            and float(speed_all_v_raw) <= 0
+        )
+    )
+
+    if speed_missing:
         direct_base_velocity = get_ship_base_max_velocity(
             fit.get("ship_type_id")
         )
@@ -17593,7 +17606,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             )
 
             print(
-                "Freeborn Speed display fallback:",
+                "Freeborn Speed direct fallback:",
                 format_fit_reference(
                     fit.get("fit_id")
                 ),
@@ -17604,13 +17617,17 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             )
         else:
             print(
-                "Freeborn Speed unresolved after display fallback:",
+                "Freeborn Speed unresolved after all fallbacks:",
                 format_fit_reference(
                     fit.get("fit_id")
                 ),
                 "ship_type_id=",
                 fit.get("ship_type_id"),
-                "base=",
+                "snapshot_base=",
+                technical_snapshot.get(
+                    "base_velocity"
+                ),
+                "direct_base=",
                 direct_base_velocity,
             )
 
@@ -19117,7 +19134,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-N-C5</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-N-C7</span>
   </footer>
 </main>
 
