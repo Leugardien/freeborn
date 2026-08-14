@@ -18925,7 +18925,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
           <div class="metric"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU <em class="metric-mode">ALL V</em></small><strong>{all_v_cpu_pair}</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">ϟ</span><small>Powergrid <em class="metric-mode">ALL V</em></small><strong>{all_v_pg_pair}</strong></div>
           <div class="metric"><span class="metric-icon" aria-hidden="true">◫</span><small>Capacitor <em class="metric-mode">ALL V</em></small><strong>{all_v_cap_capacity}</strong></div>
-          <div class="metric"><span class="metric-icon" aria-hidden="true">➤</span><small>Speed <em class="metric-mode">ALL V</em></small><strong>{all_v_active_velocity_value}</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">➤</span><small>Speed <em class="metric-mode">ALL V</em></small><strong>{speed_all_v_display}</strong></div>
           <div class="metric" title="DPS volontairement non simulé par Freeborn Fittings. Utilise l'EFT dans EVE pour les statistiques exactes."><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">----</strong></div>
           <div class="metric" title="EHP OMNI 25/25/25/25"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP <em class="metric-mode">ALL V</em></small><strong>{ehp_value}</strong></div>
           <div class="resists">
@@ -19134,7 +19134,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-N-C7</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-N-C8</span>
   </footer>
 </main>
 
