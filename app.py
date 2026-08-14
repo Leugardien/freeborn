@@ -321,7 +321,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "4T-D-DELETE-SYNC-V2"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "4S-N-A-AUTO-INVENTORY-V1"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -9581,6 +9581,26 @@ FREEBORN_SPECIALIZED_HOLD_SPECS = (
         "router": None,
     },
     {
+        "key": "mining_hold",
+        "label": "Mining Hold",
+        "code": "MINING",
+        "icon": "⛏",
+        "exact_names": (
+            "specialOreHoldCapacity",
+            "miningHoldCapacity",
+            "Mining Hold Capacity",
+            "Extraction Hold Capacity",
+        ),
+        "contains_names": (
+            "specialoreholdcapacity",
+            "mining hold capacity",
+            "mining hold",
+            "extraction hold capacity",
+            "extraction hold",
+        ),
+        "router": "mining",
+    },
+    {
         "key": "ore_hold",
         "label": "Ore Hold",
         "code": "ORE",
@@ -9987,34 +10007,470 @@ def freeborn_inventory_type_context(type_id):
         return {"category_id": None, "type_name": "", "group_name": ""}
 
 
-def freeborn_detect_specialized_holds(ship_type_id):
+def freeborn_hold_key_from_attribute_name(attribute_name):
     """
-    Detect supported specialized holds directly from hull Dogma attributes.
-    Empty holds remain visible because capacity is a hull property.
+    Stable internal key derived from a Dogma attribute name.
     """
-    holds = []
+    raw = str(attribute_name or "").strip()
+
+    if not raw:
+        return "specialized_hold"
+
+    # CamelCase -> snake_case, then normalize.
+    snake = re.sub(
+        r"(?<!^)(?=[A-Z])",
+        "_",
+        raw,
+    ).casefold()
+
+    snake = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        snake,
+    ).strip("_")
+
+    for prefix in (
+        "special_",
+        "general_",
+    ):
+        if snake.startswith(prefix):
+            snake = snake[len(prefix):]
+
+    for suffix in (
+        "_capacity",
+        "capacity",
+    ):
+        if snake.endswith(suffix):
+            snake = snake[:-len(suffix)].rstrip("_")
+
+    return snake or "specialized_hold"
+
+
+def freeborn_hold_label_from_metadata(metadata):
+    """
+    Produce a clean EVE-style English label for an automatically discovered
+    inventory hold.
+
+    Prefer CCP's display_name. If unavailable, derive a readable label from
+    the Dogma attribute name.
+    """
+    display_name = str(
+        metadata.get("display_name")
+        or ""
+    ).strip()
+
+    if display_name:
+        # Most CCP labels end in "Capacity"; the panel already shows capacity.
+        cleaned = re.sub(
+            r"\s+Capacity\s*$",
+            "",
+            display_name,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        if cleaned:
+            return cleaned
+
+    name = str(
+        metadata.get("name")
+        or ""
+    ).strip()
+
+    if not name:
+        return "Specialized Hold"
+
+    # Remove common technical wrappers.
+    cleaned = re.sub(
+        r"^(special|general)",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"Capacity$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # CamelCase -> words.
+    cleaned = re.sub(
+        r"(?<!^)(?=[A-Z])",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\s+",
+        " ",
+        cleaned,
+    ).strip()
+
+    return cleaned or "Specialized Hold"
+
+
+def freeborn_hold_router_from_metadata(metadata):
+    """
+    Infer only SAFE routing families from the Dogma attribute metadata.
+
+    Discovery is fully automatic, but EFT item assignment stays conservative:
+    if a new/unknown hold exists, it is displayed with capacity while items
+    remain in Cargo Bay until a safe generic rule exists.
+    """
+    haystack = " ".join(
+        str(metadata.get(field) or "")
+        for field in (
+            "name",
+            "display_name",
+            "description",
+        )
+    ).casefold()
+
+    if "fighter" in haystack:
+        return "fighter"
+
+    if "fuel" in haystack:
+        return "fuel"
+
+    # Expedition/mining/general mining holds accept mined resources.
+    if (
+        "mining" in haystack
+        or "expedition" in haystack
+        or "ore hold" in haystack
+    ):
+        return "mining"
+
+    if "gas" in haystack:
+        return "gas"
+
+    if "ice" in haystack:
+        return "ice"
+
+    if "mineral" in haystack:
+        return "mineral"
+
+    if (
+        "planetary" in haystack
+        or "colony resource" in haystack
+    ):
+        return "planetary"
+
+    # Fleet/ship/command-center/mobile-depot/etc. holds are intentionally
+    # display-only because EFT does not say which generic cargo line was put
+    # in them.
+    return None
+
+
+def freeborn_hold_icon_from_router(router):
+    return {
+        "fighter": "✦",
+        "fuel": "◉",
+        "mining": "⛏",
+        "ore": "◆",
+        "gas": "◇",
+        "ice": "❄",
+        "mineral": "⬡",
+        "planetary": "◈",
+    }.get(
+        router,
+        "▣",
+    )
+
+
+def freeborn_is_inventory_capacity_attribute(metadata):
+    """
+    Generic detector for ship inventory-capacity Dogma attributes.
+
+    Current EVE hold-capacity attributes are published as Volume values and
+    commonly use names such as:
+      specialGasHoldCapacity
+      specialMineralHoldCapacity
+      specialShipHoldCapacity
+      specialIndustrialShipHoldCapacity
+      specialCommandCenterHoldCapacity
+      specialPlanetaryCommoditiesHoldCapacity
+      specialMobileDepotHoldCapacity
+      specialColonyResourcesHoldCapacity
+      specialExpeditionHoldCapacity
+
+    We deliberately do not rely on a finite list of attribute IDs/names.
+    """
+    if not metadata:
+        return False
+
+    name = str(
+        metadata.get("name")
+        or ""
+    ).strip()
+
+    display_name = str(
+        metadata.get("display_name")
+        or ""
+    ).strip()
+
+    description = str(
+        metadata.get("description")
+        or ""
+    ).strip()
+
+    haystack = " ".join(
+        (name, display_name, description)
+    ).casefold()
+
+    if "capacity" not in haystack:
+        return False
+
+    # Volume unit (m³) is the strongest discriminator for inventory capacity.
+    unit_id = metadata.get("unit_id")
+
+    try:
+        unit_id = (
+            int(unit_id)
+            if unit_id is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        unit_id = None
+
+    if unit_id not in {
+        None,
+        9,  # Volume / m³
+    }:
+        return False
+
+    normalized_name = name.casefold()
+
+    # Generic hull Cargo Bay is already rendered separately from type.capacity.
+    if normalized_name in {
+        "capacity",
+    }:
+        return False
+
+    # Drone Bay is already rendered separately and must not be duplicated.
+    if (
+        "dronecapacity" in normalized_name
+        or "drone capacity" in haystack
+        or "drone bay capacity" in haystack
+    ):
+        return False
+
+    inventory_terms = (
+        "hold",
+        "hangar",
+        "bay",
+        "fleet",
+        "fighter",
+        "fuel",
+        "ore",
+        "gas",
+        "ice",
+        "mineral",
+        "planetary",
+        "colony",
+        "command center",
+        "ship maintenance",
+        "maintenance bay",
+    )
+
+    # Most modern specialized holds are special*HoldCapacity. The broader
+    # vocabulary also catches legacy Fleet/Fighter/Fuel/Maintenance attributes.
+    if (
+        normalized_name.startswith("special")
+        and normalized_name.endswith("holdcapacity")
+    ):
+        return True
+
+    return any(
+        term in haystack
+        for term in inventory_terms
+    )
+
+
+def freeborn_known_hold_override(metadata):
+    """
+    Reuse the legacy registry only as presentation/routing overrides.
+    Discovery itself does NOT depend on this table anymore.
+    """
+    metadata_text = " ".join(
+        str(metadata.get(field) or "")
+        for field in (
+            "name",
+            "display_name",
+            "description",
+        )
+    ).casefold()
 
     for spec in FREEBORN_SPECIALIZED_HOLD_SPECS:
-        attribute = find_dogma_attribute_by_names(
-            ship_type_id,
-            exact_names=spec["exact_names"],
-            contains_names=spec["contains_names"],
+        probes = (
+            tuple(spec.get("exact_names") or ())
+            + tuple(spec.get("contains_names") or ())
         )
 
-        if not attribute:
-            continue
+        if any(
+            str(probe).casefold() in metadata_text
+            for probe in probes
+            if str(probe).strip()
+        ):
+            return spec
 
+    return None
+
+
+def freeborn_detect_specialized_holds(ship_type_id):
+    """
+    FREEBORN FITTINGS — Automatic Inventory Holds Engine.
+
+    Inspect EVERY Dogma attribute actually present on the hull and discover
+    inventory-capacity attributes dynamically.
+
+    Result:
+      - a new CCP hold can appear automatically without a Freeborn code patch;
+      - empty holds remain visible with their capacity;
+      - known holds keep friendly labels/icons/routing;
+      - unknown holds remain display-only instead of inventing EFT placement.
+    """
+    if not ship_type_id:
+        return []
+
+    dogma = get_eve_type_dogma(
+        ship_type_id
+    )
+
+    if not dogma:
+        return []
+
+    holds = []
+    seen_keys = set()
+
+    for attribute_id, raw_value in dogma.items():
         try:
-            capacity = float(attribute["value"])
-        except (TypeError, ValueError, KeyError):
+            capacity = float(
+                raw_value
+            )
+        except (TypeError, ValueError):
             continue
 
         if capacity <= 0:
             continue
 
-        hold = dict(spec)
-        hold["capacity_m3"] = capacity
-        holds.append(hold)
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        if not freeborn_is_inventory_capacity_attribute(
+            metadata
+        ):
+            continue
+
+        override = freeborn_known_hold_override(
+            metadata
+        )
+
+        attribute_name = str(
+            metadata.get("name")
+            or f"attribute_{attribute_id}"
+        )
+
+        key = (
+            str(override.get("key"))
+            if override
+            else freeborn_hold_key_from_attribute_name(
+                attribute_name
+            )
+        )
+
+        # Avoid duplicate aliases resolving to the same conceptual hold.
+        if key in seen_keys:
+            continue
+
+        seen_keys.add(
+            key
+        )
+
+        router = (
+            override.get("router")
+            if override
+            else freeborn_hold_router_from_metadata(
+                metadata
+            )
+        )
+
+        label = (
+            override.get("label")
+            if override
+            else freeborn_hold_label_from_metadata(
+                metadata
+            )
+        )
+
+        icon = (
+            override.get("icon")
+            if override
+            else freeborn_hold_icon_from_router(
+                router
+            )
+        )
+
+        code = (
+            override.get("code")
+            if override
+            else re.sub(
+                r"[^A-Z0-9]+",
+                " ",
+                str(label).upper(),
+            ).strip()[:18]
+        )
+
+        holds.append({
+            "key": key,
+            "label": label,
+            "code": code or "HOLD",
+            "icon": icon,
+            "capacity_m3": capacity,
+            "router": router,
+            "attribute_id": int(attribute_id),
+            "attribute_name": attribute_name,
+            "automatic": True,
+        })
+
+    # Stable display order: routed operational holds first, then other holds.
+    priority = {
+        "fighter": 10,
+        "fuel": 20,
+        "mining": 30,
+        "ore": 31,
+        "gas": 32,
+        "ice": 33,
+        "mineral": 34,
+        "planetary": 35,
+        None: 90,
+    }
+
+    holds.sort(
+        key=lambda hold: (
+            priority.get(
+                hold.get("router"),
+                80,
+            ),
+            str(
+                hold.get("label")
+                or ""
+            ).casefold(),
+        )
+    )
+
+    if holds:
+        print(
+            "Freeborn automatic inventory holds:",
+            int(ship_type_id),
+            [
+                (
+                    hold["label"],
+                    hold["capacity_m3"],
+                    hold["attribute_id"],
+                )
+                for hold in holds
+            ],
+        )
 
     return holds
 
@@ -10053,6 +10509,34 @@ def freeborn_specialized_hold_route(type_id, active_holds):
         )
     ):
         return "fuel_bay"
+
+    # Generic Mining Hold (EVE "Mining Hold", FR "soute d'extraction")
+    # accepts mined resources. This check comes before the narrower specialized
+    # Ore/Gas/Ice holds and only activates on hulls that actually expose it.
+    if "mining" in routes:
+        is_mining_ore = (
+            "ore" in group_name
+            or "asteroid" in group_name
+            or ("compressed" in type_name and "ore" in combined)
+        )
+        is_mining_gas = (
+            "gas" in group_name
+            or "harvestable cloud" in group_name
+            or "fullerite" in combined
+            or "cytoserocin" in combined
+            or "mykoserocin" in combined
+        )
+        is_mining_ice = (
+            "ice" in group_name
+            or "ice product" in group_name
+        )
+
+        if (
+            is_mining_ore
+            or is_mining_gas
+            or is_mining_ice
+        ):
+            return "mining_hold"
 
     if "ore" in routes and (
         "ore" in group_name
@@ -12839,7 +13323,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-C7-SPEED-ATTR37"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-A-AUTO-INVENTORY-V1"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -19522,7 +20006,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-N-C8</span>
+    <span class="version">Freeborn Legacy • Fittings AUTO-HOLDS V1</span>
   </footer>
 </main>
 
