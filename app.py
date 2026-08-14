@@ -384,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-FINAL-PRODUCTION + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -1011,6 +1011,13 @@ def init_database():
                         sde_build TEXT,
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_type_index
+                    ADD COLUMN IF NOT EXISTS volume_m3 DOUBLE PRECISION;
                     """
                 )
 
@@ -4499,12 +4506,34 @@ def freeborn_market_sync_type_index():
                     if not type_name:
                         continue
 
+                    raw_volume = (
+                        freeborn_market_sde_record_value(
+                            record,
+                            "volume",
+                            "volumeM3",
+                            "volume_m3",
+                        )
+                    )
+
+                    try:
+                        volume_m3 = (
+                            float(raw_volume)
+                            if raw_volume is not None
+                            else None
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        volume_m3 = None
+
                     rows.append((
                         type_id,
                         type_name,
                         type_name.casefold(),
                         group_id,
                         market_group_id,
+                        volume_m3,
                         build_hint,
                     ))
 
@@ -4527,6 +4556,7 @@ def freeborn_market_sync_type_index():
                         type_name_lower TEXT NOT NULL,
                         group_id BIGINT,
                         market_group_id BIGINT NOT NULL,
+                        volume_m3 DOUBLE PRECISION,
                         sde_build TEXT
                     ) ON COMMIT DROP;
                     """
@@ -4540,9 +4570,10 @@ def freeborn_market_sync_type_index():
                         type_name_lower,
                         group_id,
                         market_group_id,
+                        volume_m3,
                         sde_build
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (type_id) DO UPDATE
                     SET
                         type_name =
@@ -4553,6 +4584,8 @@ def freeborn_market_sync_type_index():
                             EXCLUDED.group_id,
                         market_group_id =
                             EXCLUDED.market_group_id,
+                        volume_m3 =
+                            EXCLUDED.volume_m3,
                         sde_build =
                             EXCLUDED.sde_build;
                     """,
@@ -4573,6 +4606,7 @@ def freeborn_market_sync_type_index():
                         type_name_lower,
                         group_id,
                         market_group_id,
+                        volume_m3,
                         sde_build,
                         updated_at
                     )
@@ -4582,6 +4616,7 @@ def freeborn_market_sync_type_index():
                         type_name_lower,
                         group_id,
                         market_group_id,
+                        volume_m3,
                         sde_build,
                         NOW()
                     FROM market_type_index_stage;
@@ -4624,6 +4659,34 @@ def freeborn_market_ensure_type_index():
         )
 
     return count
+
+
+def freeborn_jita_check_ensure_volumes():
+    """Refresh the existing SDE type index once if volume_m3 is still absent."""
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM market_type_index
+                WHERE volume_m3 IS NOT NULL;
+                """
+            )
+            row = cur.fetchone()
+
+    volume_count = int(
+        row[0]
+        if row
+        else 0
+    )
+
+    if volume_count >= 1000:
+        return volume_count
+
+    freeborn_market_sync_type_index()
+    return freeborn_market_type_index_count()
 
 
 def freeborn_market_search_types(query):
@@ -4676,7 +4739,8 @@ def freeborn_market_search_types(query):
                     type_id,
                     type_name,
                     group_id,
-                    market_group_id
+                    market_group_id,
+                    volume_m3
                 FROM market_type_index
                 WHERE type_name_lower LIKE %s
                 ORDER BY
@@ -4710,6 +4774,12 @@ def freeborn_market_search_types(query):
                 row[2],
             "market_group_id":
                 row[3],
+            "volume_m3":
+                (
+                    float(row[4])
+                    if row[4] is not None
+                    else None
+                ),
             "icon_url":
                 eve_type_icon_url(
                     int(row[0]),
@@ -24730,6 +24800,115 @@ function showToast(message) {{
 </html>'''
 
 
+def freeborn_jita_check_page(token):
+    logo_url = "/assets/logo-freeborn-legacy.png"
+    bg_url = "/assets/bg-space.jpg"
+
+    return f"""<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Freeborn Jita Check</title>
+<link rel="icon" href="{logo_url}">
+<style>
+:root{{--cyan:#35c9ff;--line:#155a78;--gold:#ffc94d;--text:#eefaff}}
+*{{box-sizing:border-box}}
+body{{margin:0;color:var(--text);font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;background:#020912 url("{bg_url}") center/cover fixed;min-height:100vh}}
+.shell{{width:min(1500px,96vw);margin:14px auto;border:1px solid #167da5;background:rgba(1,12,21,.96)}}
+.header{{display:flex;align-items:center;gap:24px;padding:14px 24px;border-bottom:1px solid var(--line)}}
+.logo{{width:72px;height:72px;object-fit:contain}}
+.brand h1{{margin:0;font-size:31px;font-weight:500;letter-spacing:2.5px}} .brand h1 span{{color:var(--gold)}}
+.brand p{{margin:3px 0 0;color:#9adfff;letter-spacing:1.8px;font-size:12px;text-transform:uppercase}}
+.badge{{margin-left:auto;border:1px solid var(--gold);padding:10px 16px;color:var(--gold);font-size:12px;font-weight:600;letter-spacing:1px}}
+.bar{{padding:8px 18px;border-bottom:1px solid var(--line);font-size:10px;color:#55d6ff;letter-spacing:1.4px}}
+.panel{{margin:12px;border:1px solid var(--line);background:rgba(1,14,24,.9)}}
+.panel-title{{padding:9px 12px;border-bottom:1px solid var(--line);font-size:15px;font-weight:600;letter-spacing:1.1px}}
+.head,.row{{display:grid;grid-template-columns:42px minmax(300px,1fr) 200px 270px 42px;gap:8px;align-items:center}}
+.head{{padding:12px 14px 6px;color:#5ecfff;font-size:10px;letter-spacing:1.2px}} .row{{padding:6px 14px}}
+.num{{text-align:center;color:#54d9ff;font-weight:700}} .item-wrap{{position:relative}}
+.item-input{{width:100%;height:44px;padding:0 12px 0 54px;background:#020a12;border:1px solid #146586;color:#fff;font-size:14px;outline:none}}
+.icon{{position:absolute;left:7px;top:5px;width:34px;height:34px;object-fit:contain;display:none}}
+.suggestions{{position:absolute;left:0;right:0;top:45px;z-index:20;background:#03111d;border:1px solid #167da5;max-height:260px;overflow:auto;display:none}}
+.suggestion{{display:flex;align-items:center;gap:10px;padding:8px;cursor:pointer;border-bottom:1px solid rgba(22,125,165,.22)}} .suggestion:hover{{background:#082238}}
+.suggestion img{{width:30px;height:30px}}
+.value{{height:44px;border:1px solid #155a78;background:#020a12;display:flex;align-items:center;justify-content:flex-end;padding:0 12px;font-family:"Roboto Mono","Consolas",monospace;font-size:14px;font-variant-numeric:tabular-nums}}
+.price{{color:var(--gold)}} .remove{{height:44px;border:1px solid #9d3037;background:#13070a;color:#ff6d72;cursor:pointer}}
+.actions{{padding:12px 14px}} .add{{border:1px solid #c69d38;background:rgba(198,157,56,.08);color:#f6cc63;padding:9px 14px;cursor:pointer;font-weight:600}}
+.status{{margin:0 14px 14px;border-left:2px solid var(--cyan);padding:10px;background:#061b29;color:#92dffb;font-size:11px}}
+.footer{{display:flex;justify-content:space-between;padding:9px 14px;border-top:1px solid var(--line);font-size:9px;color:#5bd9ff;letter-spacing:1.1px}}
+</style>
+</head>
+<body>
+<div class="shell">
+<div class="header"><img class="logo" src="{logo_url}"><div class="brand"><h1>FREEBORN <span>JITA CHECK</span></h1><p>Outil CEO • Jita 4-4 • Sell</p></div><div class="badge">CEO ONLY</div></div>
+<div class="bar">FREEBORN LEGACY // OUTILS // JITA CHECK // JITA SELL</div>
+<div class="panel">
+<div class="panel-title">ⓙ CONSULTATION DES PRIX JITA</div>
+<div class="head"><div>#</div><div>ITEM EVE</div><div>VOLUME UNITAIRE</div><div>PRIX JITA SELL</div><div></div></div>
+<div id="rows"></div>
+<div class="actions"><button class="add" id="add">+ Ajouter un item</button></div>
+<div class="status" id="status">Recherche EVE prête • prix Jita 4-4 SELL • aucune donnée n'est enregistrée.</div>
+</div>
+<div class="footer"><span>LIBRES PAR CHOIX • UNIS PAR VOLONTÉ</span><span>FREEBORN JITA CHECK</span><span>CEO TOOL</span></div>
+</div>
+<script>
+const token={json.dumps(str(token))};
+const rows=document.getElementById('rows'),status=document.getElementById('status');
+let seq=0;
+const isk=v=>v==null?'—':Number(v).toLocaleString('fr-FR',{{minimumFractionDigits:2,maximumFractionDigits:2}})+' ISK';
+const vol=v=>v==null?'—':Number(v).toLocaleString('fr-FR',{{minimumFractionDigits:0,maximumFractionDigits:2}})+' m³';
+const icon=id=>'https://images.evetech.net/types/'+id+'/icon?size=64';
+function renumber(){{[...document.querySelectorAll('.row')].forEach((r,i)=>r.querySelector('.num').textContent=i+1)}}
+function addRow(){{
+ if(document.querySelectorAll('.row').length>=10)return;
+ seq++; const r=document.createElement('div'); r.className='row';
+ r.innerHTML=`<div class="num">${{seq}}</div><div class="item-wrap"><img class="icon"><input class="item-input" placeholder="Ex. Golem, Tritanium, Endurance..." autocomplete="off"><div class="suggestions"></div></div><div class="value volume">—</div><div class="value price">—</div><button class="remove">×</button>`;
+ rows.appendChild(r);
+ const input=r.querySelector('.item-input'),box=r.querySelector('.suggestions'),img=r.querySelector('.icon'),volume=r.querySelector('.volume'),price=r.querySelector('.price');
+ let timer;
+ input.oninput=()=>{{clearTimeout(timer);const q=input.value.trim();volume.textContent='—';price.textContent='—';img.style.display='none';if(q.length<2){{box.style.display='none';return}}timer=setTimeout(async()=>{{
+   try{{const rr=await fetch('/market/api/search?q='+encodeURIComponent(q)+'&token='+encodeURIComponent(token));const d=await rr.json();box.innerHTML='';
+   (d.items||[]).forEach(item=>{{const s=document.createElement('div');s.className='suggestion';s.innerHTML=`<img src="${{item.icon_url||icon(item.type_id)}}"><span>${{item.name}}</span>`;
+   s.onclick=async()=>{{input.value=item.name;box.style.display='none';img.src=item.icon_url||icon(item.type_id);img.style.display='block';volume.textContent=vol(item.volume_m3);price.textContent='Chargement…';
+   try{{const pr=await fetch('/market/api/price/'+item.type_id+'?token='+encodeURIComponent(token));const pd=await pr.json();if(!pr.ok)throw new Error();price.textContent=isk(pd.jita_sell);status.textContent=item.name+' • Jita SELL actualisé.'}}catch(e){{price.textContent='Erreur'}}}};box.appendChild(s)}});box.style.display=(d.items||[]).length?'block':'none'}}catch(e){{status.textContent='Recherche EVE indisponible.'}}}},180)}};
+ r.querySelector('.remove').onclick=()=>{{r.remove();renumber()}};
+}}
+document.getElementById('add').onclick=addRow;addRow();
+</script>
+</body></html>"""
+
+
+@app.route("/jita-check")
+def freeborn_jita_check():
+    token = request.args.get("token", "")
+
+    try:
+        freeborn_market_validate_token(token)
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return freeborn_web_page(
+            "Lien Freeborn Jita Check invalide",
+            "Ce lien est invalide ou a expiré. Relance /prix-jita sur Discord.",
+            status="error",
+        ), 403
+
+    try:
+        freeborn_jita_check_ensure_volumes()
+    except Exception as error:
+        print(
+            "Freeborn Jita Check SDE volume sync warning:",
+            repr(error),
+        )
+
+    return freeborn_jita_check_page(token)
+
+
 @app.route("/market/nouveau")
 def freeborn_market_new_page():
     token = request.args.get(
@@ -25886,6 +26065,60 @@ def interactions():
                             64,
                     },
                 })
+
+    # ========================================================
+    # FREEBORN JITA CHECK — CEO ONLY
+    # ========================================================
+
+    if command_name == "prix-jita":
+        if not interaction_has_any_role(
+            data,
+            configured_role_ids(DISCORD_CEO_ROLE_ID),
+        ):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Freeborn Jita Check — accès refusé**\n\n"
+                        "Cet outil est exclusivement réservé au **CEO**."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        token = create_market_web_token(
+            guild_id,
+            discord_user_id,
+            "sell",
+            "member",
+        )
+
+        url = (
+            f"{PUBLIC_BASE_URL}/jita-check?"
+            + urlencode({"token": token})
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    "📊 **FREEBORN JITA CHECK — CEO**\n\n"
+                    "Prix **Jita SELL** + **volume unitaire** des items EVE.\n"
+                    "Aucun calcul, aucune annonce Neon et aucune publication Discord."
+                ),
+                "flags": 64,
+                "components": [{
+                    "type": 1,
+                    "components": [{
+                        "type": 2,
+                        "style": 5,
+                        "label": "Ouvrir Jita Check",
+                        "emoji": {"name": "📊"},
+                        "url": url,
+                    }],
+                }],
+            },
+        })
 
     # ========================================================
     # FREEBORN MARKET — PHASE 1
@@ -30245,6 +30478,20 @@ def register_commands():
 
             "type":
                 1,
+        },
+
+        {
+            "name":
+                "prix-jita",
+
+            "description":
+                "Consulter les prix Jita SELL et volumes EVE — CEO uniquement",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
         },
 
         {
