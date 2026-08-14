@@ -380,7 +380,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2B-SEARCH-PRICEOVERRIDE + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2C-SEARCH-COMPAT + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -4174,7 +4174,7 @@ def freeborn_market_search_types(query):
         return cached["items"]
 
     response = requests.get(
-        "https://esi.evetech.net/v2/search/",
+        "https://esi.evetech.net/search/",
         params={
             "categories": "inventory_type",
             "search": normalized,
@@ -4184,12 +4184,17 @@ def freeborn_market_search_types(query):
         headers={
             "User-Agent":
                 "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            # ESI moved to compatibility-date versioning in 2025.
+            # Using an unversioned path + compatibility date is now the
+            # preferred form for current ESI routes.
+            "X-Compatibility-Date":
+                "2026-08-14",
         },
         timeout=12,
     )
     if response.status_code != 200:
         print(
-            "Freeborn Market EVE search HTTP error:",
+            "Freeborn Market EVE search HTTP error [P2C]:",
             response.status_code,
             response.text[:500],
             "query=",
