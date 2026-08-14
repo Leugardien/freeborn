@@ -634,6 +634,27 @@ def init_database():
 
                 cur.execute(
                     """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS technical_snapshot JSONB;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS technical_snapshot_version TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS technical_snapshot_updated_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS guild_eve_characters (
                         guild_id TEXT NOT NULL,
                         character_id BIGINT NOT NULL,
@@ -3490,7 +3511,10 @@ def save_fit_phase1(
                     status,
                     created_by_discord_user_id,
                     created_at,
-                    updated_at
+                    updated_at,
+                    technical_snapshot,
+                    technical_snapshot_version,
+                    technical_snapshot_updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s,
@@ -3587,6 +3611,8 @@ def get_fit(guild_id, fit_id):
         "fit_id", "guild_id", "name", "ship_name", "ship_type_id",
         "usage", "eft_text", "notes", "status",
         "created_by_discord_user_id", "created_at", "updated_at",
+        "technical_snapshot", "technical_snapshot_version",
+        "technical_snapshot_updated_at",
     )
     return dict(zip(keys, row))
 
@@ -9511,6 +9537,7 @@ FREEBORN_FITTING_NAMED_SKILLS = (
     "Shield Compensation",
     "Navigation",
     "Acceleration Control",
+    "Controlled Bursts",
 )
 
 
@@ -10447,9 +10474,1029 @@ def format_eft_bay_items(items, type_ids=None):
 
 
 
+
+# ============================================================
+# FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
+# ============================================================
+
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4R-C-1"
+
+
+def freeborn_technical_snapshot_fingerprint(fit):
+    """
+    Stable invalidation fingerprint.
+
+    Status / notes / usage do not invalidate technical calculations.
+    Ship type + normalized EFT do.
+    """
+    payload = (
+        str(fit.get("ship_type_id") or "")
+        + "\n"
+        + str(fit.get("eft_text") or "")
+    ).encode("utf-8")
+
+    return hashlib.sha256(
+        payload
+    ).hexdigest()
+
+
+def freeborn_technical_snapshot_valid(fit):
+    snapshot = fit.get(
+        "technical_snapshot"
+    )
+
+    if not isinstance(snapshot, dict):
+        return False
+
+    if (
+        str(
+            fit.get(
+                "technical_snapshot_version"
+            )
+            or ""
+        )
+        != FREEBORN_TECHNICAL_SNAPSHOT_VERSION
+    ):
+        return False
+
+    return (
+        snapshot.get("fingerprint")
+        == freeborn_technical_snapshot_fingerprint(
+            fit
+        )
+    )
+
+
+def persist_freeborn_technical_snapshot(
+    fit,
+    snapshot,
+):
+    """
+    Persist technical data in Neon so a new Render worker can serve the page
+    without rebuilding EVE static data from ESI.
+    """
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET
+                    technical_snapshot = %s::jsonb,
+                    technical_snapshot_version = %s,
+                    technical_snapshot_updated_at = NOW()
+                WHERE guild_id = %s
+                AND fit_id = %s;
+                """,
+                (
+                    json.dumps(
+                        snapshot,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    FREEBORN_TECHNICAL_SNAPSHOT_VERSION,
+                    str(fit["guild_id"]),
+                    int(fit["fit_id"]),
+                ),
+            )
+
+        conn.commit()
+
+    fit["technical_snapshot"] = snapshot
+    fit[
+        "technical_snapshot_version"
+    ] = FREEBORN_TECHNICAL_SNAPSHOT_VERSION
+
+
+def freeborn_snapshot_skill_ids():
+    """
+    Resolve and persist the handful of named skill IDs required by the
+    personalized CPU/PG/cap/velocity layer.
+    """
+    names = tuple(
+        FREEBORN_FITTING_NAMED_SKILLS
+    )
+
+    resolved = resolve_eve_inventory_type_ids(
+        names
+    )
+
+    result = {}
+
+    for name in names:
+        key = name.casefold()
+        type_id = resolved.get(key)
+
+        if type_id:
+            result[name] = int(type_id)
+
+    return result
+
+
+def freeborn_snapshot_module_rows(
+    eft_sections,
+    type_ids,
+):
+    """
+    Static module rows sufficient for CPU/PG and capacitor personalized
+    calculations without future ESI reads.
+    """
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    rows = []
+
+    for type_id, quantity in counts.items():
+        dogma = get_eve_type_dogma(
+            type_id
+        )
+        group_name = (
+            get_eve_type_group_name(
+                type_id
+            )
+            or ""
+        )
+
+        rows.append({
+            "type_id": int(type_id),
+            "quantity": int(quantity),
+            "group_name": group_name,
+            "weapon_group": (
+                "launcher"
+                in group_name.casefold()
+                or "turret"
+                in group_name.casefold()
+                or "smartbomb"
+                in group_name.casefold()
+            ),
+            "cpu_base": float(
+                dogma.get(
+                    DOGMA_CPU_NEED,
+                    0.0,
+                )
+                if dogma else 0.0
+            ),
+            "power_base": float(
+                dogma.get(
+                    DOGMA_POWER_NEED,
+                    0.0,
+                )
+                if dogma else 0.0
+            ),
+            "cap_need": (
+                float(
+                    dogma[
+                        DOGMA_CAPACITOR_NEED
+                    ]
+                )
+                if (
+                    dogma
+                    and dogma.get(
+                        DOGMA_CAPACITOR_NEED
+                    ) is not None
+                )
+                else None
+            ),
+            "duration_ms": (
+                float(
+                    dogma[
+                        DOGMA_DURATION
+                    ]
+                )
+                if (
+                    dogma
+                    and dogma.get(
+                        DOGMA_DURATION
+                    ) is not None
+                )
+                else None
+            ),
+            "dogma_ok": bool(dogma),
+        })
+
+    return rows
+
+
+def build_freeborn_technical_snapshot(
+    fit,
+    *,
+    creator_display=None,
+):
+    """
+    Expensive path, executed once per technical revision of a fitting.
+
+    All values stored here are static with respect to the fit or ALL V
+    reference. Character-specific values are intentionally not persisted.
+    """
+    eft_sections = parse_eft_web_sections(
+        fit.get("eft_text")
+    )
+
+    all_eft_items = (
+        eft_sections["low"]
+        + eft_sections["mid"]
+        + eft_sections["high"]
+        + eft_sections["rigs"]
+        + eft_sections["extras"]
+    )
+
+    eft_type_ids = (
+        resolve_eve_inventory_type_ids(
+            all_eft_items
+        )
+    )
+
+    prefetch_eve_static_type_data(
+        list(
+            eft_type_ids.values()
+        )
+        + [fit.get("ship_type_id")],
+        max_workers=8,
+    )
+
+    skill_ids = (
+        freeborn_snapshot_skill_ids()
+    )
+
+    base_resources = (
+        calculate_base_fitting_resources(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
+    base_velocity = (
+        get_ship_base_max_velocity(
+            fit.get("ship_type_id")
+        )
+    )
+
+    all_v_velocity = (
+        calculate_skill_aware_velocity(
+            fit.get("ship_type_id"),
+            mode="all_v",
+            eft_sections=eft_sections,
+            type_ids=eft_type_ids,
+        )
+    )
+
+    capacitor_engine = (
+        calculate_base_capacitor_engine(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
+    capacitor_activity_audit = dict(
+        technical_snapshot[
+            "capacitor_activity_audit"
+        ]
+    )
+
+    conditional_source_dogma_probe = list(
+        technical_snapshot.get(
+            "conditional_source_dogma_probe",
+            [],
+        )
+    )
+
+    all_v_cap = (
+        calculate_skill_aware_capacitor(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+            mode="all_v",
+        )
+    )
+
+    all_v_core = (
+        calculate_skill_aware_fitting_resources(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+            mode="all_v",
+        )
+    )
+
+    module_rows = (
+        freeborn_snapshot_module_rows(
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
+    return {
+        "version":
+            FREEBORN_TECHNICAL_SNAPSHOT_VERSION,
+        "fingerprint":
+            freeborn_technical_snapshot_fingerprint(
+                fit
+            ),
+        "creator_display":
+            str(
+                creator_display
+                or ""
+            ),
+        "eft_type_ids": {
+            str(key): int(value)
+            for key, value
+            in eft_type_ids.items()
+        },
+        "skill_ids": skill_ids,
+        "module_rows": module_rows,
+        "base_resources": base_resources,
+        "base_velocity": base_velocity,
+        "all_v_velocity": all_v_velocity,
+        "capacitor_engine":
+            capacitor_engine,
+        "capacitor_activity_audit":
+            capacitor_activity_audit,
+        "conditional_source_dogma_probe":
+            conditional_source_dogma_probe,
+        "all_v_cap": all_v_cap,
+        "all_v_core": all_v_core,
+    }
+
+
+def ensure_freeborn_technical_snapshot(
+    fit,
+    *,
+    creator_display=None,
+):
+    """
+    Fast path: return JSONB already loaded by get_fit().
+
+    Slow path: build once, save to Neon, then every future Render worker can
+    reuse it even after a cold start.
+    """
+    if freeborn_technical_snapshot_valid(
+        fit
+    ):
+        return fit[
+            "technical_snapshot"
+        ]
+
+    snapshot = (
+        build_freeborn_technical_snapshot(
+            fit,
+            creator_display=creator_display,
+        )
+    )
+
+    persist_freeborn_technical_snapshot(
+        fit,
+        snapshot,
+    )
+
+    return snapshot
+
+
+def freeborn_snapshot_skill_level(
+    snapshot,
+    skills_snapshot,
+    skill_name,
+):
+    type_id = (
+        snapshot.get(
+            "skill_ids",
+            {},
+        ).get(
+            skill_name
+        )
+    )
+
+    if not type_id:
+        return 0
+
+    levels = freeborn_skill_level_map(
+        skills_snapshot
+    )
+
+    return int(
+        levels.get(
+            int(type_id),
+            0,
+        )
+    )
+
+
+def calculate_character_resources_from_snapshot(
+    snapshot,
+    skills_snapshot,
+):
+    """
+    Character CPU/PG calculation with zero ESI static-data reads.
+    """
+    base = snapshot[
+        "base_resources"
+    ]
+
+    levels = freeborn_skill_level_map(
+        skills_snapshot
+    )
+
+    cpu_level = int(
+        levels.get(
+            EVE_SKILL_CPU_MANAGEMENT,
+            0,
+        )
+    )
+    pg_level = int(
+        levels.get(
+            EVE_SKILL_POWER_GRID_MANAGEMENT,
+            0,
+        )
+    )
+    wu_level = int(
+        levels.get(
+            EVE_SKILL_WEAPON_UPGRADES,
+            0,
+        )
+    )
+    awu_level = int(
+        levels.get(
+            EVE_SKILL_ADVANCED_WEAPON_UPGRADES,
+            0,
+        )
+    )
+
+    cpu_output = base.get(
+        "cpu_output"
+    )
+    pg_output = base.get(
+        "power_output"
+    )
+
+    if cpu_output is not None:
+        cpu_output = float(
+            cpu_output
+        ) * (
+            1.0
+            + 0.05 * cpu_level
+        )
+
+    if pg_output is not None:
+        pg_output = float(
+            pg_output
+        ) * (
+            1.0
+            + 0.05 * pg_level
+        )
+
+    cpu_used = 0.0
+    pg_used = 0.0
+    weapon_count = 0
+    complete = True
+
+    for row in snapshot.get(
+        "module_rows",
+        [],
+    ):
+        if not row.get(
+            "dogma_ok"
+        ):
+            complete = False
+
+        cpu_need = float(
+            row.get(
+                "cpu_base",
+                0.0,
+            )
+        )
+        pg_need = float(
+            row.get(
+                "power_base",
+                0.0,
+            )
+        )
+
+        group_name = str(
+            row.get(
+                "group_name",
+                ""
+            )
+        ).casefold()
+
+        if row.get(
+            "weapon_group"
+        ):
+            weapon_count += int(
+                row.get(
+                    "quantity",
+                    1,
+                )
+            )
+            cpu_need *= (
+                1.0
+                - 0.05 * wu_level
+            )
+
+            if (
+                "launcher" in group_name
+                or "turret" in group_name
+            ):
+                pg_need *= (
+                    1.0
+                    - 0.02 * awu_level
+                )
+
+        quantity = int(
+            row.get(
+                "quantity",
+                1,
+            )
+        )
+
+        cpu_used += (
+            cpu_need
+            * quantity
+        )
+        pg_used += (
+            pg_need
+            * quantity
+        )
+
+    cpu_remaining = (
+        float(cpu_output)
+        - cpu_used
+        if cpu_output is not None
+        else None
+    )
+    pg_remaining = (
+        float(pg_output)
+        - pg_used
+        if pg_output is not None
+        else None
+    )
+
+    return {
+        "mode": "character",
+        "cpu_management_level":
+            cpu_level,
+        "power_grid_management_level":
+            pg_level,
+        "weapon_upgrades_level":
+            wu_level,
+        "advanced_weapon_upgrades_level":
+            awu_level,
+        "cpu_used": cpu_used,
+        "cpu_output": cpu_output,
+        "cpu_remaining":
+            cpu_remaining,
+        "cpu_valid": (
+            cpu_remaining is not None
+            and cpu_remaining >= -0.0001
+        ),
+        "power_used": pg_used,
+        "power_output": pg_output,
+        "power_remaining":
+            pg_remaining,
+        "power_valid": (
+            pg_remaining is not None
+            and pg_remaining >= -0.0001
+        ),
+        "weapon_module_count":
+            weapon_count,
+        "data_complete": (
+            bool(
+                base.get(
+                    "cpu_complete"
+                )
+            )
+            and bool(
+                base.get(
+                    "power_complete"
+                )
+            )
+            and complete
+        ),
+        "official_all_v_ready":
+            False,
+    }
+
+
+def freeborn_snapshot_cap_module_modifier(
+    group_name,
+    snapshot,
+    skills_snapshot,
+):
+    group = str(
+        group_name
+        or ""
+    ).casefold()
+
+    cap_mult = 1.0
+    duration_mult = 1.0
+    rule = None
+
+    if "microwarpdrive" in group:
+        level = (
+            freeborn_snapshot_skill_level(
+                snapshot,
+                skills_snapshot,
+                "High Speed Maneuvering",
+            )
+        )
+        cap_mult *= max(
+            0.0,
+            1.0 - 0.05 * level,
+        )
+        rule = (
+            f"High Speed Maneuvering "
+            f"{level}/5"
+        )
+
+    elif "afterburner" in group:
+        level = (
+            freeborn_snapshot_skill_level(
+                snapshot,
+                skills_snapshot,
+                "Afterburner",
+            )
+        )
+        cap_mult *= max(
+            0.0,
+            1.0 - 0.10 * level,
+        )
+        duration_mult *= max(
+            0.01,
+            1.0 - 0.05 * level,
+        )
+        rule = (
+            f"Afterburner {level}/5"
+        )
+
+    elif "shield booster" in group:
+        level = (
+            freeborn_snapshot_skill_level(
+                snapshot,
+                skills_snapshot,
+                "Shield Compensation",
+            )
+        )
+        cap_mult *= max(
+            0.0,
+            1.0 - 0.02 * level,
+        )
+        rule = (
+            f"Shield Compensation {level}/5"
+        )
+
+    elif "turret" in group:
+        level = (
+            freeborn_snapshot_skill_level(
+                snapshot,
+                skills_snapshot,
+                "Controlled Bursts",
+            )
+        )
+        cap_mult *= max(
+            0.0,
+            1.0 - 0.05 * level,
+        )
+        rule = (
+            f"Controlled Bursts {level}/5"
+        )
+
+    return (
+        cap_mult,
+        duration_mult,
+        rule,
+    )
+
+
+def calculate_character_capacitor_from_snapshot(
+    snapshot,
+    skills_snapshot,
+):
+    """
+    Character capacitor profile from persisted module Dogma essentials.
+    """
+    base = snapshot[
+        "capacitor_engine"
+    ]
+
+    cap_management = (
+        freeborn_snapshot_skill_level(
+            snapshot,
+            skills_snapshot,
+            "Capacitor Management",
+        )
+    )
+    cap_systems = (
+        freeborn_snapshot_skill_level(
+            snapshot,
+            skills_snapshot,
+            "Capacitor Systems Operation",
+        )
+    )
+
+    capacity = base.get(
+        "capacity_gj"
+    )
+    recharge = base.get(
+        "recharge_seconds"
+    )
+
+    if capacity is not None:
+        capacity = float(
+            capacity
+        ) * (
+            1.0
+            + 0.05 * cap_management
+        )
+
+    if recharge is not None:
+        recharge = float(
+            recharge
+        ) * max(
+            0.01,
+            1.0
+            - 0.05 * cap_systems,
+        )
+
+    drain = 0.0
+    consumers = 0
+    unresolved = 0
+    modified = 0
+
+    for row in snapshot.get(
+        "module_rows",
+        [],
+    ):
+        quantity = int(
+            row.get(
+                "quantity",
+                1,
+            )
+        )
+
+        if not row.get(
+            "dogma_ok"
+        ):
+            unresolved += quantity
+            continue
+
+        cap_need = row.get(
+            "cap_need"
+        )
+        duration_ms = row.get(
+            "duration_ms"
+        )
+
+        if (
+            cap_need is None
+            or float(cap_need) <= 0
+        ):
+            continue
+
+        if (
+            duration_ms is None
+            or float(duration_ms) <= 0
+        ):
+            unresolved += quantity
+            continue
+
+        (
+            cap_mult,
+            duration_mult,
+            rule,
+        ) = (
+            freeborn_snapshot_cap_module_modifier(
+                row.get(
+                    "group_name"
+                ),
+                snapshot,
+                skills_snapshot,
+            )
+        )
+
+        if rule:
+            modified += quantity
+
+        adjusted_need = (
+            float(cap_need)
+            * cap_mult
+        )
+        adjusted_duration = (
+            float(duration_ms)
+            * duration_mult
+        )
+
+        if adjusted_duration <= 0:
+            unresolved += quantity
+            continue
+
+        drain += (
+            adjusted_need
+            / (
+                adjusted_duration
+                / 1000.0
+            )
+            * quantity
+        )
+        consumers += quantity
+
+    peak = (
+        2.5
+        * float(capacity)
+        / float(recharge)
+        if (
+            capacity is not None
+            and recharge not in (
+                None,
+                0,
+            )
+        )
+        else None
+    )
+
+    net_peak = (
+        float(peak) - drain
+        if peak is not None
+        else None
+    )
+
+    continuous = (
+        freeborn_capacitor_continuous_state(
+            capacity,
+            recharge,
+            drain,
+        )
+    )
+
+    return {
+        "mode": "character",
+        "capacitor_management_level":
+            cap_management,
+        "capacitor_systems_operation_level":
+            cap_systems,
+        "capacity_gj": capacity,
+        "recharge_seconds": recharge,
+        "peak_recharge_gjs": peak,
+        "active_drain_gjs": drain,
+        "net_peak_gjs": net_peak,
+        "consumer_count": consumers,
+        "modified_module_count":
+            modified,
+        "unresolved_count":
+            unresolved,
+        "complete":
+            unresolved == 0,
+        "continuous_stable":
+            continuous["stable"],
+        "equilibrium_percent":
+            continuous[
+                "equilibrium_percent"
+            ],
+        "cap_out_seconds":
+            continuous[
+                "cap_out_seconds"
+            ],
+    }
+
+
+def calculate_character_velocity_from_snapshot(
+    snapshot,
+    skills_snapshot,
+):
+    """
+    Character propulsion result from the persisted ALL V/static propulsion
+    data. No EVE static endpoint is touched.
+    """
+    all_v = snapshot[
+        "all_v_velocity"
+    ]
+
+    navigation = (
+        freeborn_snapshot_skill_level(
+            snapshot,
+            skills_snapshot,
+            "Navigation",
+        )
+    )
+    acceleration = (
+        freeborn_snapshot_skill_level(
+            snapshot,
+            skills_snapshot,
+            "Acceleration Control",
+        )
+    )
+
+    base_velocity = all_v.get(
+        "base_velocity_ms"
+    )
+
+    velocity_off = (
+        float(base_velocity)
+        * (
+            1.0
+            + 0.05 * navigation
+        )
+        if base_velocity is not None
+        else None
+    )
+
+    active_velocity = None
+
+    active_propulsion = all_v.get(
+        "active_propulsion"
+    )
+    active_mass = all_v.get(
+        "active_mass_kg"
+    )
+    effective_thrust = all_v.get(
+        "effective_thrust_n"
+    )
+
+    if (
+        velocity_off is not None
+        and active_propulsion
+        and active_mass
+        and effective_thrust
+    ):
+        speed_factor = (
+            active_propulsion.get(
+                "speed_factor"
+            )
+        )
+
+        if speed_factor is not None:
+            effective_bonus = (
+                float(speed_factor)
+                / 100.0
+            ) * (
+                1.0
+                + 0.05 * acceleration
+            )
+
+            active_velocity = (
+                float(velocity_off)
+                * (
+                    1.0
+                    + (
+                        effective_bonus
+                        * float(
+                            effective_thrust
+                        )
+                        / float(
+                            active_mass
+                        )
+                    )
+                )
+            )
+
+    return {
+        "mode": "character",
+        "navigation_level":
+            navigation,
+        "acceleration_control_level":
+            acceleration,
+        "base_velocity_ms":
+            base_velocity,
+        "base_mass_kg":
+            all_v.get(
+                "base_mass_kg"
+            ),
+        "mass_addition_kg":
+            all_v.get(
+                "mass_addition_kg"
+            ),
+        "active_mass_kg":
+            active_mass,
+        "propulsion_off_velocity_ms":
+            velocity_off,
+        "propulsion_active_velocity_ms":
+            active_velocity,
+        "active_propulsion":
+            active_propulsion,
+        "effective_propulsion_bonus":
+            None,
+        "effective_thrust_n":
+            effective_thrust,
+        "raw_propulsion_thrust":
+            all_v.get(
+                "raw_propulsion_thrust"
+            ),
+        "raw_to_effective_thrust_ratio":
+            all_v.get(
+                "raw_to_effective_thrust_ratio"
+            ),
+        "thrust_source":
+            all_v.get(
+                "thrust_source"
+            ),
+    }
+
+
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4Q-C
+    FREEBORN FITTINGS — Phase 4R-C
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -10472,23 +11519,62 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     status = str(fit.get("status") or "proposed").lower()
 
     creator_display = creator_id or "Créateur inconnu"
-    try:
-        member = get_discord_member(
-            str(fit.get("guild_id") or DISCORD_GUILD_ID),
-            creator_id,
-        )
-        if member:
-            user = member.get("user") or {}
-            creator_display = (
-                member.get("nick")
-                or user.get("global_name")
-                or user.get("username")
-                or creator_display
-            )
-    except Exception as error:
-        print("Freeborn Fittings creator lookup failed:", repr(error))
 
-    safe_creator = escape(str(creator_display))
+    existing_snapshot = (
+        fit.get("technical_snapshot")
+        if freeborn_technical_snapshot_valid(
+            fit
+        )
+        else None
+    )
+
+    cached_creator_display = (
+        existing_snapshot.get(
+            "creator_display"
+        )
+        if isinstance(
+            existing_snapshot,
+            dict,
+        )
+        else None
+    )
+
+    if cached_creator_display:
+        creator_display = str(
+            cached_creator_display
+        )
+    else:
+        try:
+            member = get_discord_member(
+                str(
+                    fit.get("guild_id")
+                    or DISCORD_GUILD_ID
+                ),
+                creator_id,
+            )
+            if member:
+                user = member.get(
+                    "user"
+                ) or {}
+                creator_display = (
+                    member.get("nick")
+                    or user.get(
+                        "global_name"
+                    )
+                    or user.get(
+                        "username"
+                    )
+                    or creator_display
+                )
+        except Exception as error:
+            print(
+                "Freeborn Fittings creator lookup failed:",
+                repr(error),
+            )
+
+    safe_creator = escape(
+        str(creator_display)
+    )
 
     raw_fit_ref = format_fit_reference(fit["fit_id"])
 
@@ -10555,7 +11641,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4R-B — FITTING / CAP / VITESSE</div>
+              <div class="pilot-engine-title">MOTEUR 4R-C — FITTING / CAP / VITESSE</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -10687,28 +11773,26 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     eft_sections = parse_eft_web_sections(
         fit.get("eft_text")
     )
-    all_eft_items = (
-        eft_sections["low"]
-        + eft_sections["mid"]
-        + eft_sections["high"]
-        + eft_sections["rigs"]
-        + eft_sections["extras"]
-    )
-    eft_type_ids = resolve_eve_inventory_type_ids(all_eft_items)
-
-    prefetch_eve_static_type_data(
-        list(eft_type_ids.values())
-        + [fit.get("ship_type_id")],
-        max_workers=8,
+    technical_snapshot = (
+        ensure_freeborn_technical_snapshot(
+            fit,
+            creator_display=creator_display,
+        )
     )
 
-    if pilot_profile:
-        prefetch_freeborn_fitting_skill_ids()
+    eft_type_ids = {
+        str(key): int(value)
+        for key, value
+        in technical_snapshot.get(
+            "eft_type_ids",
+            {},
+        ).items()
+    }
 
-    base_resources = calculate_base_fitting_resources(
-        fit.get("ship_type_id"),
-        eft_sections,
-        eft_type_ids,
+    base_resources = dict(
+        technical_snapshot[
+            "base_resources"
+        ]
     )
     cpu_value = escape(
         format_fitting_resource_value(
@@ -10727,8 +11811,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
     )
 
-    base_velocity = get_ship_base_max_velocity(
-        fit.get("ship_type_id")
+    base_velocity = (
+        technical_snapshot.get(
+            "base_velocity"
+        )
     )
 
     velocity_value = escape(
@@ -10742,11 +11828,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         "Navigation et effets AB/MWD ne sont pas appliqués à cette valeur."
     )
 
-    all_v_velocity = calculate_skill_aware_velocity(
-        fit.get("ship_type_id"),
-        mode="all_v",
-        eft_sections=eft_sections,
-        type_ids=eft_type_ids,
+    all_v_velocity = dict(
+        technical_snapshot[
+            "all_v_velocity"
+        ]
     )
 
     propulsion_probe = (
@@ -10780,10 +11865,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     # The main telemetry remains BASE while the engine audits cyclic module
     # consumption. We expose peak passive recharge but do not invent final
     # stability for conditional/special capacitor mechanics.
-    capacitor_engine = calculate_base_capacitor_engine(
-        fit.get("ship_type_id"),
-        eft_sections,
-        eft_type_ids,
+    capacitor_engine = dict(
+        technical_snapshot[
+            "capacitor_engine"
+        ]
     )
     capacitor_capacity = capacitor_engine["capacity_gj"]
     capacitor_recharge_seconds = capacitor_engine["recharge_seconds"]
@@ -10886,11 +11971,10 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         if row.get("resolved")
     )
 
-    all_v_cap = calculate_skill_aware_capacitor(
-        fit.get("ship_type_id"),
-        eft_sections,
-        eft_type_ids,
-        mode="all_v",
+    all_v_cap = dict(
+        technical_snapshot[
+            "all_v_cap"
+        ]
     )
 
     all_v_cap_capacity = escape(
@@ -10952,19 +12036,19 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     character_cap = None
 
     if pilot_profile:
-        character_cap = calculate_skill_aware_capacitor(
-            fit.get("ship_type_id"),
-            eft_sections,
-            eft_type_ids,
-            mode="character",
-            skills_snapshot=pilot_profile.get("skills_snapshot") or [],
+        character_cap = (
+            calculate_character_capacitor_from_snapshot(
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
         )
 
-    all_v_core = calculate_skill_aware_fitting_resources(
-        fit.get("ship_type_id"),
-        eft_sections,
-        eft_type_ids,
-        mode="all_v",
+    all_v_core = dict(
+        technical_snapshot[
+            "all_v_core"
+        ]
     )
 
     all_v_cpu_pair = escape(
@@ -11011,20 +12095,22 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     character_velocity = None
 
     if pilot_profile:
-        character_velocity = calculate_skill_aware_velocity(
-            fit.get("ship_type_id"),
-            mode="character",
-            skills_snapshot=pilot_profile.get("skills_snapshot") or [],
-            eft_sections=eft_sections,
-            type_ids=eft_type_ids,
+        character_velocity = (
+            calculate_character_velocity_from_snapshot(
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
         )
 
-        character_core = calculate_skill_aware_fitting_resources(
-            fit.get("ship_type_id"),
-            eft_sections,
-            eft_type_ids,
-            mode="character",
-            skills_snapshot=pilot_profile.get("skills_snapshot") or [],
+        character_core = (
+            calculate_character_resources_from_snapshot(
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
         )
 
         pilot_compat = (
@@ -12030,7 +13116,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4R-B</strong>
+            <strong>ALL V — VALIDATION 4R-C</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -12138,7 +13224,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4R-B</span>
+    <span class="version">Freeborn Legacy • Fittings 4R-C</span>
   </footer>
 </main>
 
