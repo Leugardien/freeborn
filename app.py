@@ -384,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P3-VALIDATE-DISCORD + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P3B-FORUM-TAGS + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -5765,6 +5765,256 @@ def freeborn_market_build_discord_embed(
     }
 
 
+def freeborn_market_normalize_forum_tag_name(value):
+    """
+    Normalize Discord forum tag names for robust matching.
+    """
+    normalized = str(
+        value
+        or ""
+    ).strip().casefold()
+
+    replacements = {
+        "é": "e",
+        "è": "e",
+        "ê": "e",
+        "ë": "e",
+        "à": "a",
+        "â": "a",
+        "ä": "a",
+        "î": "i",
+        "ï": "i",
+        "ô": "o",
+        "ö": "o",
+        "ù": "u",
+        "û": "u",
+        "ü": "u",
+        "ç": "c",
+    }
+
+    for source, target in replacements.items():
+        normalized = normalized.replace(
+            source,
+            target,
+        )
+
+    normalized = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        normalized,
+    )
+
+    return " ".join(
+        normalized.split()
+    )
+
+
+def freeborn_market_select_forum_tags(
+    channel,
+    market_context,
+):
+    """
+    Select Discord Forum tags automatically.
+
+    Priority:
+      1. BUY/SELL business tag.
+      2. CORP tag for corporation orders.
+      3. Generic OPEN tag when available.
+      4. If the forum requires at least one tag and none of our semantic
+         matches exists, use the first available tag as a technical fallback
+         instead of making the whole Market transaction fail.
+
+    No tag IDs are hard-coded: Freeborn reads the forum's current
+    `available_tags` from Discord every time.
+    """
+    available_tags = (
+        channel.get(
+            "available_tags"
+        )
+        or []
+    )
+
+    require_tag = bool(
+        channel.get(
+            "flags",
+            0
+        )
+        & (1 << 4)
+    )
+
+    # Discord may enforce tags even if clients/API expose the state
+    # differently, so we also use the presence of available tags as a
+    # fallback signal when the API later answers code 40067.
+    normalized_tags = []
+
+    for tag in available_tags:
+        tag_id = str(
+            tag.get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        tag_name = str(
+            tag.get(
+                "name"
+            )
+            or ""
+        ).strip()
+
+        if not tag_id:
+            continue
+
+        normalized_tags.append({
+            "id":
+                tag_id,
+            "name":
+                tag_name,
+            "normalized":
+                freeborn_market_normalize_forum_tag_name(
+                    tag_name
+                ),
+        })
+
+    is_buy = (
+        market_context.get(
+            "order_type"
+        )
+        == "buy"
+    )
+
+    is_corp = (
+        market_context.get(
+            "owner_scope"
+        )
+        == "corporation"
+    )
+
+    operation_aliases = (
+        {
+            "achat",
+            "buy",
+            "buy order",
+            "demande achat",
+        }
+        if is_buy
+        else {
+            "vente",
+            "sell",
+            "sell order",
+            "offre vente",
+        }
+    )
+
+    corp_aliases = {
+        "corp",
+        "corporation",
+        "corporate",
+        "corpo",
+    }
+
+    open_aliases = {
+        "ouvert",
+        "ouverte",
+        "open",
+        "en cours",
+        "actif",
+        "active",
+    }
+
+    selected = []
+
+    def add_first_matching(
+        aliases,
+    ):
+        for tag in normalized_tags:
+            if tag["id"] in selected:
+                continue
+
+            if tag["normalized"] in aliases:
+                selected.append(
+                    tag["id"]
+                )
+                return tag
+
+        return None
+
+    operation_tag = add_first_matching(
+        operation_aliases
+    )
+
+    corp_tag = None
+
+    if is_corp:
+        corp_tag = add_first_matching(
+            corp_aliases
+        )
+
+    open_tag = add_first_matching(
+        open_aliases
+    )
+
+    # Forum posts support several applied tags. Keep the post readable and
+    # deterministic; BUY/SELL + CORP + OPEN is enough.
+    selected = selected[:3]
+
+    if (
+        not selected
+        and available_tags
+    ):
+        # We prefer keeping the transaction alive over a 40067 failure.
+        # The log makes the fallback visible so the forum tags can later be
+        # renamed/configured cleanly.
+        fallback_id = str(
+            available_tags[0].get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        if fallback_id:
+            selected = [
+                fallback_id
+            ]
+
+            print(
+                "Freeborn Market forum tag fallback [P3B]:",
+                "using first available tag",
+                available_tags[0].get(
+                    "name"
+                ),
+                fallback_id,
+            )
+
+    print(
+        "Freeborn Market forum tags [P3B]:",
+        {
+            "require_tag":
+                require_tag,
+            "available":
+                [
+                    (
+                        tag["name"],
+                        tag["id"],
+                    )
+                    for tag in normalized_tags
+                ],
+            "selected":
+                selected,
+            "operation":
+                "BUY"
+                if is_buy
+                else "SELL",
+            "scope":
+                "CORP"
+                if is_corp
+                else "MEMBER",
+        },
+    )
+
+    return selected
+
+
 def freeborn_market_publish_discord(
     market_id,
     market_context,
@@ -5844,20 +6094,34 @@ def freeborn_market_publish_discord(
         },
     }
 
+    applied_tags = (
+        freeborn_market_select_forum_tags(
+            channel,
+            market_context,
+        )
+    )
+
+    thread_payload = {
+        "name":
+            thread_name,
+        "auto_archive_duration":
+            10080,
+        "message":
+            message_payload,
+    }
+
+    if applied_tags:
+        thread_payload[
+            "applied_tags"
+        ] = applied_tags
+
     response = requests.post(
         (
             f"{DISCORD_API}/channels/"
             f"{target_channel_id}/threads"
         ),
         headers=discord_bot_headers(),
-        json={
-            "name":
-                thread_name,
-            "auto_archive_duration":
-                10080,
-            "message":
-                message_payload,
-        },
+        json=thread_payload,
         timeout=15,
     )
 
@@ -5865,6 +6129,29 @@ def freeborn_market_publish_discord(
         200,
         201,
     }:
+        if (
+            response.status_code == 400
+            and "40067" in response.text
+        ):
+            print(
+                "Freeborn Market forum tag rejection [P3B]:",
+                "channel=",
+                target_channel_id,
+                "applied_tags=",
+                applied_tags,
+                "available_tags=",
+                [
+                    (
+                        tag.get("name"),
+                        tag.get("id"),
+                    )
+                    for tag in (
+                        channel.get("available_tags")
+                        or []
+                    )
+                ],
+            )
+
         raise RuntimeError(
             "Freeborn Market forum publication failed "
             f"({response.status_code}): "
