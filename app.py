@@ -263,6 +263,16 @@ FITTING_CREATOR_ROLE_IDS = configured_role_ids(
     DISCORD_CEO_ROLE_ID,
 )
 
+# Editing follows the proposal chain:
+# - original authorized creator while the fit is still PROPOSED
+# - CEO override on every fit
+FITTING_EDITOR_ROLE_IDS = configured_role_ids(
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
 # Final corporate authority: approve, reject and permanently delete = CEO only.
 FITTING_MANAGER_ROLE_IDS = configured_role_ids(
     DISCORD_CEO_ROLE_ID,
@@ -3846,6 +3856,263 @@ def can_delete_fit(data, fit):
     return interaction_has_any_role(data, FITTING_MANAGER_ROLE_IDS)
 
 
+
+def can_edit_fit(data, fit):
+    """
+    Central 4T-B edit policy.
+
+    CEO:
+      - may edit any fit.
+
+    Fleet Commander / Direction / High Council:
+      - must still hold an editor role;
+      - may edit only a fit they originally created;
+      - fit must still be PROPOSED.
+    """
+    if not fit:
+        return False
+
+    try:
+        actor_user_id = str(
+            data["member"]["user"]["id"]
+        )
+    except (KeyError, TypeError):
+        return False
+
+    # CEO override.
+    if interaction_has_any_role(
+        data,
+        FITTING_MANAGER_ROLE_IDS,
+    ):
+        return True
+
+    # Other authorized proposers must still hold the relevant role.
+    if not interaction_has_any_role(
+        data,
+        FITTING_EDITOR_ROLE_IDS,
+    ):
+        return False
+
+    if str(
+        fit.get(
+            "created_by_discord_user_id"
+        )
+        or ""
+    ) != actor_user_id:
+        return False
+
+    return (
+        str(
+            fit.get("status")
+            or ""
+        ).lower()
+        == "proposed"
+    )
+
+
+def update_fit_existing(
+    guild_id,
+    fit_id,
+    fit_name,
+    usage,
+    eft_text,
+    notes=None,
+):
+    """
+    Update ONE existing fitting record.
+
+    The fit_id / FREE-xxxx is preserved.
+    Technical snapshot is cleared because EFT/ship/resources may have changed.
+    Any edited non-proposed fit is reopened as PROPOSED so corporate approval
+    always applies to the latest revision.
+    """
+    parsed = parse_eft_header(
+        eft_text
+    )
+
+    clean_name = (
+        str(fit_name or "").strip()
+        or parsed["eft_fit_name"]
+    )
+    clean_usage = str(
+        usage or ""
+    ).strip()
+    clean_notes = (
+        str(notes or "").strip()
+        or None
+    )
+
+    if not clean_name:
+        raise ValueError(
+            "Le nom du fit est obligatoire."
+        )
+
+    if not clean_usage:
+        raise ValueError(
+            "L'usage du fit est obligatoire."
+        )
+
+    ship_type_id = (
+        resolve_eve_inventory_type_id(
+            parsed["ship_name"]
+        )
+    )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET
+                    name = %s,
+                    ship_name = %s,
+                    ship_type_id = %s,
+                    usage = %s,
+                    eft_text = %s,
+                    notes = %s,
+                    status = 'proposed',
+                    updated_at = NOW(),
+                    technical_snapshot = NULL,
+                    technical_snapshot_version = NULL,
+                    technical_snapshot_updated_at = NULL
+                WHERE guild_id = %s
+                AND fit_id = %s
+                RETURNING
+                    fit_id,
+                    name,
+                    ship_name,
+                    ship_type_id,
+                    usage,
+                    notes,
+                    status,
+                    created_by_discord_user_id;
+                """,
+                (
+                    clean_name,
+                    parsed["ship_name"],
+                    ship_type_id,
+                    clean_usage,
+                    parsed["normalized_eft"],
+                    clean_notes,
+                    str(guild_id),
+                    int(fit_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    if not row:
+        return None
+
+    return {
+        "fit_id": int(row[0]),
+        "name": row[1],
+        "ship_name": row[2],
+        "ship_type_id": row[3],
+        "usage": row[4],
+        "notes": row[5],
+        "status": row[6],
+        "created_by_discord_user_id": row[7],
+    }
+
+
+def build_fit_edit_modal(fit):
+    """
+    Discord modal pre-filled with the current values of ONE existing fit.
+    """
+    fit_id = int(
+        fit["fit_id"]
+    )
+
+    return {
+        "type": 9,
+        "data": {
+            "custom_id":
+                f"freeborn_fit_edit_v1:{fit_id}",
+            "title":
+                f"Modifier {format_fit_reference(fit_id)}",
+            "components": [
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "fit_name",
+                            "label": "Nom du fit",
+                            "style": 1,
+                            "min_length": 1,
+                            "max_length": 80,
+                            "required": True,
+                            "value": str(
+                                fit.get("name")
+                                or ""
+                            )[:80],
+                        }
+                    ],
+                },
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "fit_usage",
+                            "label": "Usage",
+                            "style": 1,
+                            "min_length": 1,
+                            "max_length": 40,
+                            "required": True,
+                            "value": str(
+                                fit.get("usage")
+                                or ""
+                            )[:40],
+                        }
+                    ],
+                },
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "fit_eft",
+                            "label": "Copier-coller EFT",
+                            "style": 2,
+                            "min_length": 3,
+                            "max_length": 4000,
+                            "required": True,
+                            "value": str(
+                                fit.get("eft_text")
+                                or ""
+                            )[:4000],
+                        }
+                    ],
+                },
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "fit_notes",
+                            "label":
+                                "Notes du créateur (facultatif)",
+                            "style": 2,
+                            "max_length": 1000,
+                            "required": False,
+                            "value": str(
+                                fit.get("notes")
+                                or ""
+                            )[:1000],
+                        }
+                    ],
+                },
+            ],
+        },
+    }
+
+
 def set_fit_status(guild_id, fit_id, status):
     allowed_statuses = {"proposed", "approved", "rejected", "archived"}
     clean_status = str(status or "").lower()
@@ -3921,56 +4188,216 @@ def modal_values(data):
 
 
 def handle_fit_modal_submit(data):
-    custom_id = str((data.get("data") or {}).get("custom_id") or "")
+    custom_id = str(
+        (data.get("data") or {}).get(
+            "custom_id"
+        )
+        or ""
+    )
 
-    if custom_id != "freeborn_fit_create_v1":
+    is_create = (
+        custom_id
+        == "freeborn_fit_create_v1"
+    )
+    is_edit = custom_id.startswith(
+        "freeborn_fit_edit_v1:"
+    )
+
+    if not (
+        is_create
+        or is_edit
+    ):
         return jsonify({
             "type": 4,
             "data": {
-                "content": "❌ Formulaire Freeborn inconnu.",
+                "content":
+                    "❌ Formulaire Freeborn inconnu.",
                 "flags": 64,
             },
         })
 
     try:
-        discord_user_id = str(data["member"]["user"]["id"])
-        guild_id = str(data["guild_id"])
+        discord_user_id = str(
+            data["member"]["user"]["id"]
+        )
+        guild_id = str(
+            data["guild_id"]
+        )
     except (KeyError, TypeError):
         return jsonify({
             "type": 4,
             "data": {
-                "content": "❌ Impossible d'identifier le membre ou le serveur.",
+                "content":
+                    "❌ Impossible d'identifier le membre ou le serveur.",
                 "flags": 64,
             },
         })
 
-    if guild_id != str(DISCORD_GUILD_ID):
+    if guild_id != str(
+        DISCORD_GUILD_ID
+    ):
         return jsonify({
             "type": 4,
             "data": {
-                "content": "❌ Cette action est réservée à Freeborn Legacy.",
+                "content":
+                    "❌ Cette action est réservée à Freeborn Legacy.",
                 "flags": 64,
             },
         })
 
-    if not interaction_has_any_role(data, FITTING_CREATOR_ROLE_IDS):
+    values = modal_values(
+        data
+    )
+
+    # --------------------------------------------------------
+    # CREATE
+    # --------------------------------------------------------
+    if is_create:
+        if not interaction_has_any_role(
+            data,
+            FITTING_CREATOR_ROLE_IDS,
+        ):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Accès refusé**\n\n"
+                        "La proposition de fittings est réservée aux "
+                        "Fleet Commanders, à la Direction, au Haut Conseil "
+                        "et au CEO."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        try:
+            saved = save_fit_phase1(
+                guild_id,
+                discord_user_id,
+                values.get("fit_name"),
+                values.get("fit_usage"),
+                values.get("fit_eft"),
+                values.get("fit_notes"),
+            )
+        except ValueError as error:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        f"❌ **Fit non enregistré**\n\n{error}",
+                    "flags": 64,
+                },
+            })
+        except Exception as error:
+            print(
+                "Freeborn Fittings save failed:",
+                repr(error),
+            )
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⚠️ **Erreur d'enregistrement**\n\n"
+                        "Le fit n'a pas pu être enregistré dans la base."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        fit = get_fit(
+            guild_id,
+            saved["fit_id"],
+        )
+
         return jsonify({
             "type": 4,
             "data": {
                 "content": (
-                    "⛔ **Accès refusé**\n\n"
-                    "La proposition de fittings est réservée aux Fleet Commanders, à la Direction, au Haut Conseil et au CEO."
+                    f"✅ **{format_fit_reference(saved['fit_id'])} "
+                    "enregistré dans Freeborn.**\n"
+                    "La fiche ci-dessous peut maintenant être partagée "
+                    "avec la corporation."
+                ),
+                "embeds": [
+                    build_fit_embed(fit)
+                ],
+                "components":
+                    build_fit_components(
+                        saved["fit_id"],
+                        guild_id,
+                    ),
+                "flags": 64,
+            },
+        })
+
+    # --------------------------------------------------------
+    # EDIT EXISTING — SAME FREE-xxxx
+    # --------------------------------------------------------
+    try:
+        fit_id = int(
+            custom_id.split(
+                ":",
+                1,
+            )[1]
+        )
+    except (
+        ValueError,
+        IndexError,
+    ):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "❌ Référence de fitting invalide.",
+                "flags": 64,
+            },
+        })
+
+    fit = get_fit(
+        guild_id,
+        fit_id,
+    )
+
+    if not fit:
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"❌ {format_fit_reference(fit_id)} "
+                    "n'existe plus dans Freeborn."
                 ),
                 "flags": 64,
             },
         })
 
-    values = modal_values(data)
+    # Re-check permission on submit, not only when the modal was opened.
+    if not can_edit_fit(
+        data,
+        fit,
+    ):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    "⛔ **Modification refusée**\n\n"
+                    "Un Fleet Commander, Directeur ou membre du Haut Conseil "
+                    "peut modifier uniquement sa propre proposition tant "
+                    "qu'elle est au statut PROPOSÉ. Le CEO peut modifier "
+                    "n'importe quel fitting."
+                ),
+                "flags": 64,
+            },
+        })
+
+    previous_status = str(
+        fit.get("status")
+        or "proposed"
+    ).lower()
 
     try:
-        saved = save_fit_phase1(
+        updated = update_fit_existing(
             guild_id,
-            discord_user_id,
+            fit_id,
             values.get("fit_name"),
             values.get("fit_usage"),
             values.get("fit_eft"),
@@ -3980,34 +4407,69 @@ def handle_fit_modal_submit(data):
         return jsonify({
             "type": 4,
             "data": {
-                "content": f"❌ **Fit non enregistré**\n\n{error}",
+                "content":
+                    f"❌ **Fit non modifié**\n\n{error}",
                 "flags": 64,
             },
         })
     except Exception as error:
-        print("Freeborn Fittings save failed:", repr(error))
+        print(
+            "Freeborn Fittings update failed:",
+            repr(error),
+        )
         return jsonify({
             "type": 4,
             "data": {
                 "content": (
-                    "⚠️ **Erreur d'enregistrement**\n\n"
-                    "Le fit n'a pas pu être enregistré dans la base."
+                    "⚠️ **Erreur de modification**\n\n"
+                    "Le fitting existant n'a pas pu être mis à jour."
                 ),
                 "flags": 64,
             },
         })
 
-    fit = get_fit(guild_id, saved["fit_id"])
+    if not updated:
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "❌ Le fitting n'existe plus dans Freeborn.",
+                "flags": 64,
+            },
+        })
+
+    refreshed_fit = get_fit(
+        guild_id,
+        fit_id,
+    )
+
+    reopened_note = (
+        "\n\nℹ️ La modification a replacé le fit au statut **PROPOSÉ** "
+        "afin que l'approbation porte toujours sur la dernière version."
+        if previous_status
+        != "proposed"
+        else ""
+    )
 
     return jsonify({
         "type": 4,
         "data": {
             "content": (
-                f"✅ **{format_fit_reference(saved['fit_id'])} enregistré dans Freeborn.**\n"
-                "La fiche ci-dessous peut maintenant être partagée avec la corporation."
+                f"✏️ **{format_fit_reference(fit_id)} mis à jour.**\n\n"
+                "Le même identifiant Freeborn est conservé : "
+                "aucune nouvelle fiche n'a été créée."
+                f"{reopened_note}"
             ),
-            "embeds": [build_fit_embed(fit)],
-            "components": build_fit_components(saved["fit_id"], guild_id),
+            "embeds": [
+                build_fit_embed(
+                    refreshed_fit
+                )
+            ],
+            "components":
+                build_fit_components(
+                    fit_id,
+                    guild_id,
+                ),
             "flags": 64,
         },
     })
@@ -16900,7 +17362,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
     <button class="action" type="button" onclick="toggleEft()">▣ Afficher EFT</button>
     <button class="action" type="button" onclick="copyEft()">▤ Copier EFT</button>
     <button class="action blue" type="button" onclick="exportEft()">⇩ Exporter EFT</button>
-    <button class="action blue" type="button" disabled title="Disponible après authentification Discord">✎ Modifier</button>
+    <button class="action blue" type="button" onclick="copyEditCommand()" title="Copier la commande Discord de modification">✎ Modifier</button>
     <button class="action green" type="button" disabled title="Validation Web prévue après authentification Discord">✓ Approuver / Refuser</button>
   </nav>
 
@@ -16917,7 +17379,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-L3</span>
+    <span class="version">Freeborn Legacy • Fittings 4T-B</span>
   </footer>
 </main>
 
@@ -16986,6 +17448,22 @@ document.addEventListener(
   'DOMContentLoaded',
   colorPilotDeltas
 );
+
+function copyEditCommand() {{
+  const command = `/fit-modifier ref:${fitRef}`;
+
+  navigator.clipboard.writeText(command).then(() => {{
+    const toast = document.getElementById('toast');
+    toast.textContent = 'Commande /fit-modifier copiée';
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 1800);
+  }}).catch(() => {{
+    window.prompt(
+      'Copie cette commande dans Discord :',
+      command
+    );
+  }});
+}}
 
 function toggleEft() {{
   document.getElementById('eftPanel').classList.toggle('open');
@@ -17522,6 +18000,76 @@ def interactions():
                 "flags": 64,
             },
         })
+
+    # ========================================================
+    # /fit-modifier — FREEBORN FITTINGS
+    # Update the SAME database record / SAME FREE-xxxx.
+    # ========================================================
+
+    if command_name == "fit-modifier":
+        fit_ref = None
+
+        for option in data["data"].get(
+            "options",
+            [],
+        ):
+            if option.get("name") == "ref":
+                fit_ref = option.get("value")
+                break
+
+        try:
+            fit_id = parse_fit_reference(
+                fit_ref
+            )
+        except ValueError as error:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        f"❌ {error}",
+                    "flags": 64,
+                },
+            })
+
+        fit = get_fit(
+            guild_id,
+            fit_id,
+        )
+
+        if not fit:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"❌ {format_fit_reference(fit_id)} "
+                        "n'existe pas dans Freeborn."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        if not can_edit_fit(
+            data,
+            fit,
+        ):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Modification refusée**\n\n"
+                        "Fleet Commander / Direction / Haut Conseil : "
+                        "uniquement leur propre fit encore PROPOSÉ.\n"
+                        "CEO : modification autorisée sur tous les fits."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        return jsonify(
+            build_fit_edit_modal(
+                fit
+            )
+        )
 
     # ========================================================
     # /fit-supprimer — FREEBORN FITTINGS
@@ -21575,6 +22123,27 @@ def register_commands():
 
         {
             "name":
+                "fit-modifier",
+
+            "description":
+                "Modifier un fitting existant sans changer son FREE-xxxx",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type": 3,
+                    "name": "ref",
+                    "description":
+                        "Référence du fit (ex. FREE-0001)",
+                    "required": True,
+                }
+            ],
+        },
+
+        {
+            "name":
                 "fit-approuver",
 
             "description":
@@ -22084,7 +22653,7 @@ def register_commands():
 
             print(
                 "Commandes Discord enregistrées : "
-                "/freeborn, /fit-creer, /fit-liste, /fit-afficher, /fit-approuver, /fit-refuser, /fit-supprimer, "
+                "/freeborn, /fit-creer, /fit-liste, /fit-afficher, /fit-modifier, /fit-approuver, /fit-refuser, /fit-supprimer, "
                 "/guide-membre, /guide-staff, /verification, "
                 "/alt-ajouter, /alt-supprimer, /main-changer, "
                 "/membre-info, /membre-liste, "
