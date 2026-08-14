@@ -383,7 +383,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2F-JITA-DATETIME + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2G-UI-FINAL + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -5052,7 +5052,8 @@ html,body{{min-height:100%}}
 body{{
   margin:0;
   color:var(--text);
-  font-family:"Arial Narrow","Roboto Condensed",Arial,sans-serif;
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-weight:400;
   background:
     linear-gradient(rgba(1,8,15,.78),rgba(1,8,15,.88)),
     url('/assets/bg-space.jpg') center/cover fixed no-repeat,
@@ -5094,9 +5095,9 @@ button,input{{font:inherit}}
 }}
 .brand h1{{
   margin:0;
-  font-size:34px;
-  letter-spacing:2.2px;
-  font-weight:600;
+  font-size:32px;
+  letter-spacing:2.5px;
+  font-weight:500;
 }}
 .brand h1 span{{color:var(--gold)}}
 .brand p{{
@@ -5147,8 +5148,9 @@ button,input{{font:inherit}}
   padding:6px 10px;
   border-bottom:1px solid rgba(32,143,194,.38);
   text-transform:uppercase;
-  letter-spacing:1px;
-  font-weight:800;
+  letter-spacing:1.1px;
+  font-size:14px;
+  font-weight:600;
 }}
 .panel-title .code{{
   margin-left:auto;
@@ -5193,7 +5195,7 @@ button,input{{font:inherit}}
   background:#041522;
   color:#70ddff;
   cursor:pointer;
-  font-weight:900;
+  font-weight:600;
 }}
 .adjust-control input{{
   height:38px;
@@ -5205,7 +5207,7 @@ button,input{{font:inherit}}
   background:#020a11;
   color:#fff;
   text-align:center;
-  font-weight:800;
+  font-weight:500;
 }}
 .adjust-control .pct{{
   height:38px;
@@ -5225,14 +5227,14 @@ button,input{{font:inherit}}
   color:var(--gold);
   background:rgba(240,195,91,.04);
   font-size:12px;
-  font-weight:800;
+  font-weight:600;
 }}
 .lines{{
   padding:0 12px 12px;
 }}
 .line-head,.market-row{{
   display:grid;
-  grid-template-columns:34px minmax(240px,1fr) 76px 145px 145px 160px 40px;
+  grid-template-columns:32px minmax(220px,1fr) 112px 165px 165px 185px 38px;
   gap:7px;
   align-items:center;
 }}
@@ -5266,6 +5268,9 @@ button,input{{font:inherit}}
   background:#020a12;
   color:#f2fbff;
   outline:none;
+  font-size:13px;
+  font-weight:400;
+  letter-spacing:.1px;
 }}
 .item-input:focus{{
   border-color:#4edbff;
@@ -5322,7 +5327,11 @@ button,input{{font:inherit}}
   background:#020a12;
   color:#fff;
   text-align:right;
-  padding:0 9px;
+  padding:0 8px;
+  font-family:"Roboto Mono","Consolas","Courier New",monospace;
+  font-size:12px;
+  font-weight:400;
+  font-variant-numeric:tabular-nums;
 }}
 .manual-price{{
   width:100%;
@@ -5331,9 +5340,12 @@ button,input{{font:inherit}}
   background:#020a12;
   color:#f5dc97;
   text-align:right;
-  padding:0 9px;
+  padding:0 8px;
   outline:none;
-  font-weight:700;
+  font-family:"Roboto Mono","Consolas","Courier New",monospace;
+  font-size:11px;
+  font-weight:400;
+  font-variant-numeric:tabular-nums;
 }}
 .manual-price:focus{{
   border-color:rgba(240,195,91,.85);
@@ -5349,8 +5361,24 @@ button,input{{font:inherit}}
   border:1px solid rgba(30,137,185,.35);
   background:rgba(4,17,28,.74);
 }}
-.value-box b{{font-size:13px;color:#eaf8ff}}
-.value-box small{{font-size:9px;color:#6f9ab0;letter-spacing:.6px}}
+.value-box b{{
+  max-width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-family:"Roboto Mono","Consolas","Courier New",monospace;
+  font-size:11px;
+  font-weight:400;
+  color:#eaf8ff;
+  font-variant-numeric:tabular-nums;
+}}
+.value-box small{{
+  font-size:9px;
+  color:#6f9ab0;
+  letter-spacing:.5px;
+  font-weight:400;
+}}
+.price-box,.subtotal{{min-width:0}}
 .subtotal b{{color:var(--gold)}}
 .remove{{
   height:42px;
@@ -5366,12 +5394,13 @@ button,input{{font:inherit}}
   padding:0 12px 12px;
 }}
 .action{{
-  min-height:38px;
-  padding:7px 13px;
+  min-height:36px;
+  padding:6px 12px;
   border:1px solid rgba(240,195,91,.62);
-  background:linear-gradient(180deg,rgba(240,195,91,.12),rgba(240,195,91,.025));
+  background:linear-gradient(180deg,rgba(240,195,91,.10),rgba(240,195,91,.02));
   color:#f0d27e;
-  font-weight:700;
+  font-size:12px;
+  font-weight:600;
   letter-spacing:.35px;
   cursor:pointer;
 }}
@@ -5443,7 +5472,7 @@ button,input{{font:inherit}}
 @media(max-width:1050px){{
   .workspace{{grid-template-columns:1fr}}
   .line-head,.market-row{{
-    grid-template-columns:30px minmax(190px,1fr) 72px 130px 130px 145px 38px;
+    grid-template-columns:28px minmax(180px,1fr) 100px 145px 145px 165px 36px;
   }}
 }}
 @media(max-width:760px){{
@@ -5499,7 +5528,7 @@ button,input{{font:inherit}}
           </div>
         </div>
         <div class="reference-pill">
-          Référence : {reference_label} • Jita 4-4
+          Aperçu : {reference_label} • Jita 4-4
         </div>
       </div>
 
@@ -5523,7 +5552,7 @@ button,input{{font:inherit}}
       </div>
 
       <div class="status-line" id="marketStatus">
-        Recherche EVE active. Le {custom_price_label.lower()} reprend le prix Jita par défaut et peut être modifié ; l'ajustement global s'applique ensuite à toute l'annonce.
+        Recherche EVE active. Les prix Jita affichés ici sont un aperçu ; toutes les références seront actualisées ensemble au moment de la validation.
       </div>
     </div>
 
@@ -5540,7 +5569,7 @@ button,input{{font:inherit}}
         </div>
         <div class="summary-card">
           <small>Référence Jita</small>
-          <strong>{reference_label}</strong>
+          <strong>{reference_label} • actualisée à la validation</strong>
         </div>
         <div class="summary-card">
           <small>Ajustement global</small>
@@ -5553,6 +5582,10 @@ button,input{{font:inherit}}
         <div class="summary-card total">
           <small>Total général</small>
           <strong id="grandTotal">0,00 ISK</strong>
+        </div>
+        <div class="summary-card">
+          <small>Horodatage marché</small>
+          <strong>Unique • au clic sur Valider</strong>
         </div>
       </div>
 
@@ -5844,21 +5877,9 @@ function makeRow() {{
                   'err'
                 );
               }} else {{
-                let captured = '';
-                if (priceData.fetched_at) {{
-                  const d = new Date(priceData.fetched_at);
-                  if (!Number.isNaN(d.getTime())) {{
-                    captured = ' • référence capturée à ' +
-                      d.toLocaleTimeString('fr-FR', {{
-                        hour:'2-digit',
-                        minute:'2-digit',
-                        second:'2-digit'
-                      }});
-                  }}
-                }}
-
                 setStatus(
-                  item.name + ' — prix Jita chargé' + captured + '.',
+                  item.name + ' — aperçu Jita chargé. '
+                  + 'La référence finale sera reprise lors de la validation.',
                   'ok'
                 );
               }}
