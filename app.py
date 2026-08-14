@@ -12870,6 +12870,133 @@ def freeborn_render_mobility_base_audit(
     )
 
 
+
+def freeborn_calculate_align_all_v(
+    mobility_base,
+):
+    """
+    Derive ALL V align time from the validated 4S-I hull mobility data.
+    """
+    mass_kg = mobility_base.get(
+        "mass_kg"
+    )
+    inertia_base = mobility_base.get(
+        "inertia_modifier"
+    )
+
+    if (
+        mass_kg is None
+        or inertia_base is None
+    ):
+        return {
+            "mass_kg": mass_kg,
+            "inertia_base": inertia_base,
+            "inertia_all_v": None,
+            "align_time_all_v_seconds": None,
+            "evasive_maneuvering_level": 5,
+            "spaceship_command_level": 5,
+        }
+
+    mass_kg = float(
+        mass_kg
+    )
+    inertia_base = float(
+        inertia_base
+    )
+
+    evasive_multiplier = (
+        1.0 - 0.05 * 5
+    )
+    spaceship_command_multiplier = (
+        1.0 - 0.02 * 5
+    )
+
+    inertia_all_v = (
+        inertia_base
+        * evasive_multiplier
+        * spaceship_command_multiplier
+    )
+
+    align_seconds = (
+        1.3862943611198906
+        * mass_kg
+        * inertia_all_v
+        / 1_000_000.0
+    )
+
+    return {
+        "mass_kg":
+            mass_kg,
+        "inertia_base":
+            inertia_base,
+        "inertia_all_v":
+            inertia_all_v,
+        "align_time_all_v_seconds":
+            align_seconds,
+        "evasive_maneuvering_level":
+            5,
+        "spaceship_command_level":
+            5,
+    }
+
+
+def freeborn_render_align_all_v_audit(
+    values,
+):
+    return (
+        '<strong>MOBILITÉ ALL V — MOTEUR 4S-J</strong>'
+        '<br><span class="cap-audit-key">Evasive Maneuvering :</span> '
+        + str(
+            values.get(
+                "evasive_maneuvering_level",
+                0,
+            )
+        )
+        + '/5'
+        '<br><span class="cap-audit-key">Spaceship Command :</span> '
+        + str(
+            values.get(
+                "spaceship_command_level",
+                0,
+            )
+        )
+        + '/5'
+        '<br><span class="cap-audit-key">Inertia BASE :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "inertia_base"
+            ),
+            4,
+        )
+        + '<br><span class="cap-audit-key">Inertia ALL V :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "inertia_all_v"
+            ),
+            4,
+        )
+        + '<br><span class="cap-audit-key">Align time ALL V :</span> '
+        + (
+            freeborn_format_misc_number(
+                values.get(
+                    "align_time_all_v_seconds"
+                ),
+                2,
+            )
+            + ' s'
+            if values.get(
+                "align_time_all_v_seconds"
+            ) is not None
+            else '—'
+        )
+        + '<br><span class="cap-audit-muted">'
+          '4S-J applique uniquement les deux compétences universelles '
+          'd’agilité à V. Modules, rigs, implants et boosts de flotte '
+          'restent hors couverture.'
+          '</span>'
+    )
+
+
 def build_freeborn_technical_snapshot(
     fit,
     *,
@@ -13884,7 +14011,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-I — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE / MOBILITÉ</div>
+              <div class="pilot-engine-title">MOTEUR 4S-J — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE / MOBILITÉ</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -14074,6 +14201,18 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     mobility_base_audit_html = (
         freeborn_render_mobility_base_audit(
             mobility_base
+        )
+    )
+
+    mobility_all_v = (
+        freeborn_calculate_align_all_v(
+            mobility_base
+        )
+    )
+
+    mobility_all_v_audit_html = (
+        freeborn_render_align_all_v_audit(
+            mobility_all_v
         )
     )
 
@@ -15618,7 +15757,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         </div>
         <div class="allv-preview">
           <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-I</strong>
+            <strong>ALL V — VALIDATION 4S-J</strong>
             <span>{all_v_coverage}</span>
           </div>
           <div class="allv-warning">
@@ -15683,6 +15822,10 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 
           <div class="allv-warning" style="margin-top:10px">
             {mobility_base_audit_html}
+          </div>
+
+          <div class="allv-warning" style="margin-top:10px">
+            {mobility_all_v_audit_html}
           </div>
           <div class="allv-warning capacitor-audit" style="margin-top:10px">
             <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
@@ -15772,7 +15915,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-I</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-J</span>
   </footer>
 </main>
 
