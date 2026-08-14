@@ -17379,7 +17379,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4T-B</span>
+    <span class="version">Freeborn Legacy • Fittings 4T-B1</span>
   </footer>
 </main>
 
@@ -17450,7 +17450,7 @@ document.addEventListener(
 );
 
 function copyEditCommand() {{
-  const command = `/fit-modifier ref:${fitRef}`;
+  const command = "/fit-modifier ref:{safe_ref}";
 
   navigator.clipboard.writeText(command).then(() => {{
     const toast = document.getElementById('toast');
