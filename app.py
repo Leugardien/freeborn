@@ -12377,18 +12377,18 @@ def freeborn_render_targeting_misc_audit(
 ):
     return (
         '<strong>CIBLAGE & DIVERS — MOTEUR 4S-F</strong>'
-        '<br><span class="cap-audit-key">Cibles verrouillables BASE :</span> '
+        '<br><span class="cap-audit-key">Targets BASE :</span> '
         + freeborn_format_misc_number(values.get("max_locked_targets"), 0)
-        + '<br><span class="cap-audit-key">Portée de ciblage BASE :</span> '
+        + '<br><span class="cap-audit-key">Targeting Range BASE :</span> '
         + freeborn_format_misc_number(values.get("targeting_range_km"), 1)
         + ' km'
-        + '<br><span class="cap-audit-key">Résolution de scan BASE :</span> '
+        + '<br><span class="cap-audit-key">Scan Resolution BASE :</span> '
         + freeborn_format_misc_number(values.get("scan_resolution_mm"), 0)
         + ' mm'
         + '<br><span class="cap-audit-key">Rayon de signature BASE :</span> '
         + freeborn_format_misc_number(values.get("signature_radius_m"), 0)
         + ' m'
-        + '<br><span class="cap-audit-key">Vitesse BASE :</span> '
+        + '<br><span class="cap-audit-key">Speed BASE :</span> '
         + freeborn_format_misc_number(base_velocity, 0)
         + ' m/s'
         + '<br><span class="cap-audit-key">Warp speed BASE :</span> '
@@ -12487,14 +12487,14 @@ def freeborn_render_targeting_all_v_audit(
 
     return (
         '<strong>CIBLAGE ALL V — MOTEUR 4S-G</strong>'
-        '<br><span class="cap-audit-key">Cibles verrouillables :</span> '
+        '<br><span class="cap-audit-key">Targets :</span> '
         + freeborn_format_misc_number(
             values.get(
                 "max_locked_targets"
             ),
             0,
         )
-        + '<br><span class="cap-audit-key">Portée de ciblage :</span> '
+        + '<br><span class="cap-audit-key">Targeting Range :</span> '
         + freeborn_format_misc_number(
             values.get(
                 "targeting_range_km"
@@ -12502,7 +12502,7 @@ def freeborn_render_targeting_all_v_audit(
             1,
         )
         + ' km'
-        + '<br><span class="cap-audit-key">Résolution de scan :</span> '
+        + '<br><span class="cap-audit-key">Scan Resolution :</span> '
         + freeborn_format_misc_number(
             values.get(
                 "scan_resolution_mm"
@@ -12707,7 +12707,7 @@ def freeborn_render_targeting_character_audit(
         '<br><span class="cap-audit-key">Advanced Target Management :</span> '
         + str(values.get("advanced_target_management_level", 0))
         + '/5'
-        '<br><span class="cap-audit-key">Cibles verrouillables :</span> '
+        '<br><span class="cap-audit-key">Targets :</span> '
         + freeborn_format_misc_number(
             values.get("max_locked_targets"),
             0,
@@ -12721,7 +12721,7 @@ def freeborn_render_targeting_character_audit(
                 0,
             )
         )
-        + '<br><span class="cap-audit-key">Portée de ciblage :</span> '
+        + '<br><span class="cap-audit-key">Targeting Range :</span> '
         + freeborn_format_misc_number(
             values.get("targeting_range_km"),
             1,
@@ -12735,7 +12735,7 @@ def freeborn_render_targeting_character_audit(
                 1,
             )
         )
-        + '<br><span class="cap-audit-key">Résolution de scan :</span> '
+        + '<br><span class="cap-audit-key">Scan Resolution :</span> '
         + freeborn_format_misc_number(
             values.get("scan_resolution_mm"),
             0,
@@ -13085,7 +13085,7 @@ def freeborn_render_align_character_audit(
             if align_character is not None
             else '—'
         )
-        + '<br><span class="cap-audit-key">Écart align vs ALL V :</span> '
+        + '<br><span class="cap-audit-key">Δ Align Time vs ALL V :</span> '
         + escape(
             freeborn_format_targeting_delta(
                 align_character,
@@ -13969,6 +13969,81 @@ def calculate_character_velocity_from_snapshot(
     }
 
 
+
+def freeborn_usage_percent(used, available):
+    try:
+        used = float(used)
+        available = float(available)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if available <= 0:
+        return 0.0
+
+    return max(
+        0.0,
+        min(
+            100.0,
+            used / available * 100.0,
+        ),
+    )
+
+
+def freeborn_fmt_plain(value, decimals=1):
+    if value is None:
+        return "—"
+
+    value = float(value)
+
+    if decimals == 0:
+        return (
+            f"{value:,.0f}"
+            .replace(",", " ")
+        )
+
+    return (
+        f"{value:,.{decimals}f}"
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+
+def freeborn_compare_delta_class(
+    character_value,
+    all_v_value,
+    *,
+    lower_is_better=False,
+):
+    if (
+        character_value is None
+        or all_v_value is None
+    ):
+        return "compare-neutral"
+
+    try:
+        delta = (
+            float(character_value)
+            - float(all_v_value)
+        )
+    except (TypeError, ValueError):
+        return "compare-neutral"
+
+    if abs(delta) < 0.0001:
+        return "compare-good"
+
+    favorable = (
+        delta < 0
+        if lower_is_better
+        else delta > 0
+    )
+
+    return (
+        "compare-good"
+        if favorable
+        else "compare-bad"
+    )
+
+
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
     FREEBORN FITTINGS — Phase 4R-C
@@ -14116,7 +14191,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
 
           <div class="pilot-tech-grid">
             <div class="pilot-engine-core">
-              <div class="pilot-engine-title">MOTEUR 4S-K — FITTING / RESSOURCES / CAP / VITESSE / TANK / EHP / REPAIRS / CIBLAGE / MOBILITÉ</div>
+              <div class="pilot-engine-title">SKILLS & FITTING CHECK</div>
 
               <div class="pilot-engine-row">
                 <span>CPU Management</span>
@@ -14146,23 +14221,47 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                 <span>Navigation</span>
                 <b id="pilot-navigation">—</b>
               </div>
+              <div class="pilot-engine-row">
+                <span>Long Range Targeting</span>
+                <b id="pilot-lrt-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Signature Analysis</span>
+                <b id="pilot-sig-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Target Management</span>
+                <b id="pilot-tm-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Advanced Target Management</span>
+                <b id="pilot-atm-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Evasive Maneuvering</span>
+                <b id="pilot-evasive-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Spaceship Command</span>
+                <b id="pilot-spaceship-skill">—</b>
+              </div>
 
               <div class="pilot-engine-separator"></div>
 
               <div class="pilot-engine-row">
-                <span>CPU — mon personnage</span>
+                <span>CPU — Character</span>
                 <b id="pilot-cpu-pair">—</b>
               </div>
               <div class="pilot-engine-row">
-                <span>Marge CPU</span>
+                <span>CPU Margin</span>
                 <b id="pilot-cpu-margin">—</b>
               </div>
               <div class="pilot-engine-row">
-                <span>Powergrid — mon personnage</span>
+                <span>Powergrid — Character</span>
                 <b id="pilot-pg-pair">—</b>
               </div>
               <div class="pilot-engine-row">
-                <span>Marge Powergrid</span>
+                <span>Powergrid Margin</span>
                 <b id="pilot-pg-margin">—</b>
               </div>
 
@@ -14174,28 +14273,28 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             <div class="pilot-side">
               <div class="pilot-compare" id="pilot-compare">
                 <div class="pilot-compare-title">
-                  ÉCART AVEC LA RÉFÉRENCE ALL V
+                  COMPARAISON AVEC ALL V
                 </div>
                 <div class="pilot-compare-grid">
                   <span>CPU utilisé</span><b id="pilot-delta-cpu-used">—</b>
                   <span>CPU disponible</span><b id="pilot-delta-cpu-out">—</b>
                   <span>PG utilisé</span><b id="pilot-delta-pg-used">—</b>
                   <span>PG disponible</span><b id="pilot-delta-pg-out">—</b>
-                  <span>Capacité capacitor</span><b id="pilot-cap-capacity">—</b>
-                  <span>Recharge capacitor</span><b id="pilot-cap-recharge">—</b>
-                  <span>Drain continu</span><b id="pilot-cap-drain">—</b>
-                  <span>Projection</span><b id="pilot-cap-state">—</b>
-                  <span>Vitesse prop. OFF</span><b id="pilot-velocity-off">—</b>
-                  <span>Vitesse prop. ACTIVE</span><b id="pilot-velocity-active">—</b>
+                  <span>Capacitor Capacity</span><b id="pilot-cap-capacity">—</b>
+                  <span>Capacitor Recharge</span><b id="pilot-cap-recharge">—</b>
+                  <span>Capacitor Drain</span><b id="pilot-cap-drain">—</b>
+                  <span>Capacitor State</span><b id="pilot-cap-state">—</b>
+                  <span>Speed prop. OFF</span><b id="pilot-velocity-off">—</b>
+                  <span>Speed prop. ACTIVE</span><b id="pilot-velocity-active">—</b>
                   <span>Acceleration Control</span><b id="pilot-acceleration-control">—</b>
-                  <span>Écart ACTIVE vs ALL V</span><b id="pilot-delta-velocity">—</b>
-                  <span>Cibles verrouillables</span><b id="pilot-targets">—</b>
-                  <span>Portée de ciblage</span><b id="pilot-target-range">—</b>
-                  <span>Écart portée vs ALL V</span><b id="pilot-delta-target-range">—</b>
-                  <span>Résolution de scan</span><b id="pilot-scan-resolution">—</b>
-                  <span>Écart scan vs ALL V</span><b id="pilot-delta-scan-resolution">—</b>
+                  <span>Δ Speed vs ALL V</span><b id="pilot-delta-velocity">—</b>
+                  <span>Targets</span><b id="pilot-targets">—</b>
+                  <span>Targeting Range</span><b id="pilot-target-range">—</b>
+                  <span>Δ Targeting Range vs ALL V</span><b id="pilot-delta-target-range">—</b>
+                  <span>Scan Resolution</span><b id="pilot-scan-resolution">—</b>
+                  <span>Δ Scan Resolution vs ALL V</span><b id="pilot-delta-scan-resolution">—</b>
                   <span>Align time</span><b id="pilot-align-time">—</b>
-                  <span>Écart align vs ALL V</span><b id="pilot-delta-align-time">—</b>
+                  <span>Δ Align Time vs ALL V</span><b id="pilot-delta-align-time">—</b>
                 </div>
               </div>
 
@@ -14480,7 +14579,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     )
 
     velocity_title = escape(
-        "Vitesse maximale BASE du hull, propulsion désactivée. "
+        "Speed maximale BASE du hull, propulsion désactivée. "
         "Navigation et effets AB/MWD ne sont pas appliqués à cette valeur."
     )
 
@@ -14538,7 +14637,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             .replace(",", " ")
         )
         capacitor_title = escape(
-            "Capaciteur BASE Dogma. "
+            "Capacitor BASE Dogma. "
             + (
                 f"Recharge passive maximale théorique : {capacitor_peak:.2f} GJ/s. "
                 if capacitor_peak is not None else ""
@@ -15034,6 +15133,60 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
                 + '</b>',
             )
             .replace(
+                '<b id="pilot-lrt-skill">—</b>',
+                '<b id="pilot-lrt-skill">'
+                + escape(
+                    f'{character_targeting["long_range_targeting_level"]}/5'
+                    if character_targeting else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-sig-skill">—</b>',
+                '<b id="pilot-sig-skill">'
+                + escape(
+                    f'{character_targeting["signature_analysis_level"]}/5'
+                    if character_targeting else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-tm-skill">—</b>',
+                '<b id="pilot-tm-skill">'
+                + escape(
+                    f'{character_targeting["target_management_level"]}/5'
+                    if character_targeting else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-atm-skill">—</b>',
+                '<b id="pilot-atm-skill">'
+                + escape(
+                    f'{character_targeting["advanced_target_management_level"]}/5'
+                    if character_targeting else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-evasive-skill">—</b>',
+                '<b id="pilot-evasive-skill">'
+                + escape(
+                    f'{character_mobility["evasive_maneuvering_level"]}/5'
+                    if character_mobility else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-spaceship-skill">—</b>',
+                '<b id="pilot-spaceship-skill">'
+                + escape(
+                    f'{character_mobility["spaceship_command_level"]}/5'
+                    if character_mobility else "—"
+                )
+                + '</b>',
+            )
+            .replace(
                 '<b id="pilot-velocity-off">—</b>',
                 '<b id="pilot-velocity-off">'
                 + escape(
@@ -15212,6 +15365,24 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             )
         )
 
+
+        delta_specs = {
+            "pilot-delta-cpu-used": "lower",
+            "pilot-delta-cpu-out": "higher",
+            "pilot-delta-pg-used": "lower",
+            "pilot-delta-pg-out": "higher",
+            "pilot-delta-velocity": "higher",
+            "pilot-delta-target-range": "higher",
+            "pilot-delta-scan-resolution": "higher",
+            "pilot-delta-align-time": "lower",
+        }
+
+        for delta_id, better in delta_specs.items():
+            pilot_panel_html = pilot_panel_html.replace(
+                f'<b id="{delta_id}">',
+                f'<b id="{delta_id}" class="compare-delta" data-better="{better}">',
+            )
+
         pilot_panel_html = re.sub(
             r'<div class="pilot-engine-compat" id="pilot-compat">\s*'
             r'ANALYSE EN COURS\s*</div>',
@@ -15225,6 +15396,189 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
             pilot_panel_html,
             count=1,
         )
+
+
+    # ------------------------------------------------------------
+    # 4S-L — final compact telemetry values.
+    # ------------------------------------------------------------
+    cpu_all_v_used = all_v_core.get("cpu_used")
+    cpu_all_v_available = all_v_core.get("cpu_output")
+    pg_all_v_used = all_v_core.get("power_used")
+    pg_all_v_available = all_v_core.get("power_output")
+
+    cpu_usage_pct = freeborn_usage_percent(
+        cpu_all_v_used,
+        cpu_all_v_available,
+    )
+    pg_usage_pct = freeborn_usage_percent(
+        pg_all_v_used,
+        pg_all_v_available,
+    )
+
+    cargo_used = ship_resource_usage.get(
+        "cargo_used_m3",
+        0.0,
+    )
+    cargo_available = ship_resource_usage.get(
+        "cargo_capacity_m3"
+    )
+    drone_used = ship_resource_usage.get(
+        "drone_bay_used_m3",
+        0.0,
+    )
+    drone_available = ship_resource_usage.get(
+        "drone_bay_capacity_m3"
+    )
+    drone_bw_used = ship_resource_usage.get(
+        "drone_bandwidth_used_mbps",
+        0.0,
+    )
+    drone_bw_available = ship_resource_usage.get(
+        "drone_bandwidth_available_mbps"
+    )
+
+    cargo_usage_pct = freeborn_usage_percent(
+        cargo_used,
+        cargo_available,
+    )
+    drone_usage_pct = freeborn_usage_percent(
+        drone_used,
+        drone_available,
+    )
+    drone_bw_pct = freeborn_usage_percent(
+        drone_bw_used,
+        drone_bw_available,
+    )
+
+    final_res = final_resistance_result.get(
+        "final",
+        {},
+    )
+    shield_res = final_res.get(
+        "shield",
+        {},
+    )
+    armor_res = final_res.get(
+        "armor",
+        {},
+    )
+    structure_res = final_res.get(
+        "structure",
+        {},
+    )
+
+    shield_ehp_display = escape(
+        format_ehp_value(
+            ehp_result.get("shield_ehp")
+        )
+    )
+    armor_ehp_display = escape(
+        format_ehp_value(
+            ehp_result.get("armor_ehp")
+        )
+    )
+    structure_ehp_display = escape(
+        format_ehp_value(
+            ehp_result.get("structure_ehp")
+        )
+    )
+    total_ehp_display = escape(
+        format_ehp_value(
+            ehp_result.get("total_ehp")
+        )
+    )
+
+    shield_rep_display = escape(
+        format_repairs_value(
+            active_repairs_result.get(
+                "shield_ehps"
+            )
+        )
+    )
+    armor_rep_display = escape(
+        format_repairs_value(
+            active_repairs_result.get(
+                "armor_ehps"
+            )
+        )
+    )
+
+    all_v_target_range_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "targeting_range_km"
+            ),
+            1,
+        )
+    )
+    all_v_scan_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "scan_resolution_mm"
+            ),
+            0,
+        )
+    )
+    all_v_targets_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "max_locked_targets"
+            ),
+            0,
+        )
+    )
+    signature_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "signature_radius_m"
+            ),
+            0,
+        )
+    )
+    warp_speed_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "warp_speed_au_s"
+            ),
+            2,
+        )
+    )
+    align_all_v_display = escape(
+        freeborn_format_misc_number(
+            mobility_all_v.get(
+                "align_time_all_v_seconds"
+            ),
+            2,
+        )
+    )
+
+    speed_all_v_display = escape(
+        format_velocity(
+            all_v_velocity.get(
+                "propulsion_active_velocity_ms"
+            )
+        )
+    )
+
+    cap_capacity_display = escape(
+        format_engine_number(
+            all_v_cap.get("capacity_gj"),
+            "GJ",
+        )
+    )
+    cap_recharge_display = escape(
+        format_engine_number(
+            all_v_cap.get("recharge_seconds"),
+            "s",
+        )
+    )
+    cap_drain_display = escape(
+        (
+            f'{all_v_cap.get("active_drain_gjs"):.2f} GJ/s'
+            if all_v_cap.get("active_drain_gjs") is not None
+            else "—"
+        )
+    )
 
     low_html = format_eft_web_items(
         eft_sections["low"], eft_type_ids
@@ -15813,6 +16167,216 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
 .footer .version{{text-align:right}}
 .toast{{position:fixed;right:18px;bottom:18px;z-index:30;padding:9px 13px;border:1px solid rgba(121,221,115,.70);background:#061109;color:#a7eea0;font-size:11px;font-weight:700;opacity:0;transform:translateY(8px);pointer-events:none;transition:.18s ease}}
 .toast.show{{opacity:1;transform:translateY(0)}}
+
+.telemetry-dashboard{{
+  display:grid;
+  gap:8px;
+  padding:7px;
+}}
+.telemetry-section{{
+  border:1px solid rgba(49,185,255,.24);
+  background:linear-gradient(180deg,rgba(5,18,31,.78),rgba(2,9,17,.72));
+  padding:9px 10px;
+}}
+.telemetry-section-title{{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+  margin-bottom:8px;
+  color:#edf6ff;
+  font-size:12px;
+  font-weight:850;
+  letter-spacing:.08em;
+}}
+.telemetry-section-title small{{
+  color:#6f91a8;
+  font-size:10px;
+  font-weight:500;
+  letter-spacing:.08em;
+}}
+.resource-row{{
+  display:grid;
+  grid-template-columns:minmax(120px,.9fr) minmax(150px,1fr);
+  gap:4px 10px;
+  align-items:center;
+  padding:6px 0;
+  border-bottom:1px solid rgba(255,255,255,.045);
+}}
+.resource-row:last-child{{border-bottom:0}}
+.resource-label{{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  color:#dcecf7;
+}}
+.resource-icon{{
+  width:23px;
+  height:23px;
+  display:grid;
+  place-items:center;
+  color:#69d1ff;
+  border:1px solid rgba(49,185,255,.28);
+  background:rgba(3,20,34,.65);
+}}
+.resource-values{{
+  text-align:right;
+}}
+.resource-values b{{
+  display:block;
+  color:#edf6ff;
+  font:700 12px Consolas,monospace;
+}}
+.resource-values small{{
+  display:block;
+  margin-top:2px;
+  color:#6f899b;
+  font:9px Consolas,monospace;
+}}
+.resource-gauge{{
+  grid-column:1/-1;
+  height:5px;
+  border:1px solid rgba(49,185,255,.16);
+  background:rgba(255,255,255,.035);
+  overflow:hidden;
+}}
+.resource-gauge i{{
+  display:block;
+  height:100%;
+  background:linear-gradient(90deg,rgba(36,143,213,.78),rgba(78,215,255,.95));
+  box-shadow:0 0 8px rgba(53,199,255,.26);
+}}
+.resistance-table{{
+  display:grid;
+  grid-template-columns:82px repeat(4,minmax(50px,1fr)) 70px;
+  gap:4px;
+  align-items:center;
+  text-align:center;
+  font-size:10px;
+}}
+.resistance-table>div{{
+  padding:5px 3px;
+  border:1px solid rgba(49,185,255,.14);
+  background:rgba(0,0,0,.15);
+  color:#c8d8e4;
+}}
+.resistance-head{{
+  color:#7895aa!important;
+  font-size:9px;
+  letter-spacing:.06em;
+}}
+.resistance-head.em{{color:#48c6ff!important}}
+.resistance-head.therm{{color:#ff7a3a!important}}
+.resistance-head.kin{{color:#d9e1e6!important}}
+.resistance-head.exp{{color:#ffc23b!important}}
+.resistance-layer{{
+  text-align:left;
+  color:#edf6ff!important;
+  font-weight:750;
+}}
+.ehp-cell{{
+  color:#f2cf70!important;
+  font-family:Consolas,monospace;
+}}
+.ehp-total{{
+  display:flex;
+  justify-content:flex-end;
+  gap:12px;
+  margin-top:7px;
+  padding-top:7px;
+  border-top:1px solid rgba(214,168,60,.24);
+  color:#98afc0;
+  font-size:10px;
+  letter-spacing:.07em;
+}}
+.ehp-total strong{{
+  color:#f2cf70;
+  font:700 13px Consolas,monospace;
+}}
+.telemetry-split{{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}}
+.stat-list{{
+  display:grid;
+  gap:5px;
+}}
+.stat-list>div,
+.misc-grid>div{{
+  display:flex;
+  justify-content:space-between;
+  gap:8px;
+  align-items:baseline;
+  padding:4px 0;
+  border-bottom:1px solid rgba(255,255,255,.04);
+}}
+.stat-list span,
+.misc-grid span{{
+  color:#8fa8bb;
+  font-size:10px;
+}}
+.stat-list b,
+.misc-grid b{{
+  color:#edf6ff;
+  font:700 11px Consolas,monospace;
+  text-align:right;
+}}
+.repair-grid{{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:5px;
+}}
+.repair-grid>div{{
+  padding:7px 4px;
+  text-align:center;
+  border:1px solid rgba(49,185,255,.14);
+  background:rgba(0,0,0,.13);
+}}
+.repair-icon{{
+  display:block;
+  color:#67d2ff;
+  font-size:15px;
+}}
+.repair-grid small{{
+  display:block;
+  margin-top:3px;
+  color:#7e9bae;
+  font-size:9px;
+}}
+.repair-grid b{{
+  display:block;
+  margin-top:4px;
+  color:#9cec94;
+  font:700 11px Consolas,monospace;
+}}
+.misc-grid{{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:0 14px;
+}}
+.telemetry-footnote{{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px 14px;
+  padding:2px 4px 4px;
+  color:#6f8da2;
+  font-size:9px;
+  line-height:1.35;
+}}
+.telemetry-footnote b{{color:#f0ca67}}
+.compare-delta{{
+  font-family:Consolas,monospace!important;
+}}
+.compare-good{{color:#8ff08a!important}}
+.compare-bad{{color:#ff7d70!important}}
+.compare-neutral{{color:#9db2c2!important}}
+.pilot-engine-title{{
+  text-transform:uppercase;
+}}
+.pilot-compare-title{{
+  text-transform:uppercase;
+}}
 @media(max-width:1180px){{
   .pilot-tech-grid{{grid-template-columns:1fr}}
   .main-grid{{grid-template-columns:1fr 1fr}}
@@ -15851,15 +16415,15 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <section class="main-grid">
     <div class="stack left-col">
       <article class="hud-panel">
-        <div class="panel-title"><span class="slot-symbol">▲</span>Emplacements hauts<span class="panel-code">HIGH</span></div>
+        <div class="panel-title"><span class="slot-symbol">▲</span>High Slots<span class="panel-code">HIGH</span></div>
         <div class="slot-body">{high_html}</div>
       </article>
       <article class="hud-panel">
-        <div class="panel-title"><span class="slot-symbol">◆</span>Emplacements intermédiaires<span class="panel-code">MID</span></div>
+        <div class="panel-title"><span class="slot-symbol">◆</span>Mid Slots<span class="panel-code">MID</span></div>
         <div class="slot-body">{mid_html}</div>
       </article>
       <article class="hud-panel">
-        <div class="panel-title"><span class="slot-symbol low">▼</span>Emplacements bas<span class="panel-code">LOW</span></div>
+        <div class="panel-title"><span class="slot-symbol low">▼</span>Low Slots<span class="panel-code">LOW</span></div>
         <div class="slot-body">{low_html}</div>
       </article>
       <article class="hud-panel">
@@ -15899,14 +16463,14 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
         <div class="ship-stage">{ship_html}</div>
       </article>
       <article class="hud-panel">
-        <div class="panel-title"><span class="slot-symbol">T</span>Télémétrie du fitting<span class="panel-code">STATS</span></div>
+        <div class="panel-title"><span class="slot-symbol">T</span>Fitting Telemetry<span class="panel-code">STATS</span></div>
         <div class="telemetry">
-          <div class="metric" title="Valeur Dogma de base — compétences et modificateurs avancés non appliqués"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU <em class="metric-mode">BASE</em></small><strong>{cpu_value}</strong></div>
-          <div class="metric" title="Valeur Dogma de base — compétences et modificateurs avancés non appliqués"><span class="metric-icon" aria-hidden="true">ϟ</span><small>Powergrid <em class="metric-mode">BASE</em></small><strong>{power_value}</strong></div>
-          <div class="metric" title="{capacitor_title}"><span class="metric-icon" aria-hidden="true">◫</span><small>Capaciteur <em class="metric-mode">BASE</em></small><strong>{capacitor_value}</strong></div>
-          <div class="metric" title="{velocity_title}"><span class="metric-icon" aria-hidden="true">➤</span><small>Vitesse <em class="metric-mode">BASE</em></small><strong>{velocity_value}</strong></div>
-          <div class="metric" title="DPS volontairement non calculé par Freeborn Fittings. Utilise l'EFT dans EVE pour les statistiques exactes."><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">----</strong></div>
-          <div class="metric" title="EHP OMNI 25/25/25/25"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP</small><strong>{ehp_value}</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU <em class="metric-mode">ALL V</em></small><strong>{all_v_cpu_pair}</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">ϟ</span><small>Powergrid <em class="metric-mode">ALL V</em></small><strong>{all_v_pg_pair}</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">◫</span><small>Capacitor <em class="metric-mode">ALL V</em></small><strong>{all_v_cap_capacity}</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">➤</span><small>Speed <em class="metric-mode">ALL V</em></small><strong>{all_v_active_velocity_value}</strong></div>
+          <div class="metric" title="DPS volontairement non simulé par Freeborn Fittings. Utilise l'EFT dans EVE pour les statistiques exactes."><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">----</strong></div>
+          <div class="metric" title="EHP OMNI 25/25/25/25"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP <em class="metric-mode">ALL V</em></small><strong>{ehp_value}</strong></div>
           <div class="resists">
             <div class="resist em"><i class="resist-icon" aria-hidden="true">✦</i><span>EM</span><b>{escape(format_tank_resistance(final_shield_resistance.get("em")))}</b></div>
             <div class="resist therm"><i class="resist-icon" aria-hidden="true">♨</i><span>Therm</span><b>{escape(format_tank_resistance(final_shield_resistance.get("therm")))}</b></div>
@@ -15914,144 +16478,175 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
             <div class="resist exp"><i class="resist-icon" aria-hidden="true">✹</i><span>Exp</span><b>{escape(format_tank_resistance(final_shield_resistance.get("exp")))}</b></div>
           </div>
         </div>
-        <div class="allv-preview">
-          <div class="allv-head">
-            <strong>ALL V — VALIDATION 4S-K</strong>
-            <span>{all_v_coverage}</span>
-          </div>
-          <div class="allv-warning">
-            Calcul encore partiel : les modificateurs Dogma non couverts
-            ne sont pas devinés. BASE reste donc la télémétrie officielle.
-          </div>
-          <div class="allv-grid">
-            <div>
-              <small>CPU</small>
-              <b>{all_v_cpu_pair}</b>
-              <em>{all_v_cpu_margin}</em>
+        <div class="telemetry-dashboard">
+
+          <section class="telemetry-section">
+            <div class="telemetry-section-title">
+              <span>RESOURCE USAGE</span>
+              <small>ALL V reference</small>
             </div>
-            <div>
-              <small>POWERGRID</small>
-              <b>{all_v_pg_pair}</b>
-              <em>{all_v_pg_margin}</em>
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">▣</span>
+                <strong>CPU</strong>
+              </div>
+              <div class="resource-values">
+                <b>{escape(format_engine_resource_pair(cpu_all_v_used, cpu_all_v_available, "tf"))}</b>
+                <small>BASE {cpu_value}</small>
+              </div>
+              <div class="resource-gauge"><i style="width:{cpu_usage_pct:.1f}%"></i></div>
             </div>
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">ϟ</span>
+                <strong>Powergrid</strong>
+              </div>
+              <div class="resource-values">
+                <b>{escape(format_engine_resource_pair(pg_all_v_used, pg_all_v_available, "MW"))}</b>
+                <small>BASE {power_value}</small>
+              </div>
+              <div class="resource-gauge"><i style="width:{pg_usage_pct:.1f}%"></i></div>
+            </div>
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">◈</span>
+                <strong>Drone Bay</strong>
+              </div>
+              <div class="resource-values">
+                <b>{drone_bay_usage_value}</b>
+              </div>
+              <div class="resource-gauge"><i style="width:{drone_usage_pct:.1f}%"></i></div>
+            </div>
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">⌁</span>
+                <strong>Drone Bandwidth</strong>
+              </div>
+              <div class="resource-values">
+                <b>{drone_bandwidth_value}</b>
+              </div>
+              <div class="resource-gauge"><i style="width:{drone_bw_pct:.1f}%"></i></div>
+            </div>
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">▤</span>
+                <strong>Cargo Bay</strong>
+              </div>
+              <div class="resource-values">
+                <b>{cargo_usage_value}</b>
+              </div>
+              <div class="resource-gauge"><i style="width:{cargo_usage_pct:.1f}%"></i></div>
+            </div>
+          </section>
+
+          <section class="telemetry-section">
+            <div class="telemetry-section-title">
+              <span>RESISTANCES & EHP</span>
+              <small>OMNI 25 / 25 / 25 / 25</small>
+            </div>
+
+            <div class="resistance-table">
+              <div class="resistance-head"></div>
+              <div class="resistance-head em">EM</div>
+              <div class="resistance-head therm">THERM</div>
+              <div class="resistance-head kin">KIN</div>
+              <div class="resistance-head exp">EXP</div>
+              <div class="resistance-head">EHP</div>
+
+              <div class="resistance-layer">Shield</div>
+              <div>{escape(format_tank_resistance(shield_res.get("em")))}</div>
+              <div>{escape(format_tank_resistance(shield_res.get("therm")))}</div>
+              <div>{escape(format_tank_resistance(shield_res.get("kin")))}</div>
+              <div>{escape(format_tank_resistance(shield_res.get("exp")))}</div>
+              <div class="ehp-cell">{shield_ehp_display}</div>
+
+              <div class="resistance-layer">Armor</div>
+              <div>{escape(format_tank_resistance(armor_res.get("em")))}</div>
+              <div>{escape(format_tank_resistance(armor_res.get("therm")))}</div>
+              <div>{escape(format_tank_resistance(armor_res.get("kin")))}</div>
+              <div>{escape(format_tank_resistance(armor_res.get("exp")))}</div>
+              <div class="ehp-cell">{armor_ehp_display}</div>
+
+              <div class="resistance-layer">Structure</div>
+              <div>{escape(format_tank_resistance(structure_res.get("em")))}</div>
+              <div>{escape(format_tank_resistance(structure_res.get("therm")))}</div>
+              <div>{escape(format_tank_resistance(structure_res.get("kin")))}</div>
+              <div>{escape(format_tank_resistance(structure_res.get("exp")))}</div>
+              <div class="ehp-cell">{structure_ehp_display}</div>
+            </div>
+
+            <div class="ehp-total">
+              <span>TOTAL EHP</span>
+              <strong>{total_ehp_display}</strong>
+            </div>
+          </section>
+
+          <section class="telemetry-split">
+            <div class="telemetry-section">
+              <div class="telemetry-section-title">
+                <span>CAPACITOR</span>
+                <small>ALL V</small>
+              </div>
+              <div class="stat-list">
+                <div><span>Capacity</span><b>{cap_capacity_display}</b></div>
+                <div><span>Recharge</span><b>{cap_recharge_display}</b></div>
+                <div><span>Drain</span><b>{cap_drain_display}</b></div>
+                <div><span>State</span><b>{all_v_cap_state}</b></div>
+              </div>
+            </div>
+
+            <div class="telemetry-section">
+              <div class="telemetry-section-title">
+                <span>REPAIRS</span>
+                <small>OMNI EHP/s</small>
+              </div>
+              <div class="repair-grid">
+                <div>
+                  <span class="repair-icon">◫</span>
+                  <small>Shield</small>
+                  <b>{shield_rep_display}</b>
+                </div>
+                <div>
+                  <span class="repair-icon">◇</span>
+                  <small>Armor</small>
+                  <b>{armor_rep_display}</b>
+                </div>
+                <div>
+                  <span class="repair-icon">⬡</span>
+                  <small>Structure</small>
+                  <b>0,0</b>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="telemetry-section">
+            <div class="telemetry-section-title">
+              <span>TARGETING & MISCELLANEOUS</span>
+              <small>ALL V</small>
+            </div>
+            <div class="misc-grid">
+              <div><span>Targets</span><b>{all_v_targets_display}</b></div>
+              <div><span>Targeting Range</span><b>{all_v_target_range_display} km</b></div>
+              <div><span>Scan Resolution</span><b>{all_v_scan_display} mm</b></div>
+              <div><span>Signature Radius</span><b>{signature_display} m</b></div>
+              <div><span>Speed</span><b>{speed_all_v_display}</b></div>
+              <div><span>Warp Speed</span><b>{warp_speed_display} AU/s</b></div>
+              <div><span>Align Time</span><b>{align_all_v_display} s</b></div>
+              <div><span>Cargo Bay</span><b>{escape(freeborn_fmt_plain(cargo_available, 0))} m³</b></div>
+            </div>
+          </section>
+
+          <div class="telemetry-footnote">
+            <span>Corporate reference: <b>ALL V</b></span>
+            <span>BASE values remain visible where useful.</span>
+            <span>DPS is intentionally not simulated by Freeborn Fittings.</span>
           </div>
-          <div class="allv-status">{all_v_compat}</div>
-          <div class="allv-warning resource-usage-audit" style="margin-top:10px">
-            <strong>RESSOURCES DU VAISSEAU — 4S-A</strong><br>
-            <span class="cap-audit-key">Cargo Bay :</span>
-            {cargo_usage_value}<br>
-            <span class="cap-audit-key">Drone Bay :</span>
-            {drone_bay_usage_value}<br>
-            <span class="cap-audit-key">Drone Bandwidth :</span>
-            {drone_bandwidth_value}<br>
-            <span class="cap-audit-muted">
-              Bandwidth utilisé = 0 dans une fiche statique :
-              il dépend des drones effectivement déployés.
-            </span>
-          </div>
-
-          <div class="allv-warning" style="margin-top:10px">
-            {tank_audit_html}
-          </div>
-
-          <div class="allv-warning" style="margin-top:10px">
-            {final_resistance_audit_html}
-          </div>
-
-          <div class="allv-warning" style="margin-top:10px">
-            {ehp_audit_html}
-          </div>
-
-          <div class="allv-warning" style="margin-top:10px">
-            {repairs_audit_html}
-          </div>
-
-          <div class="allv-warning" style="margin-top:10px">
-            {targeting_misc_audit_html}
-          </div>
-
-          <div class="allv-warning" style="margin-top:10px">
-            {targeting_all_v_audit_html}
-          </div>
-          {
-            f'<div class="allv-warning" style="margin-top:10px">{targeting_character_audit_html}</div>'
-            if targeting_character_audit_html
-            else ''
-          }
-
-          <div class="allv-warning" style="margin-top:10px">
-            {mobility_base_audit_html}
-          </div>
-
-          <div class="allv-warning" style="margin-top:10px">
-            {mobility_all_v_audit_html}
-          </div>
-          {
-            f'<div class="allv-warning" style="margin-top:10px">{mobility_character_audit_html}</div>'
-            if mobility_character_audit_html
-            else ''
-          }
-          <div class="allv-warning capacitor-audit" style="margin-top:10px">
-            <strong>CAPACITEUR — DOGMA 4O-J</strong><br>
-            ALL V : {all_v_cap_capacity} • recharge {all_v_cap_recharge} •
-            pic {all_v_cap_peak} • drain continu {all_v_cap_drain}<br>
-            Projection hors apports conditionnels : {all_v_cap_state}.<br>
-
-            <span class="cap-audit-verdict">{capacitor_projection_label}</span>
-            — {capacitor_projection_reason}<br>
-
-            <span class="cap-audit-key">Sources conditionnelles :</span>
-            {conditional_sources_html}<br>
-
-            <span class="cap-audit-key">Lecture Dogma de la source :</span><br>
-            <span class="cap-dogma-probe">{conditional_source_dogma_html}</span><br>
-
-            <span class="cap-audit-key">Potentiel conditionnel maximum résolu :</span>
-            {escape(f"{max_conditional_source_gjs:.2f} GJ/s")}
-            ({resolved_conditional_sources} source(s) résolue(s))<br>
-
-            <span class="cap-audit-key">Injecteurs :</span>
-            {injectors_html}<br>
-            <span class="cap-audit-key">Transferts d'énergie :</span>
-            {transfers_html}<br>
-
-            Couverture cyclique : {escape(capacitor_audit_coverage)}.
-            Le potentiel du Nosferatu est maintenant lu depuis ses attributs
-            Dogma mais reste volontairement EXCLU de la stabilité : sa
-            disponibilité dépend de la cible et ne peut pas être garantie
-            par le fitting seul.
-          </div>
-          <div class="allv-warning" style="margin-top:10px">
-            <strong>VITESSE — MOTEUR 4P-D</strong><br>
-            Hull BASE : {velocity_value} •
-            ALL V, propulsion OFF : {all_v_velocity_value} •
-            <strong>ALL V, propulsion ACTIVE : {all_v_active_velocity_value}</strong><br>
-            Navigation ALL V : 5/5 • Acceleration Control ALL V : 5/5<br>
-            <span class="cap-audit-key">Propulsion équipée :</span><br>
-            {propulsion_probe_html}<br>
-            <span class="cap-audit-key">Masse hull :</span>
-            {escape(f'{all_v_velocity["base_mass_kg"]:,.0f} kg'.replace(",", " ") if all_v_velocity["base_mass_kg"] is not None else "—")} •
-            <span class="cap-audit-key">ajouts de masse :</span>
-            {escape(f'{all_v_velocity["mass_addition_kg"]:,.0f} kg'.replace(",", " "))} •
-            <span class="cap-audit-key">masse active :</span>
-            {escape(f'{all_v_velocity["active_mass_kg"]:,.0f} kg'.replace(",", " ") if all_v_velocity["active_mass_kg"] is not None else "—")}<br>
-            <span class="cap-audit-key">Thrust Dogma brut :</span>
-            {escape(f'{all_v_velocity["raw_propulsion_thrust"]:,.0f}'.replace(",", " ") if all_v_velocity["raw_propulsion_thrust"] is not None else "—")} •
-            <span class="cap-audit-key">Thrust effectif :</span>
-            {escape(f'{all_v_velocity["effective_thrust_n"]:,.0f} N'.replace(",", " ") if all_v_velocity["effective_thrust_n"] is not None else "—")}<br>
-            <span class="cap-audit-key">Résolution thrust :</span>
-            {escape(all_v_velocity["thrust_source"])} •
-            <span class="cap-audit-key">ratio brut/effectif :</span>
-            {escape(f'{all_v_velocity["raw_to_effective_thrust_ratio"]:.2f}×' if all_v_velocity["raw_to_effective_thrust_ratio"] is not None else "—")}<br>
-            4P-D consolide la formule propulsion complète
-            bonus × thrust / masse. Le thrust effectif est dérivé de la classe
-            de propulsion via massAddition × 3 ; la valeur Dogma brute reste
-            affichée uniquement pour audit. Les effets de vitesse supplémentaires
-            (overdrive, nanofiber, implants, boosts de flotte, surchauffe)
-            restent hors couverture tant que leurs modificateurs Dogma
-            spécifiques ne sont pas intégrés.
-          </div>
-
         </div>
         {pilot_panel_html}
       </article>
@@ -16079,7 +16674,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-K</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-L</span>
   </footer>
 </main>
 
@@ -16092,6 +16687,63 @@ const shipName = "{safe_ship}";
 function getEft() {{
   return document.getElementById('eftText').textContent;
 }}
+
+function colorPilotDeltas() {{
+  document.querySelectorAll('.compare-delta').forEach((node) => {{
+    const raw = (node.textContent || '').trim();
+    const better = node.dataset.better || 'higher';
+
+    node.classList.remove(
+      'compare-good',
+      'compare-bad',
+      'compare-neutral'
+    );
+
+    if (!raw || raw === '—' || raw.includes('Identique')) {{
+      node.classList.add(
+        raw.includes('Identique')
+          ? 'compare-good'
+          : 'compare-neutral'
+      );
+      return;
+    }}
+
+    const normalized = raw
+      .replace(',', '.')
+      .replace(/\s/g, '');
+
+    const match = normalized.match(/^([+-]?\d+(?:\.\d+)?)/);
+
+    if (!match) {{
+      node.classList.add('compare-neutral');
+      return;
+    }}
+
+    const delta = Number(match[1]);
+
+    if (!Number.isFinite(delta) || Math.abs(delta) < 0.0001) {{
+      node.classList.add('compare-good');
+      return;
+    }}
+
+    const favorable =
+      better === 'lower'
+        ? delta < 0
+        : delta > 0;
+
+    node.classList.add(
+      favorable
+        ? 'compare-good'
+        : 'compare-bad'
+    );
+  }});
+}}
+
+document.addEventListener(
+  'DOMContentLoaded',
+  colorPilotDeltas
+);
+
 function toggleEft() {{
   document.getElementById('eftPanel').classList.toggle('open');
 }}
@@ -21389,7 +22041,7 @@ def capacitor_verdict_policy(base_projection, audit):
         "projection": base_projection,
         "verdict": "PROJECTION ALL-ACTIVE",
         "is_final_eve_verdict": False,
-        "reason": "Projection théorique limitée aux effets Dogma actuellement couverts.",
+        "reason": "Capacitor State théorique limitée aux effets Dogma actuellement couverts.",
         "conditional_items": [],
     }
 
