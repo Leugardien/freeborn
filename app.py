@@ -10279,6 +10279,10 @@ def find_dogma_attribute_by_names(
 def get_ship_base_max_velocity(ship_type_id):
     """
     Return the hull's raw maxVelocity Dogma attribute in m/s.
+
+    Prefer metadata-name resolution, then fall back to the canonical
+    maxVelocity Dogma attribute ID (37). This avoids a blank Speed field
+    when public attribute metadata naming is incomplete or localized.
     """
     row = find_dogma_attribute_by_names(
         ship_type_id,
@@ -10286,13 +10290,28 @@ def get_ship_base_max_velocity(ship_type_id):
             "maxVelocity",
             "Max Velocity",
         ),
+        contains_names=(
+            "max velocity",
+            "maximum velocity",
+        ),
     )
 
-    return (
-        float(row["value"])
-        if row
-        else None
+    if row:
+        try:
+            return float(row["value"])
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    dogma = get_eve_type_dogma(
+        ship_type_id
     )
+
+    raw_velocity = dogma.get(37)
+
+    try:
+        return float(raw_velocity)
+    except (TypeError, ValueError):
+        return None
 
 
 
@@ -12357,7 +12376,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-A-DYNAMIC"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-C3-SPEED"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -17772,7 +17791,7 @@ button{{font:inherit}}
 .ship-stage:before{{content:"";position:absolute;width:64%;aspect-ratio:1;border:1px solid rgba(49,185,255,.09);border-radius:50%;box-shadow:0 0 0 45px rgba(49,185,255,.018),0 0 0 90px rgba(49,185,255,.012)}}
 .ship-render{{width:96%;height:225px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 18px 26px rgba(0,0,0,.84))}}
 .panel-title-spacer{{flex:1 1 auto}}
-.panel-title .panel-code{{margin-left:7px;flex:0 0 auto}}
+.ship-panel-title .panel-code{{margin-left:7px;flex:0 0 auto}}
 .pilotability-badge{{
   position:relative;
   z-index:6;
@@ -18697,7 +18716,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
       </article>
 
       <article class="hud-panel ship-panel center-ship-panel">
-        <div class="panel-title"><span class="slot-symbol">S</span>{safe_ship}<span class="panel-title-spacer"></span>{pilotability_html}<span class="panel-code">SHIP</span></div>
+        <div class="panel-title ship-panel-title"><span class="slot-symbol">S</span>{safe_ship}<span class="panel-title-spacer"></span>{pilotability_html}<span class="panel-code">SHIP</span></div>
         <div class="ship-stage">{ship_html}</div>
       </article>
 
@@ -18944,7 +18963,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-N-C2</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-N-C3</span>
   </footer>
 </main>
 
