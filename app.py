@@ -10280,10 +10280,20 @@ def get_ship_base_max_velocity(ship_type_id):
     """
     Return the hull's raw maxVelocity Dogma attribute in m/s.
 
-    Prefer metadata-name resolution, then fall back to the canonical
-    maxVelocity Dogma attribute ID (37). This avoids a blank Speed field
-    when public attribute metadata naming is incomplete or localized.
+    Resolution order:
+      1. named Dogma metadata lookup,
+      2. cached Dogma attribute 37 (maxVelocity),
+      3. fresh /universe/types/{type_id}/ ESI read, bypassing process cache.
+
+    The fresh fallback is intentionally used only when the cached path cannot
+    resolve speed. This keeps normal pages fast while preventing a stale or
+    incomplete cached payload from leaving SPEED blank.
     """
+    if not ship_type_id:
+        return None
+
+    ship_type_id = int(ship_type_id)
+
     row = find_dogma_attribute_by_names(
         ship_type_id,
         exact_names=(
@@ -10298,7 +10308,9 @@ def get_ship_base_max_velocity(ship_type_id):
 
     if row:
         try:
-            return float(row["value"])
+            value = float(row["value"])
+            if value >= 0:
+                return value
         except (TypeError, ValueError, KeyError):
             pass
 
@@ -10306,12 +10318,104 @@ def get_ship_base_max_velocity(ship_type_id):
         ship_type_id
     )
 
-    raw_velocity = dogma.get(37)
-
     try:
-        return float(raw_velocity)
+        value = float(dogma.get(37))
+        if value >= 0:
+            return value
     except (TypeError, ValueError):
-        return None
+        pass
+
+    # Last-resort authoritative public ESI read.
+    # Attribute 37 = maxVelocity in EVE Dogma.
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/types/{ship_type_id}/",
+            params={
+                "datasource": "tranquility",
+                "language": "en",
+            },
+            headers={
+                "User-Agent":
+                    "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+
+        for attribute in payload.get(
+            "dogma_attributes",
+            [],
+        ) or []:
+            try:
+                attribute_id = int(
+                    attribute.get("attribute_id")
+                )
+            except (TypeError, ValueError):
+                continue
+
+            if attribute_id != 37:
+                continue
+
+            try:
+                value = float(
+                    attribute.get("value")
+                )
+            except (TypeError, ValueError):
+                continue
+
+            # Refresh both caches with the fresh authoritative payload.
+            _eve_type_metadata_cache[
+                ship_type_id
+            ] = payload
+
+            refreshed_dogma = {}
+
+            for dogma_row in payload.get(
+                "dogma_attributes",
+                [],
+            ) or []:
+                try:
+                    refreshed_dogma[
+                        int(dogma_row["attribute_id"])
+                    ] = float(
+                        dogma_row["value"]
+                    )
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                ):
+                    continue
+
+            if refreshed_dogma:
+                _eve_type_dogma_cache[
+                    ship_type_id
+                ] = refreshed_dogma
+
+            print(
+                "Freeborn velocity fresh ESI fallback:",
+                ship_type_id,
+                value,
+                "m/s",
+            )
+
+            return value
+
+        print(
+            "Freeborn velocity unresolved: maxVelocity attribute 37 "
+            "absent from fresh ESI type payload:",
+            ship_type_id,
+        )
+
+    except Exception as error:
+        print(
+            "Freeborn velocity fresh ESI fallback failed:",
+            ship_type_id,
+            repr(error),
+        )
+
+    return None
 
 
 
@@ -12376,7 +12480,7 @@ def format_eft_bay_items(items, type_ids=None):
 # FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
 # ============================================================
 
-FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-C3-SPEED"
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-C4-SPEED-FRESH"
 
 
 def freeborn_technical_snapshot_fingerprint(fit):
@@ -18963,7 +19067,7 @@ pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(
   <footer class="footer">
     <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
     <span class="id">{safe_ref}</span>
-    <span class="version">Freeborn Legacy • Fittings 4S-N-C3</span>
+    <span class="version">Freeborn Legacy • Fittings 4S-N-C4</span>
   </footer>
 </main>
 
