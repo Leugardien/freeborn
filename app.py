@@ -194,6 +194,39 @@ DISCORD_FITTINGS_CHANNEL_ID = os.environ.get(
     "DISCORD_FITTINGS_CHANNEL_ID"
 )
 
+# ============================================================
+# FREEBORN MARKET — PHASE 1
+# ============================================================
+
+# Dedicated Freeborn Market forum/channel.
+# The exact channel ID can be added in Render once the Discord forum has been
+# renamed/finalized. Phase 1 does not require it yet for page opening.
+DISCORD_MARKET_CHANNEL_ID = os.environ.get(
+    "DISCORD_MARKET_CHANNEL_ID"
+)
+
+# Market page line count:
+# - operational default: 10
+# - hard ceiling: 15
+# This keeps Discord/forum posts readable while leaving a future override.
+try:
+    FREEBORN_MARKET_MAX_LINES = int(
+        os.environ.get(
+            "FREEBORN_MARKET_MAX_LINES",
+            "10",
+        )
+    )
+except (TypeError, ValueError):
+    FREEBORN_MARKET_MAX_LINES = 10
+
+FREEBORN_MARKET_MAX_LINES = max(
+    1,
+    min(
+        15,
+        FREEBORN_MARKET_MAX_LINES,
+    ),
+)
+
 DISCORD_DIRECTOR_ROLE_ID = (
     DISCORD_DIRECTION_ROLE_ID
 )
@@ -294,6 +327,32 @@ FITTING_MANAGER_ROLE_IDS = configured_role_ids(
 
 
 # ============================================================
+# FREEBORN MARKET — ACCESS
+# ============================================================
+
+# Personal BUY / SELL announcements:
+# Freeborn members and every internal role above Member.
+MARKET_MEMBER_ROLE_IDS = configured_role_ids(
+    DISCORD_MEMBER_ROLE_ID,
+    DISCORD_VETERAN_ROLE_ID,
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+    DISCORD_OFFICER_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# Corporation BUY / SELL announcements officially engage Freeborn Legacy.
+# Validated rule: Direction + High Council + CEO.
+MARKET_CORP_ROLE_IDS = configured_role_ids(
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+
+# ============================================================
 # URLS
 # ============================================================
 
@@ -321,7 +380,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "4S-N-A-AUTO-INVENTORY-V1"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P1 + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -372,6 +431,11 @@ fit_web_serializer = URLSafeTimedSerializer(
 fit_pilot_serializer = URLSafeTimedSerializer(
     FLASK_SECRET_KEY,
     salt="freeborn-fit-pilot",
+)
+
+market_web_serializer = URLSafeTimedSerializer(
+    FLASK_SECRET_KEY,
+    salt="freeborn-market-web",
 )
 
 
@@ -758,6 +822,113 @@ def init_database():
                     """
                     ALTER TABLE fits
                     ADD COLUMN IF NOT EXISTS discord_post_updated_at TIMESTAMPTZ;
+                    """
+                )
+
+                # ====================================================
+                # FREEBORN MARKET — PHASE 1 FOUNDATION
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS market_orders (
+                        market_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        order_type TEXT NOT NULL CHECK (
+                            order_type IN ('buy', 'sell')
+                        ),
+                        owner_scope TEXT NOT NULL CHECK (
+                            owner_scope IN ('member', 'corporation')
+                        ),
+                        status TEXT NOT NULL DEFAULT 'open' CHECK (
+                            status IN (
+                                'open',
+                                'in_progress',
+                                'completed',
+                                'cancelled'
+                            )
+                        ),
+                        created_by_discord_user_id TEXT NOT NULL,
+                        accepted_by_discord_user_id TEXT,
+                        adjustment_percent NUMERIC(7, 2)
+                            NOT NULL DEFAULT 0,
+                        notes TEXT,
+                        discord_post_channel_id TEXT,
+                        discord_post_message_id TEXT,
+                        discord_thread_id TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        closed_at TIMESTAMPTZ,
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS market_order_items (
+                        market_item_id BIGSERIAL PRIMARY KEY,
+                        market_id BIGINT NOT NULL,
+                        line_number INTEGER NOT NULL CHECK (
+                            line_number BETWEEN 1 AND 15
+                        ),
+                        type_id BIGINT NOT NULL,
+                        type_name TEXT NOT NULL,
+                        quantity BIGINT NOT NULL CHECK (
+                            quantity > 0
+                        ),
+                        jita_reference_side TEXT NOT NULL CHECK (
+                            jita_reference_side IN ('buy', 'sell')
+                        ),
+                        jita_reference_unit_price NUMERIC(24, 2),
+                        adjusted_unit_price NUMERIC(24, 2),
+                        line_total NUMERIC(28, 2),
+                        price_fetched_at TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE (market_id, line_number),
+                        FOREIGN KEY (market_id)
+                            REFERENCES market_orders (market_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_market_orders_guild_status
+                    ON market_orders (
+                        guild_id,
+                        status,
+                        created_at DESC
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_market_orders_guild_scope_type
+                    ON market_orders (
+                        guild_id,
+                        owner_scope,
+                        order_type,
+                        created_at DESC
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_market_items_market
+                    ON market_order_items (
+                        market_id,
+                        line_number
+                    );
                     """
                 )
 
@@ -3859,6 +4030,439 @@ def build_fit_embed(fit):
         embed["thumbnail"] = {"url": render_url}
 
     return embed
+
+
+# ============================================================
+# FREEBORN MARKET — PHASE 1 HELPERS
+# ============================================================
+
+def format_market_reference(market_id):
+    return f"FREE-MKT-{int(market_id):04d}"
+
+
+def create_market_web_token(
+    guild_id,
+    discord_user_id,
+    order_type,
+    owner_scope,
+):
+    return market_web_serializer.dumps({
+        "guild_id": str(guild_id),
+        "discord_user_id": str(discord_user_id),
+        "order_type": str(order_type),
+        "owner_scope": str(owner_scope),
+    })
+
+
+def read_market_web_token(token):
+    payload = market_web_serializer.loads(
+        str(token or ""),
+        max_age=1800,
+    )
+
+    order_type = str(
+        payload["order_type"]
+    )
+
+    owner_scope = str(
+        payload["owner_scope"]
+    )
+
+    if order_type not in {
+        "buy",
+        "sell",
+    }:
+        raise ValueError(
+            "Invalid market order type"
+        )
+
+    if owner_scope not in {
+        "member",
+        "corporation",
+    }:
+        raise ValueError(
+            "Invalid market owner scope"
+        )
+
+    return {
+        "guild_id":
+            str(payload["guild_id"]),
+        "discord_user_id":
+            str(payload["discord_user_id"]),
+        "order_type":
+            order_type,
+        "owner_scope":
+            owner_scope,
+    }
+
+
+def build_market_web_url(
+    guild_id,
+    discord_user_id,
+    order_type,
+    owner_scope,
+):
+    token = create_market_web_token(
+        guild_id,
+        discord_user_id,
+        order_type,
+        owner_scope,
+    )
+
+    return (
+        f"{PUBLIC_BASE_URL}/market/nouveau?"
+        + urlencode({
+            "token": token,
+        })
+    )
+
+
+def freeborn_market_phase1_page(
+    market_context,
+):
+    """
+    Phase 1 visual/interaction foundation.
+
+    Search + Jita pricing + persistence are intentionally Phase 2/3.
+    This page already validates:
+      - personal vs corporation intent,
+      - BUY vs SELL intent,
+      - one dynamic row at start,
+      - + Add item up to the configured hard limit,
+      - one GLOBAL percentage adjustment only.
+    """
+    order_type = market_context[
+        "order_type"
+    ]
+    owner_scope = market_context[
+        "owner_scope"
+    ]
+
+    is_buy = (
+        order_type == "buy"
+    )
+
+    is_corp = (
+        owner_scope
+        == "corporation"
+    )
+
+    operation_label = (
+        "ACHAT"
+        if is_buy
+        else "VENTE"
+    )
+
+    scope_label = (
+        "CORPORATION"
+        if is_corp
+        else "MEMBRE"
+    )
+
+    title = (
+        f"{operation_label} "
+        f"{scope_label}"
+    )
+
+    accent = (
+        "#64d9ff"
+        if is_buy
+        else "#f0c565"
+    )
+
+    return f"""<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Freeborn Market — {title}</title>
+<style>
+:root{{
+  --bg:#030911;
+  --panel:#07131e;
+  --line:rgba(67,184,255,.34);
+  --text:#dcecf6;
+  --muted:#8299a8;
+  --accent:{accent};
+  --gold:#d9af54;
+}}
+*{{box-sizing:border-box}}
+body{{
+  margin:0;
+  background:
+    radial-gradient(circle at 70% 0%,rgba(25,91,142,.18),transparent 35%),
+    linear-gradient(180deg,#02070c,#07101a 70%,#02070c);
+  color:var(--text);
+  font-family:Arial,sans-serif;
+  min-height:100vh;
+}}
+.shell{{
+  width:min(1400px,96vw);
+  margin:28px auto;
+}}
+.hero{{
+  border:1px solid var(--line);
+  background:linear-gradient(180deg,rgba(9,25,39,.96),rgba(3,11,18,.96));
+  padding:18px 20px;
+  box-shadow:0 18px 60px rgba(0,0,0,.4);
+}}
+.eyebrow{{
+  color:#6ccfff;
+  font-size:12px;
+  letter-spacing:2px;
+  text-transform:uppercase;
+}}
+h1{{
+  margin:7px 0 4px;
+  font-size:30px;
+  letter-spacing:1px;
+}}
+.mode{{
+  color:var(--accent);
+  font-weight:800;
+}}
+.subtitle{{
+  color:var(--muted);
+  margin:0;
+}}
+.card{{
+  margin-top:14px;
+  border:1px solid var(--line);
+  background:rgba(5,15,24,.94);
+  padding:14px;
+}}
+.toolbar{{
+  display:grid;
+  grid-template-columns:1fr 240px;
+  gap:12px;
+  align-items:end;
+}}
+label{{
+  display:block;
+  color:#9fc1d3;
+  font-size:12px;
+  letter-spacing:.6px;
+  margin-bottom:6px;
+}}
+input{{
+  width:100%;
+  border:1px solid rgba(67,184,255,.4);
+  background:#020a11;
+  color:#eaf8ff;
+  min-height:40px;
+  padding:8px 10px;
+}}
+.lines{{
+  margin-top:12px;
+  display:grid;
+  gap:7px;
+}}
+.line{{
+  display:grid;
+  grid-template-columns:42px minmax(240px,1fr) 120px 170px 150px 46px;
+  gap:7px;
+  align-items:center;
+}}
+.line-head{{
+  color:#7994a5;
+  font-size:11px;
+  letter-spacing:.6px;
+  text-transform:uppercase;
+}}
+.num{{
+  text-align:center;
+  color:#67d8ff;
+  font-weight:800;
+}}
+.placeholder-price{{
+  border:1px solid rgba(255,255,255,.08);
+  min-height:40px;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  padding:0 10px;
+  color:#6f8795;
+  background:rgba(255,255,255,.02);
+}}
+button{{
+  border:1px solid rgba(217,175,84,.65);
+  background:linear-gradient(180deg,rgba(217,175,84,.14),rgba(217,175,84,.03));
+  color:#f1d487;
+  min-height:40px;
+  padding:8px 12px;
+  font-weight:800;
+  cursor:pointer;
+}}
+button:disabled{{
+  opacity:.45;
+  cursor:not-allowed;
+}}
+.remove{{
+  padding:0;
+  color:#ff7777;
+  border-color:rgba(255,90,90,.5);
+}}
+.actions{{
+  display:flex;
+  gap:8px;
+  margin-top:12px;
+}}
+.phase-note{{
+  margin-top:12px;
+  border-left:3px solid #3cbcff;
+  background:rgba(60,188,255,.07);
+  padding:10px 12px;
+  color:#9eb5c4;
+  line-height:1.45;
+}}
+.summary{{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:8px;
+  margin-top:12px;
+}}
+.summary>div{{
+  border:1px solid rgba(67,184,255,.2);
+  padding:10px;
+  background:#030b12;
+}}
+.summary small{{
+  display:block;
+  color:#6f8795;
+  margin-bottom:5px;
+}}
+.summary strong{{
+  color:#e8f6ff;
+}}
+@media(max-width:900px){{
+  .toolbar{{grid-template-columns:1fr}}
+  .line,.line-head{{
+    grid-template-columns:38px 1fr 90px;
+  }}
+  .line .price,
+  .line .subtotal,
+  .line-head .price,
+  .line-head .subtotal{{
+    display:none;
+  }}
+}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <section class="hero">
+    <div class="eyebrow">FREEBORN MARKET // PHASE 1</div>
+    <h1>{title}</h1>
+    <p class="subtitle">
+      Construction d'une annonce <span class="mode">{operation_label}</span>
+      — portée <span class="mode">{scope_label}</span>.
+    </p>
+  </section>
+
+  <section class="card">
+    <div class="toolbar">
+      <div>
+        <label>Ajustement global (%)</label>
+        <input id="adjustment" type="number" step="0.1" value="0"
+               min="-100" max="100" placeholder="-10 / 0 / +10">
+      </div>
+      <div>
+        <label>Limite de lignes</label>
+        <input value="{FREEBORN_MARKET_MAX_LINES} maximum" disabled>
+      </div>
+    </div>
+
+    <div class="lines" id="lines">
+      <div class="line line-head">
+        <div>#</div>
+        <div>Item EVE</div>
+        <div>Qté</div>
+        <div class="price">Prix Jita</div>
+        <div class="subtotal">Sous-total</div>
+        <div></div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button type="button" id="addLine">＋ Ajouter un item</button>
+      <button type="button" disabled>Valider l'annonce — Phase suivante</button>
+    </div>
+
+    <div class="summary">
+      <div>
+        <small>Référence marché</small>
+        <strong>Créée à la validation</strong>
+      </div>
+      <div>
+        <small>Ajustement</small>
+        <strong id="adjustmentPreview">0 % global</strong>
+      </div>
+      <div>
+        <small>Total général</small>
+        <strong>Calcul Jita — Phase 2</strong>
+      </div>
+    </div>
+
+    <div class="phase-note">
+      <strong>Phase 1 active.</strong>
+      La structure Discord/Neon, les quatre commandes et les lignes dynamiques
+      sont en place. La recherche EVE + icônes + moteur de prix Jita seront
+      branchés dans la phase suivante.
+    </div>
+  </section>
+</main>
+
+<script>
+const maxLines = {FREEBORN_MARKET_MAX_LINES};
+const lines = document.getElementById('lines');
+const addButton = document.getElementById('addLine');
+const adjustment = document.getElementById('adjustment');
+const adjustmentPreview = document.getElementById('adjustmentPreview');
+
+function refreshNumbers() {{
+  const rows = [...lines.querySelectorAll('.line.market-row')];
+  rows.forEach((row, index) => {{
+    row.querySelector('.num').textContent = index + 1;
+  }});
+  addButton.disabled = rows.length >= maxLines;
+}}
+
+function addLine() {{
+  const rows = lines.querySelectorAll('.line.market-row');
+  if (rows.length >= maxLines) return;
+
+  const row = document.createElement('div');
+  row.className = 'line market-row';
+  row.innerHTML = `
+    <div class="num"></div>
+    <input type="text" placeholder="Ex. Endurance, Tritanium, Invulnerability Field II...">
+    <input type="number" min="1" step="1" value="1">
+    <div class="placeholder-price price">Phase 2</div>
+    <div class="placeholder-price subtotal">— ISK</div>
+    <button type="button" class="remove" title="Retirer cette ligne">×</button>
+  `;
+
+  row.querySelector('.remove').addEventListener('click', () => {{
+    if (lines.querySelectorAll('.line.market-row').length <= 1) return;
+    row.remove();
+    refreshNumbers();
+  }});
+
+  lines.appendChild(row);
+  refreshNumbers();
+}}
+
+addButton.addEventListener('click', addLine);
+adjustment.addEventListener('input', () => {{
+  const value = Number(adjustment.value || 0);
+  const prefix = value > 0 ? '+' : '';
+  adjustmentPreview.textContent = `${{prefix}}${{value}} % global`;
+}});
+
+addLine();
+</script>
+</body>
+</html>"""
 
 
 def create_fit_web_token(guild_id, fit_id):
@@ -20161,6 +20765,50 @@ function showToast(message) {{
 </html>'''
 
 
+@app.route("/market/nouveau")
+def freeborn_market_new_page():
+    token = request.args.get(
+        "token",
+        "",
+    )
+
+    try:
+        market_context = (
+            read_market_web_token(
+                token
+            )
+        )
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return freeborn_web_page(
+            "Lien Freeborn Market invalide",
+            (
+                "Ce lien est invalide ou a expiré. "
+                "Relance /achat, /vente, /achat-corp ou /vente-corp sur Discord."
+            ),
+            status="error",
+        ), 403
+
+    if (
+        market_context["guild_id"]
+        != str(DISCORD_GUILD_ID)
+    ):
+        return freeborn_web_page(
+            "Accès Freeborn Market refusé",
+            "Ce lien ne correspond pas au serveur Freeborn Legacy.",
+            status="error",
+        ), 403
+
+    return freeborn_market_phase1_page(
+        market_context
+    )
+
+
 @app.route("/fittings/<fit_ref>")
 def fitting_web_card(fit_ref):
     token = request.args.get("token", "")
@@ -20547,6 +21195,121 @@ def interactions():
                     "configuré pour Freeborn Verify V3.",
 
                 **interaction_response_flags_payload(data),
+            },
+        })
+
+    # ========================================================
+    # FREEBORN MARKET — PHASE 1
+    # /achat, /vente, /achat-corp, /vente-corp
+    # ========================================================
+
+    if command_name in {
+        "achat",
+        "vente",
+        "achat-corp",
+        "vente-corp",
+    }:
+        is_corp = command_name.endswith(
+            "-corp"
+        )
+
+        if is_corp:
+            allowed = interaction_has_any_role(
+                data,
+                MARKET_CORP_ROLE_IDS,
+            )
+
+            if not allowed:
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": (
+                            "⛔ **Freeborn Market — accès refusé**\n\n"
+                            "Les annonces officielles de corporation sont "
+                            "réservées à la **Direction**, au **Haut Conseil** "
+                            "et au **CEO**."
+                        ),
+                        "flags": 64,
+                    },
+                })
+        else:
+            allowed = interaction_has_any_role(
+                data,
+                MARKET_MEMBER_ROLE_IDS,
+            )
+
+            if not allowed:
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": (
+                            "⛔ **Freeborn Market — accès refusé**\n\n"
+                            "Les annonces personnelles sont réservées "
+                            "aux membres Freeborn."
+                        ),
+                        "flags": 64,
+                    },
+                })
+
+        order_type = (
+            "buy"
+            if command_name.startswith(
+                "achat"
+            )
+            else "sell"
+        )
+
+        owner_scope = (
+            "corporation"
+            if is_corp
+            else "member"
+        )
+
+        market_url = build_market_web_url(
+            guild_id,
+            discord_user_id,
+            order_type,
+            owner_scope,
+        )
+
+        operation_label = (
+            "ACHAT"
+            if order_type == "buy"
+            else "VENTE"
+        )
+
+        scope_label = (
+            "CORPORATION"
+            if owner_scope == "corporation"
+            else "MEMBRE"
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"🛒 **FREEBORN MARKET — {operation_label} {scope_label}**\n\n"
+                    "Ouvre la page Freeborn Market pour préparer ton annonce.\n"
+                    f"Limite actuelle : **{FREEBORN_MARKET_MAX_LINES} lignes maximum**.\n"
+                    "L'ajustement de prix sera **global à toute l'annonce**."
+                ),
+                "flags": 64,
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 2,
+                                "style": 5,
+                                "label": "Ouvrir Freeborn Market",
+                                "emoji": {
+                                    "name": "🛒"
+                                },
+                                "url": market_url,
+                            },
+                        ],
+                    },
+                ],
             },
         })
 
@@ -24793,6 +25556,56 @@ def register_commands():
 
             "type":
                 1,
+        },
+
+        {
+            "name":
+                "achat",
+
+            "description":
+                "Créer une annonce personnelle d'achat sur Freeborn Market",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "vente",
+
+            "description":
+                "Créer une annonce personnelle de vente sur Freeborn Market",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "achat-corp",
+
+            "description":
+                "Créer une annonce officielle d'achat pour la corporation",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "vente-corp",
+
+            "description":
+                "Créer une annonce officielle de vente pour la corporation",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
         },
 
         {
