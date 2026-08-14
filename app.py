@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import base64
 import hashlib
 import json
@@ -383,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P2H-UI-POLISH + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P3-VALIDATE-DISCORD + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -871,6 +872,27 @@ def init_database():
 
                 cur.execute(
                     """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS jita_snapshot_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS total_isk NUMERIC(28, 2);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS discord_post_created_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS market_order_items (
                         market_item_id BIGSERIAL PRIMARY KEY,
                         market_id BIGINT NOT NULL,
@@ -896,6 +918,21 @@ def init_database():
                             REFERENCES market_orders (market_id)
                             ON DELETE CASCADE
                     );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_order_items
+                    ADD COLUMN IF NOT EXISTS chosen_unit_price NUMERIC(24, 2);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_order_items
+                    ADD COLUMN IF NOT EXISTS manual_price_override BOOLEAN
+                        NOT NULL DEFAULT FALSE;
                     """
                 )
 
@@ -4967,6 +5004,908 @@ def freeborn_market_jita_price(type_id):
     return data
 
 
+def freeborn_market_decimal(
+    value,
+    default="0",
+):
+    try:
+        return Decimal(
+            str(value)
+            .strip()
+            .replace(" ", "")
+            .replace(",", ".")
+        )
+    except (
+        InvalidOperation,
+        AttributeError,
+        TypeError,
+        ValueError,
+    ):
+        return Decimal(
+            default
+        )
+
+
+def freeborn_market_money_decimal(value):
+    return freeborn_market_decimal(
+        value
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+
+
+def freeborn_market_format_isk(value):
+    amount = freeborn_market_money_decimal(
+        value
+    )
+
+    rendered = f"{amount:,.2f}"
+    rendered = (
+        rendered
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+    return (
+        rendered
+        + " ISK"
+    )
+
+
+def freeborn_market_format_quantity(value):
+    try:
+        quantity = int(
+            value
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        quantity = 0
+
+    return f"{quantity:,}".replace(
+        ",",
+        " ",
+    )
+
+
+def freeborn_market_reference_side(
+    order_type,
+):
+    return (
+        "buy"
+        if order_type == "buy"
+        else "sell"
+    )
+
+
+def freeborn_market_validate_submission(
+    market_context,
+    payload,
+):
+    """
+    Validate browser payload, refresh ALL Jita references at one common
+    validation time, and compute authoritative server-side totals.
+
+    Manual unit prices are preserved only when the member explicitly changed
+    the default field. Otherwise the freshly refreshed Jita price becomes the
+    chosen unit price.
+    """
+    raw_items = (
+        payload.get("items")
+        if isinstance(
+            payload,
+            dict,
+        )
+        else None
+    )
+
+    if not isinstance(
+        raw_items,
+        list,
+    ):
+        raise ValueError(
+            "items_missing"
+        )
+
+    if not (
+        1
+        <= len(raw_items)
+        <= FREEBORN_MARKET_MAX_LINES
+    ):
+        raise ValueError(
+            "invalid_line_count"
+        )
+
+    adjustment = (
+        freeborn_market_decimal(
+            payload.get(
+                "adjustment_percent",
+                0,
+            )
+        )
+        .quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+
+    if (
+        adjustment
+        < Decimal("-100.00")
+        or adjustment
+        > Decimal("100.00")
+    ):
+        raise ValueError(
+            "invalid_adjustment"
+        )
+
+    notes = str(
+        payload.get(
+            "notes"
+        )
+        or ""
+    ).strip()
+
+    if len(notes) > 500:
+        raise ValueError(
+            "notes_too_long"
+        )
+
+    reference_side = (
+        freeborn_market_reference_side(
+            market_context[
+                "order_type"
+            ]
+        )
+    )
+
+    snapshot_at = datetime.now(
+        timezone.utc
+    )
+
+    validated_items = []
+    total_isk = Decimal(
+        "0.00"
+    )
+
+    for line_number, raw_item in enumerate(
+        raw_items,
+        start=1,
+    ):
+        if not isinstance(
+            raw_item,
+            dict,
+        ):
+            raise ValueError(
+                "invalid_item"
+            )
+
+        try:
+            type_id = int(
+                raw_item.get(
+                    "type_id"
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            raise ValueError(
+                "invalid_type_id"
+            )
+
+        try:
+            quantity = int(
+                str(
+                    raw_item.get(
+                        "quantity",
+                        "0",
+                    )
+                ).replace(
+                    " ",
+                    "",
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            raise ValueError(
+                "invalid_quantity"
+            )
+
+        if quantity <= 0:
+            raise ValueError(
+                "invalid_quantity"
+            )
+
+        # The type MUST exist in Freeborn's official SDE market index.
+        with psycopg.connect(
+            DATABASE_URL
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        type_name,
+                        market_group_id
+                    FROM market_type_index
+                    WHERE type_id = %s
+                    LIMIT 1;
+                    """,
+                    (
+                        type_id,
+                    ),
+                )
+                type_row = cur.fetchone()
+
+        if not type_row:
+            raise ValueError(
+                "unknown_market_type"
+            )
+
+        type_name = str(
+            type_row[0]
+        )
+
+        price_data = (
+            freeborn_market_jita_price(
+                type_id
+            )
+        )
+
+        fresh_jita = (
+            price_data.get(
+                "jita_buy"
+            )
+            if reference_side == "buy"
+            else price_data.get(
+                "jita_sell"
+            )
+        )
+
+        if fresh_jita is None:
+            raise ValueError(
+                f"jita_price_missing:{type_name}"
+            )
+
+        fresh_jita = (
+            freeborn_market_money_decimal(
+                fresh_jita
+            )
+        )
+
+        manual_override = bool(
+            raw_item.get(
+                "manual_price_override"
+            )
+        )
+
+        if manual_override:
+            chosen_unit_price = (
+                freeborn_market_money_decimal(
+                    raw_item.get(
+                        "chosen_unit_price"
+                    )
+                )
+            )
+
+            if (
+                chosen_unit_price
+                <= 0
+            ):
+                raise ValueError(
+                    "invalid_manual_price"
+                )
+        else:
+            chosen_unit_price = (
+                fresh_jita
+            )
+
+        multiplier = (
+            Decimal("1.00")
+            + (
+                adjustment
+                / Decimal("100.00")
+            )
+        )
+
+        adjusted_unit_price = (
+            chosen_unit_price
+            * multiplier
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+
+        line_total = (
+            adjusted_unit_price
+            * Decimal(
+                quantity
+            )
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+
+        total_isk += (
+            line_total
+        )
+
+        validated_items.append({
+            "line_number":
+                line_number,
+            "type_id":
+                type_id,
+            "type_name":
+                type_name,
+            "quantity":
+                quantity,
+            "jita_reference_side":
+                reference_side,
+            "jita_reference_unit_price":
+                fresh_jita,
+            "chosen_unit_price":
+                chosen_unit_price,
+            "manual_price_override":
+                manual_override,
+            "adjusted_unit_price":
+                adjusted_unit_price,
+            "line_total":
+                line_total,
+            "price_fetched_at":
+                snapshot_at,
+        })
+
+    return {
+        "adjustment_percent":
+            adjustment,
+        "notes":
+            notes,
+        "jita_snapshot_at":
+            snapshot_at,
+        "items":
+            validated_items,
+        "total_isk":
+            total_isk.quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            ),
+    }
+
+
+def freeborn_market_insert_order(
+    market_context,
+    validated,
+):
+    """
+    Persist the validated order and its lines.
+    """
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO market_orders (
+                    guild_id,
+                    order_type,
+                    owner_scope,
+                    status,
+                    created_by_discord_user_id,
+                    adjustment_percent,
+                    notes,
+                    jita_snapshot_at,
+                    total_isk,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, 'open',
+                    %s, %s, %s, %s, %s,
+                    NOW(), NOW()
+                )
+                RETURNING market_id;
+                """,
+                (
+                    market_context[
+                        "guild_id"
+                    ],
+                    market_context[
+                        "order_type"
+                    ],
+                    market_context[
+                        "owner_scope"
+                    ],
+                    market_context[
+                        "discord_user_id"
+                    ],
+                    validated[
+                        "adjustment_percent"
+                    ],
+                    validated[
+                        "notes"
+                    ],
+                    validated[
+                        "jita_snapshot_at"
+                    ],
+                    validated[
+                        "total_isk"
+                    ],
+                ),
+            )
+
+            row = cur.fetchone()
+
+            if not row:
+                raise RuntimeError(
+                    "market_order_insert_failed"
+                )
+
+            market_id = int(
+                row[0]
+            )
+
+            for item in validated[
+                "items"
+            ]:
+                cur.execute(
+                    """
+                    INSERT INTO market_order_items (
+                        market_id,
+                        line_number,
+                        type_id,
+                        type_name,
+                        quantity,
+                        jita_reference_side,
+                        jita_reference_unit_price,
+                        chosen_unit_price,
+                        manual_price_override,
+                        adjusted_unit_price,
+                        line_total,
+                        price_fetched_at,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, NOW(), NOW()
+                    );
+                    """,
+                    (
+                        market_id,
+                        item[
+                            "line_number"
+                        ],
+                        item[
+                            "type_id"
+                        ],
+                        item[
+                            "type_name"
+                        ],
+                        item[
+                            "quantity"
+                        ],
+                        item[
+                            "jita_reference_side"
+                        ],
+                        item[
+                            "jita_reference_unit_price"
+                        ],
+                        item[
+                            "chosen_unit_price"
+                        ],
+                        item[
+                            "manual_price_override"
+                        ],
+                        item[
+                            "adjusted_unit_price"
+                        ],
+                        item[
+                            "line_total"
+                        ],
+                        item[
+                            "price_fetched_at"
+                        ],
+                    ),
+                )
+
+        conn.commit()
+
+    return market_id
+
+
+def freeborn_market_delete_order(
+    guild_id,
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM market_orders
+                WHERE guild_id = %s
+                  AND market_id = %s;
+                """,
+                (
+                    str(guild_id),
+                    int(market_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_market_save_publication(
+    guild_id,
+    market_id,
+    channel_id,
+    message_id,
+    thread_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE market_orders
+                SET
+                    discord_post_channel_id = %s,
+                    discord_post_message_id = %s,
+                    discord_thread_id = %s,
+                    discord_post_created_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                  AND market_id = %s;
+                """,
+                (
+                    str(channel_id),
+                    str(message_id),
+                    str(thread_id),
+                    str(guild_id),
+                    int(market_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_market_build_discord_embed(
+    market_id,
+    market_context,
+    validated,
+):
+    ref = format_market_reference(
+        market_id
+    )
+
+    is_buy = (
+        market_context[
+            "order_type"
+        ]
+        == "buy"
+    )
+
+    is_corp = (
+        market_context[
+            "owner_scope"
+        ]
+        == "corporation"
+    )
+
+    operation_label = (
+        "ACHAT"
+        if is_buy
+        else "VENTE"
+    )
+
+    scope_label = (
+        "CORPORATION"
+        if is_corp
+        else "MEMBRE"
+    )
+
+    reference_label = (
+        "JITA BUY"
+        if is_buy
+        else "JITA SELL"
+    )
+
+    lines = []
+
+    for item in validated[
+        "items"
+    ]:
+        chosen_marker = (
+            " • prix personnalisé"
+            if item[
+                "manual_price_override"
+            ]
+            else ""
+        )
+
+        lines.append(
+            (
+                f"**{item['line_number']}. "
+                f"{item['type_name']}** × "
+                f"{freeborn_market_format_quantity(item['quantity'])}\n"
+                f"Jita : "
+                f"{freeborn_market_format_isk(item['jita_reference_unit_price'])}"
+                f" • Base : "
+                f"{freeborn_market_format_isk(item['chosen_unit_price'])}"
+                f"{chosen_marker}\n"
+                f"Final/u. : "
+                f"{freeborn_market_format_isk(item['adjusted_unit_price'])}"
+                f" • **Sous-total : "
+                f"{freeborn_market_format_isk(item['line_total'])}**"
+            )
+        )
+
+    snapshot_local = (
+        validated[
+            "jita_snapshot_at"
+        ]
+        .astimezone(
+            timezone.utc
+        )
+        .strftime(
+            "%d/%m/%Y %H:%M:%S UTC"
+        )
+    )
+
+    adjustment = (
+        validated[
+            "adjustment_percent"
+        ]
+    )
+
+    adjustment_text = (
+        f"{adjustment:+.2f}%"
+        if adjustment != 0
+        else "0.00%"
+    ).replace(
+        ".",
+        ",",
+    )
+
+    fields = [
+        {
+            "name":
+                "Statut",
+            "value":
+                "🟢 OUVERT",
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Créé par",
+            "value":
+                (
+                    f"<@{market_context['discord_user_id']}>"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Référence marché",
+            "value":
+                (
+                    f"{reference_label} • Jita 4-4\n"
+                    f"Actualisée : {snapshot_local}"
+                ),
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Ajustement global",
+            "value":
+                adjustment_text,
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Total",
+            "value":
+                (
+                    f"**{freeborn_market_format_isk(validated['total_isk'])}**"
+                ),
+            "inline":
+                True,
+        },
+    ]
+
+    notes = validated[
+        "notes"
+    ]
+
+    if notes:
+        fields.append({
+            "name":
+                "Notes",
+            "value":
+                notes[:1024],
+            "inline":
+                False,
+        })
+
+    return {
+        "title":
+            (
+                f"{ref} — {operation_label} {scope_label}"
+            ),
+        "description":
+            "\n\n".join(
+                lines
+            )[:4096],
+        "color":
+            (
+                0x2EAADC
+                if is_buy
+                else 0xD8A94E
+            ),
+        "fields":
+            fields,
+        "footer": {
+            "text":
+                (
+                    "Freeborn Legacy • Freeborn Market • "
+                    "Prix Jita figés à la validation"
+                )
+        },
+    }
+
+
+def freeborn_market_publish_discord(
+    market_id,
+    market_context,
+    validated,
+):
+    """
+    Create exactly one Freeborn Market forum post.
+    """
+    target_channel_id = str(
+        DISCORD_MARKET_CHANNEL_ID
+        or ""
+    ).strip()
+
+    if not target_channel_id:
+        raise RuntimeError(
+            "DISCORD_MARKET_CHANNEL_ID is not configured"
+        )
+
+    channel = discord_get_channel(
+        target_channel_id
+    )
+
+    channel_type = int(
+        channel.get(
+            "type",
+            -1,
+        )
+    )
+
+    if channel_type not in {
+        15,
+        16,
+    }:
+        raise RuntimeError(
+            "Freeborn Market requires a Discord Forum/Media channel "
+            f"(configured type={channel_type})."
+        )
+
+    ref = format_market_reference(
+        market_id
+    )
+
+    operation_label = (
+        "ACHAT"
+        if market_context[
+            "order_type"
+        ] == "buy"
+        else "VENTE"
+    )
+
+    scope_label = (
+        "CORP"
+        if market_context[
+            "owner_scope"
+        ] == "corporation"
+        else "MEMBRE"
+    )
+
+    thread_name = (
+        f"{ref} — {operation_label} {scope_label}"
+    )[:100]
+
+    message_payload = {
+        "content":
+            (
+                f"🛒 **{ref} — {operation_label} {scope_label}**"
+            ),
+        "embeds": [
+            freeborn_market_build_discord_embed(
+                market_id,
+                market_context,
+                validated,
+            )
+        ],
+        "allowed_mentions": {
+            "parse": []
+        },
+    }
+
+    response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{target_channel_id}/threads"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "name":
+                thread_name,
+            "auto_archive_duration":
+                10080,
+            "message":
+                message_payload,
+        },
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn Market forum publication failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    created = (
+        response.json()
+        or {}
+    )
+
+    thread_id = str(
+        created[
+            "id"
+        ]
+    )
+
+    starter_message = (
+        created.get(
+            "message"
+        )
+        or {}
+    )
+
+    message_id = str(
+        starter_message.get(
+            "id"
+        )
+        or thread_id
+    )
+
+    return {
+        "channel_id":
+            thread_id,
+        "message_id":
+            message_id,
+        "thread_id":
+            thread_id,
+    }
+
+
 def freeborn_market_phase2_page(
     market_context,
     token,
@@ -5553,7 +6492,7 @@ button,input{{font:inherit}}
       <div class="action-row">
         <button class="action" type="button" id="addLine">＋ Ajouter un item</button>
         <button class="action primary" type="button" id="validateOrder" disabled>
-          Valider l'annonce — Phase 3
+          ✓ Valider l'annonce
         </button>
       </div>
 
@@ -5606,7 +6545,7 @@ button,input{{font:inherit}}
   <footer class="footer">
     <span>Libres par choix • Unis par volonté</span>
     <span class="center">FREEBORN MARKET</span>
-    <span class="right">PHASE 2 • JITA ENGINE</span>
+    <span class="right">PHASE 3 • VALIDATION + DISCORD</span>
   </footer>
 </main>
 
@@ -5623,8 +6562,11 @@ const adjustmentPreview = document.getElementById('adjustmentPreview');
 const lineCount = document.getElementById('lineCount');
 const grandTotal = document.getElementById('grandTotal');
 const marketStatus = document.getElementById('marketStatus');
+const validateOrderButton = document.getElementById('validateOrder');
+const marketNotes = document.getElementById('marketNotes');
 
 let rowSequence = 0;
+let marketSubmitting = false;
 
 function money(value) {{
   if (value === null || value === undefined || !Number.isFinite(Number(value))) {{
@@ -5758,6 +6700,17 @@ function updateTotals() {{
 
   grandTotal.textContent = money(total);
   showAdjustment();
+
+  const rows = [...document.querySelectorAll('.market-row')];
+  const validRows = rows.length > 0 && rows.every(row => {{
+    const hasType = Number(row.dataset.typeId || 0) > 0;
+    const chosen = parseISKInput(row.querySelector('.manual-price').value);
+    const qty = parseIntegerInput(row.querySelector('.qty').value);
+    return hasType && chosen > 0 && qty > 0;
+  }});
+
+  validateOrderButton.disabled =
+    marketSubmitting || !validRows;
 }}
 
 function refreshRows() {{
@@ -5816,6 +6769,7 @@ function makeRow() {{
   row.id = rowId;
   row.dataset.typeId = '';
   row.dataset.referencePrice = '0';
+  row.dataset.manualPriceOverride = '0';
 
   row.innerHTML = `
     <div class="num"></div>
@@ -5854,6 +6808,7 @@ function makeRow() {{
     row.dataset.typeId = '';
     row.dataset.referencePrice = '0';
     row.dataset.priceFetchedAt = '';
+    row.dataset.manualPriceOverride = '0';
     icon.style.display = 'none';
     manualPrice.value = '';
     row.querySelector('.price-box b').textContent = '—';
@@ -5912,6 +6867,7 @@ function makeRow() {{
               manualPrice.value =
                 selectedPrice == null ? '' : plainISK(selectedPrice);
 
+              row.dataset.manualPriceOverride = '0';
               updateTotals();
 
               if (selectedPrice == null) {{
@@ -5968,7 +6924,10 @@ function makeRow() {{
     qty.value = String(value);
   }});
 
-  manualPrice.addEventListener('input', updateTotals);
+  manualPrice.addEventListener('input', () => {{
+    row.dataset.manualPriceOverride = '1';
+    updateTotals();
+  }});
   manualPrice.addEventListener('blur', () => {{
     const value = parseISKInput(manualPrice.value);
     manualPrice.value = value > 0 ? plainISK(value) : '';
@@ -5991,6 +6950,95 @@ function makeRow() {{
   lines.appendChild(row);
   refreshRows();
 }}
+
+async function validateMarketOrder() {{
+  if (marketSubmitting) return;
+
+  const rows = [...document.querySelectorAll('.market-row')];
+
+  const items = rows.map(row => ({{
+    type_id: Number(row.dataset.typeId || 0),
+    quantity: parseIntegerInput(row.querySelector('.qty').value),
+    chosen_unit_price: parseISKInput(row.querySelector('.manual-price').value),
+    manual_price_override: row.dataset.manualPriceOverride === '1'
+  }}));
+
+  if (!items.length || items.some(item => !item.type_id || item.quantity <= 0 || item.chosen_unit_price <= 0)) {{
+    setStatus('Complète toutes les lignes avant de valider.', 'err');
+    return;
+  }}
+
+  marketSubmitting = true;
+  updateTotals();
+  setStatus(
+    'Validation en cours : actualisation simultanée des prix Jita, enregistrement Neon et publication Discord…'
+  );
+
+  try {{
+    const response = await fetch(
+      '/market/api/validate?token=' + encodeURIComponent(token),
+      {{
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {{
+          'Content-Type': 'application/json'
+        }},
+        body: JSON.stringify({{
+          adjustment_percent: parseAdjustment(),
+          notes: String(marketNotes.value || '').trim(),
+          items
+        }})
+      }}
+    );
+
+    const data = await response.json().catch(() => ({{}}));
+
+    if (!response.ok || !data.ok) {{
+      throw new Error(
+        data.message
+        || data.error
+        || 'Validation Freeborn Market impossible'
+      );
+    }}
+
+    setStatus(
+      data.reference
+      + ' créé • prix Jita figés à la validation • publication Discord créée.',
+      'ok'
+    );
+
+    validateOrderButton.textContent =
+      '✓ ' + data.reference + ' CRÉÉ';
+
+    validateOrderButton.disabled = true;
+    addLineButton.disabled = true;
+    adjustmentInput.disabled = true;
+    marketNotes.disabled = true;
+
+    document.querySelectorAll(
+      '.market-row input, .market-row button'
+    ).forEach(element => {{
+      element.disabled = true;
+    }});
+
+    if (data.total_isk_display) {{
+      grandTotal.textContent =
+        data.total_isk_display;
+    }}
+  }} catch (error) {{
+    marketSubmitting = false;
+    updateTotals();
+    setStatus(
+      String(error.message || error),
+      'err'
+    );
+  }}
+}}
+
+validateOrderButton.addEventListener(
+  'click',
+  validateMarketOrder
+);
 
 document.getElementById('adjustMinus').addEventListener('click', () => {{
   const value = parseAdjustment() - 0.25;
@@ -22457,6 +23505,273 @@ def freeborn_market_api_price(type_id):
     return jsonify(
         data
     )
+
+
+@app.route(
+    "/market/api/validate",
+    methods=["POST"],
+)
+def freeborn_market_api_validate():
+    token = request.args.get(
+        "token",
+        "",
+    )
+
+    try:
+        market_context = (
+            freeborn_market_validate_token(
+                token
+            )
+        )
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return jsonify({
+            "ok":
+                False,
+            "error":
+                "invalid_token",
+            "message":
+                "Le lien Freeborn Market est invalide ou a expiré.",
+        }), 403
+
+    if not str(
+        DISCORD_MARKET_CHANNEL_ID
+        or ""
+    ).strip():
+        return jsonify({
+            "ok":
+                False,
+            "error":
+                "market_channel_not_configured",
+            "message":
+                (
+                    "DISCORD_MARKET_CHANNEL_ID n'est pas configuré dans Render."
+                ),
+        }), 503
+
+    payload = (
+        request.get_json(
+            silent=True
+        )
+        or {}
+    )
+
+    market_id = None
+    publication = None
+
+    try:
+        # 1. Freeze all Jita references at one common validation timestamp.
+        validated = (
+            freeborn_market_validate_submission(
+                market_context,
+                payload,
+            )
+        )
+
+        # 2. Persist Neon.
+        market_id = (
+            freeborn_market_insert_order(
+                market_context,
+                validated,
+            )
+        )
+
+        # 3. Create Discord forum post.
+        publication = (
+            freeborn_market_publish_discord(
+                market_id,
+                market_context,
+                validated,
+            )
+        )
+
+        # 4. Save the exact Discord linkage.
+        freeborn_market_save_publication(
+            market_context[
+                "guild_id"
+            ],
+            market_id,
+            publication[
+                "channel_id"
+            ],
+            publication[
+                "message_id"
+            ],
+            publication[
+                "thread_id"
+            ],
+        )
+
+        ref = format_market_reference(
+            market_id
+        )
+
+        print(
+            "Freeborn Market order created [P3]:",
+            ref,
+            market_context[
+                "order_type"
+            ],
+            market_context[
+                "owner_scope"
+            ],
+            "items=",
+            len(
+                validated[
+                    "items"
+                ]
+            ),
+            "total=",
+            validated[
+                "total_isk"
+            ],
+            "thread=",
+            publication[
+                "thread_id"
+            ],
+        )
+
+        return jsonify({
+            "ok":
+                True,
+            "reference":
+                ref,
+            "market_id":
+                market_id,
+            "total_isk_display":
+                freeborn_market_format_isk(
+                    validated[
+                        "total_isk"
+                    ]
+                ),
+            "jita_snapshot_at":
+                validated[
+                    "jita_snapshot_at"
+                ].isoformat(),
+            "discord_thread_id":
+                publication[
+                    "thread_id"
+                ],
+        })
+
+    except ValueError as error:
+        message = str(
+            error
+        )
+
+        if message.startswith(
+            "jita_price_missing:"
+        ):
+            missing_name = (
+                message.split(
+                    ":",
+                    1,
+                )[1]
+            )
+            friendly = (
+                f"Aucun prix Jita de référence disponible pour {missing_name}."
+            )
+        else:
+            friendly = (
+                "Annonce invalide. Vérifie les items, quantités, prix et l'ajustement."
+            )
+
+        print(
+            "Freeborn Market validation rejected [P3]:",
+            repr(error),
+        )
+
+        return jsonify({
+            "ok":
+                False,
+            "error":
+                "validation_failed",
+            "message":
+                friendly,
+        }), 400
+
+    except Exception as error:
+        print(
+            "Freeborn Market validation/publication failed [P3]:",
+            repr(error),
+        )
+
+        # Compensating rollback:
+        # If Discord publication failed after Neon insertion, remove the order
+        # so Phase 3 never leaves a database-only announcement.
+        if (
+            market_id is not None
+            and publication is None
+        ):
+            try:
+                freeborn_market_delete_order(
+                    market_context[
+                        "guild_id"
+                    ],
+                    market_id,
+                )
+            except Exception as rollback_error:
+                print(
+                    "Freeborn Market Neon rollback failed [P3]:",
+                    repr(
+                        rollback_error
+                    ),
+                )
+
+        # If publication existed but saving the linkage failed, delete the
+        # Discord thread as compensation before deleting Neon.
+        if (
+            market_id is not None
+            and publication is not None
+        ):
+            try:
+                requests.delete(
+                    (
+                        f"{DISCORD_API}/channels/"
+                        f"{publication['thread_id']}"
+                    ),
+                    headers=discord_bot_headers(),
+                    timeout=12,
+                )
+            except Exception as discord_rollback_error:
+                print(
+                    "Freeborn Market Discord rollback failed [P3]:",
+                    repr(
+                        discord_rollback_error
+                    ),
+                )
+
+            try:
+                freeborn_market_delete_order(
+                    market_context[
+                        "guild_id"
+                    ],
+                    market_id,
+                )
+            except Exception as rollback_error:
+                print(
+                    "Freeborn Market Neon rollback failed [P3]:",
+                    repr(
+                        rollback_error
+                    ),
+                )
+
+        return jsonify({
+            "ok":
+                False,
+            "error":
+                "market_creation_failed",
+            "message":
+                (
+                    "La création de l'annonce Freeborn Market a échoué. "
+                    "Aucune annonce incomplète ne doit être conservée."
+                ),
+        }), 500
 
 
 @app.route("/fittings/<fit_ref>")
