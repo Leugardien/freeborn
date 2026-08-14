@@ -384,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4E-WITHDRAW-WORKFLOW + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4F-WITHDRAW-ROUTER-FIX + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -12073,7 +12073,7 @@ def handle_message_component(
     # ========================================================
 
     lifecycle_match = re.fullmatch(
-        r"market_(take|complete|cancel):(\d+)",
+        r"market_(take|withdraw|complete|cancel):(\d+)",
         str(custom_id),
     )
 
@@ -25552,7 +25552,7 @@ def interactions():
         )
 
         lifecycle_match = re.fullmatch(
-            r"market_(take|complete|cancel):(\d+)",
+            r"market_(take|withdraw|complete|cancel):(\d+)",
             custom_id,
         )
 
