@@ -12022,6 +12022,212 @@ def handle_message_component(
     )
 
     # ========================================================
+    # FREEBORN MARKET — PHASE 4 LIFECYCLE COMPONENTS
+    # IMPORTANT: market buttons must be routed here, before the
+    # legacy signed-token confirmation router below.
+    # ========================================================
+
+    lifecycle_match = re.fullmatch(
+        r"market_(take|complete|cancel):(\d+)",
+        str(custom_id),
+    )
+
+    if lifecycle_match:
+        guild_id = str(data.get("guild_id") or "")
+
+        try:
+            discord_user_id = str(
+                data["member"]["user"]["id"]
+            )
+        except (KeyError, TypeError):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": "⚠️ Impossible d'identifier l'utilisateur Discord.",
+                    "flags": 64,
+                },
+            })
+
+        action = lifecycle_match.group(1)
+        market_id = int(lifecycle_match.group(2))
+
+        order = freeborn_market_get_order(
+            guild_id,
+            market_id,
+        )
+
+        if not order:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": "ℹ️ Cette annonce Freeborn Market n'existe plus.",
+                    "flags": 64,
+                },
+            })
+
+        if action == "take":
+            if order["status"] != "open":
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Cette annonce n'est plus disponible au statut **OUVERT**.",
+                        "flags": 64,
+                    },
+                })
+
+            creator_is_taker = (
+                str(order["created_by_discord_user_id"])
+                == discord_user_id
+            )
+
+            # Temporary solo-test exception already validated for Phase 4:
+            # CEO may take their own order while no second member is available.
+            if creator_is_taker:
+                is_ceo_test_user = interaction_has_any_role(
+                    data,
+                    configured_role_ids(DISCORD_CEO_ROLE_ID),
+                )
+                if not is_ceo_test_user:
+                    return jsonify({
+                        "type": 4,
+                        "data": {
+                            "content": (
+                                "ℹ️ Tu es déjà le créateur de cette annonce. "
+                                "Un autre membre doit la prendre."
+                            ),
+                            "flags": 64,
+                        },
+                    })
+
+                print(
+                    "Freeborn Market TEST self-take [P4-TEST]:",
+                    format_market_reference(market_id),
+                    "CEO=",
+                    discord_user_id,
+                )
+
+            if not freeborn_market_take_order(
+                guild_id,
+                market_id,
+                discord_user_id,
+            ):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ L'annonce vient d'être prise par quelqu'un d'autre.",
+                        "flags": 64,
+                    },
+                })
+
+            order = freeborn_market_get_order(guild_id, market_id)
+            freeborn_market_update_forum_post(order)
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"🤝 **{format_market_reference(market_id)} "
+                        "est maintenant EN COURS.**\n"
+                        "Tu es enregistré comme membre ayant pris l'annonce."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        if action == "complete":
+            if order["status"] != "in_progress":
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Seule une annonce **EN COURS** peut être terminée.",
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_user_can_complete(
+                data, order, discord_user_id
+            ):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "⛔ Tu n'es pas autorisé à terminer cette annonce.",
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_complete_order(guild_id, market_id):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Le statut de cette annonce a déjà changé.",
+                        "flags": 64,
+                    },
+                })
+
+            order = freeborn_market_get_order(guild_id, market_id)
+            freeborn_market_update_forum_post(order)
+            freeborn_market_delete_forum_thread(order)
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"✅ **{format_market_reference(market_id)} terminé.**\n"
+                        "L'annonce est conservée dans Neon et le post Discord a été supprimé."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        if action == "cancel":
+            if order["status"] not in {"open", "in_progress"}:
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Cette annonce est déjà clôturée.",
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_user_can_cancel(
+                data, order, discord_user_id
+            ):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": (
+                            "⛔ Seul le créateur de l'annonce, la Direction, "
+                            "le Haut Conseil ou le CEO peut l'annuler."
+                        ),
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_cancel_order(guild_id, market_id):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Le statut de cette annonce a déjà changé.",
+                        "flags": 64,
+                    },
+                })
+
+            order = freeborn_market_get_order(guild_id, market_id)
+            freeborn_market_update_forum_post(order)
+            freeborn_market_delete_forum_thread(order)
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"🔴 **{format_market_reference(market_id)} annulé.**\n"
+                        "L'annonce est conservée dans Neon et le post Discord a été supprimé."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+    # ========================================================
     # V3 ORIENTATION
     # ========================================================
 
