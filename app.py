@@ -384,7 +384,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4F-WITHDRAW-ROUTER-FIX + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "MARKET-P4G-WITHDRAW-DB-FIX + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -6686,15 +6686,18 @@ def freeborn_market_withdraw_order(
     The member who took an IN PROGRESS order withdraws.
     The order returns to OPEN and becomes available again.
     """
-    with get_db_connection() as conn:
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE freeborn_market_orders
+                UPDATE market_orders
                 SET
                     status = 'open',
                     accepted_by_discord_user_id = NULL,
-                    accepted_at = NULL
+                    accepted_at = NULL,
+                    updated_at = NOW()
                 WHERE guild_id = %s
                   AND market_id = %s
                   AND status = 'in_progress'
@@ -6708,8 +6711,12 @@ def freeborn_market_withdraw_order(
                 ),
             )
             row = cur.fetchone()
+
         conn.commit()
-    return bool(row)
+
+    return bool(
+        row
+    )
 
 
 def freeborn_market_complete_order(
