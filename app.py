@@ -222,6 +222,13 @@ DISCORD_OP_CORP_FORUM_ID = os.environ.get(
     "1538026284972642325",
 )
 
+# Dedicated SRP forum. /srp can be launched from any allowed text channel;
+# the resulting request is always published here.
+DISCORD_SRP_FORUM_ID = os.environ.get(
+    "DISCORD_SRP_FORUM_ID",
+    "1536573060285730817",
+)
+
 # Market page line count:
 # - operational default: 10
 # - hard ceiling: 15
@@ -377,6 +384,13 @@ OP_CORP_CREATOR_ROLE_IDS = configured_role_ids(
     DISCORD_FLEET_COMMANDER_ROLE_ID,
 )
 
+# SRP moderation / decision roles.
+# Only CEO + Direction may accept, refuse or close an SRP request.
+SRP_MANAGER_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+)
+
 
 # ============================================================
 # URLS
@@ -406,7 +420,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "OP-CORP-P1.3-DETAILS-FIX + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "SRP-P1 + OP-CORP-P1.3 + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -1011,6 +1025,57 @@ def init_database():
                     ON market_order_items (
                         market_id,
                         line_number
+                    );
+                    """
+                )
+
+                # ====================================================
+                # FREEBORN SRP
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS srp_requests (
+                        srp_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        created_by_discord_user_id TEXT NOT NULL,
+                        pilot_name TEXT,
+                        ship_fit TEXT NOT NULL,
+                        zkill_url TEXT NOT NULL,
+                        operation_fc TEXT,
+                        circumstances TEXT NOT NULL,
+                        extra_info TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                            status IN (
+                                'pending',
+                                'accepted',
+                                'refused',
+                                'closed'
+                            )
+                        ),
+                        decided_by_discord_user_id TEXT,
+                        decided_at TIMESTAMPTZ,
+                        closed_by_discord_user_id TEXT,
+                        closed_at TIMESTAMPTZ,
+                        discord_thread_id TEXT,
+                        discord_post_message_id TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_srp_requests_guild_status
+                    ON srp_requests (
+                        guild_id,
+                        status,
+                        created_at
                     );
                     """
                 )
@@ -9530,6 +9595,152 @@ def modal_values(data):
     return values
 
 
+def handle_srp_modal_submit(
+    data
+):
+    guild_id = str(
+        data.get(
+            "guild_id"
+        )
+        or ""
+    )
+
+    actor_user_id = str(
+        data[
+            "member"
+        ][
+            "user"
+        ][
+            "id"
+        ]
+    )
+
+    ship_fit = freeborn_op_modal_value(
+        data,
+        "srp_ship_fit",
+    )
+
+    zkill_url = freeborn_op_modal_value(
+        data,
+        "srp_zkill",
+    )
+
+    operation_fc = (
+        freeborn_op_modal_value(
+            data,
+            "srp_operation_fc",
+        )
+        or None
+    )
+
+    circumstances = freeborn_op_modal_value(
+        data,
+        "srp_circumstances",
+    )
+
+    extra_info = (
+        freeborn_op_modal_value(
+            data,
+            "srp_extra",
+        )
+        or None
+    )
+
+    if not (
+        zkill_url.startswith(
+            "https://zkillboard.com/"
+        )
+        or zkill_url.startswith(
+            "http://zkillboard.com/"
+        )
+    ):
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "❌ **Lien zKillboard invalide.**\n"
+                        "Utilise un lien `https://zkillboard.com/...`."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    pilot_name = freeborn_srp_get_main_name(
+        actor_user_id
+    )
+
+    srp_id = None
+
+    try:
+        srp_id = freeborn_srp_insert(
+            guild_id,
+            actor_user_id,
+            pilot_name,
+            ship_fit,
+            zkill_url,
+            operation_fc,
+            circumstances,
+            extra_info,
+        )
+
+        freeborn_srp_publish(
+            srp_id
+        )
+
+    except Exception as error:
+        print(
+            "Freeborn SRP creation failed:",
+            repr(
+                error
+            ),
+        )
+
+        if srp_id is not None:
+            try:
+                freeborn_srp_delete(
+                    srp_id
+                )
+            except Exception as rollback_error:
+                print(
+                    "Freeborn SRP rollback failed:",
+                    repr(
+                        rollback_error
+                    ),
+                )
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "⚠️ **La création de la demande SRP a échoué.**\n"
+                        "Aucune demande incomplète ne doit être conservée."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    return jsonify({
+        "type":
+            4,
+        "data": {
+            "content":
+                (
+                    f"✅ **{freeborn_srp_reference(srp_id)} créée.**\n"
+                    "La demande a été publiée automatiquement dans "
+                    f"<#{DISCORD_SRP_FORUM_ID}>."
+                ),
+            "flags":
+                64,
+        },
+    })
+
+
 def handle_op_corp_modal_submit(
     data
 ):
@@ -12524,6 +12735,941 @@ def handle_autocomplete(
 
 
 # ============================================================
+# FREEBORN SRP
+# ============================================================
+
+def freeborn_srp_reference(
+    srp_id
+):
+    return (
+        f"SRP-{int(srp_id):04d}"
+    )
+
+
+def freeborn_srp_get_main_name(
+    discord_user_id
+):
+    """
+    Best-effort lookup of the verified Main EVE character.
+    Falls back to the Discord mention if no Main is found.
+    """
+    try:
+        with psycopg.connect(
+            DATABASE_URL
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT character_name
+                    FROM eve_characters
+                    WHERE discord_user_id = %s
+                      AND is_main = TRUE
+                    ORDER BY updated_at DESC NULLS LAST,
+                             created_at DESC NULLS LAST
+                    LIMIT 1;
+                    """,
+                    (
+                        str(discord_user_id),
+                    ),
+                )
+
+                row = cur.fetchone()
+
+        if row and row[0]:
+            return str(
+                row[0]
+            )
+
+    except Exception as error:
+        print(
+            "Freeborn SRP pilot lookup warning:",
+            repr(
+                error
+            ),
+        )
+
+    return None
+
+
+def freeborn_srp_get(
+    srp_id
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    srp_id,
+                    guild_id,
+                    created_by_discord_user_id,
+                    pilot_name,
+                    ship_fit,
+                    zkill_url,
+                    operation_fc,
+                    circumstances,
+                    extra_info,
+                    status,
+                    decided_by_discord_user_id,
+                    decided_at,
+                    closed_by_discord_user_id,
+                    closed_at,
+                    discord_thread_id,
+                    discord_post_message_id,
+                    created_at,
+                    updated_at
+                FROM srp_requests
+                WHERE srp_id = %s
+                LIMIT 1;
+                """,
+                (
+                    int(srp_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "srp_id":
+            int(row[0]),
+        "guild_id":
+            str(row[1]),
+        "created_by_discord_user_id":
+            str(row[2]),
+        "pilot_name":
+            row[3],
+        "ship_fit":
+            row[4],
+        "zkill_url":
+            row[5],
+        "operation_fc":
+            row[6],
+        "circumstances":
+            row[7],
+        "extra_info":
+            row[8],
+        "status":
+            row[9],
+        "decided_by_discord_user_id":
+            row[10],
+        "decided_at":
+            row[11],
+        "closed_by_discord_user_id":
+            row[12],
+        "closed_at":
+            row[13],
+        "discord_thread_id":
+            row[14],
+        "discord_post_message_id":
+            row[15],
+        "created_at":
+            row[16],
+        "updated_at":
+            row[17],
+    }
+
+
+def freeborn_srp_insert(
+    guild_id,
+    creator_user_id,
+    pilot_name,
+    ship_fit,
+    zkill_url,
+    operation_fc,
+    circumstances,
+    extra_info,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO srp_requests (
+                    guild_id,
+                    created_by_discord_user_id,
+                    pilot_name,
+                    ship_fit,
+                    zkill_url,
+                    operation_fc,
+                    circumstances,
+                    extra_info,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s,
+                    'pending',
+                    NOW(),
+                    NOW()
+                )
+                RETURNING srp_id;
+                """,
+                (
+                    str(guild_id),
+                    str(creator_user_id),
+                    pilot_name,
+                    str(ship_fit),
+                    str(zkill_url),
+                    operation_fc,
+                    str(circumstances),
+                    extra_info,
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    if not row:
+        raise RuntimeError(
+            "SRP insert failed"
+        )
+
+    return int(
+        row[0]
+    )
+
+
+def freeborn_srp_delete(
+    srp_id
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM srp_requests
+                WHERE srp_id = %s;
+                """,
+                (
+                    int(srp_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_srp_save_discord_link(
+    srp_id,
+    thread_id,
+    message_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE srp_requests
+                SET
+                    discord_thread_id = %s,
+                    discord_post_message_id = %s,
+                    updated_at = NOW()
+                WHERE srp_id = %s;
+                """,
+                (
+                    str(thread_id),
+                    str(message_id),
+                    int(srp_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_srp_status_label(
+    status
+):
+    return {
+        "pending":
+            "🟡 EN ATTENTE",
+        "accepted":
+            "🟢 ACCEPTÉ",
+        "refused":
+            "🔴 REFUSÉ",
+        "closed":
+            "⚫ CLÔTURÉ",
+    }.get(
+        str(status),
+        "🟡 EN ATTENTE",
+    )
+
+
+def freeborn_srp_build_embed(
+    request_row
+):
+    srp_id = int(
+        request_row[
+            "srp_id"
+        ]
+    )
+
+    creator_id = str(
+        request_row[
+            "created_by_discord_user_id"
+        ]
+    )
+
+    pilot_name = (
+        request_row.get(
+            "pilot_name"
+        )
+        or f"<@{creator_id}>"
+    )
+
+    fields = [
+        {
+            "name":
+                "Statut",
+            "value":
+                freeborn_srp_status_label(
+                    request_row[
+                        "status"
+                    ]
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Pilote",
+            "value":
+                (
+                    f"**{pilot_name}**\n"
+                    f"Créé par <@{creator_id}>"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Vaisseau perdu / Fit Corpo",
+            "value":
+                str(
+                    request_row[
+                        "ship_fit"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Lien zKillboard",
+            "value":
+                str(
+                    request_row[
+                        "zkill_url"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Opération / Fleet Commander",
+            "value":
+                (
+                    request_row.get(
+                        "operation_fc"
+                    )
+                    or "Non précisé"
+                ),
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Circonstances",
+            "value":
+                str(
+                    request_row[
+                        "circumstances"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        },
+    ]
+
+    if request_row.get(
+        "extra_info"
+    ):
+        fields.append({
+            "name":
+                "Informations complémentaires",
+            "value":
+                str(
+                    request_row[
+                        "extra_info"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        })
+
+    if request_row.get(
+        "decided_by_discord_user_id"
+    ):
+        fields.append({
+            "name":
+                "Décision",
+            "value":
+                (
+                    f"{freeborn_srp_status_label(request_row['status'])}\n"
+                    f"Par <@{request_row['decided_by_discord_user_id']}>"
+                ),
+            "inline":
+                True,
+        })
+
+    return {
+        "title":
+            (
+                f"{freeborn_srp_reference(srp_id)} "
+                "— Demande de remboursement SRP"
+            ),
+        "description":
+            (
+                "Demande SRP Freeborn Legacy.\n"
+                "Décision réservée à la Direction et au CEO."
+            ),
+        "color":
+            (
+                0xD9A21B
+                if request_row[
+                    "status"
+                ] == "pending"
+                else (
+                    0x2ECC71
+                    if request_row[
+                        "status"
+                    ] == "accepted"
+                    else (
+                        0xE74C3C
+                        if request_row[
+                            "status"
+                        ] == "refused"
+                        else 0x7F8C8D
+                    )
+                )
+            ),
+        "thumbnail": {
+            "url":
+                (
+                    f"{PUBLIC_BASE_URL}"
+                    "/assets/logo-freeborn-legacy.png"
+                )
+        },
+        "fields":
+            fields,
+        "footer": {
+            "text":
+                "Freeborn Legacy • SRP • Direction / CEO"
+        },
+    }
+
+
+def freeborn_srp_components(
+    srp_id,
+    status,
+):
+    if status == "closed":
+        return []
+
+    return [
+        {
+            "type":
+                1,
+            "components": [
+                {
+                    "type":
+                        2,
+                    "style":
+                        3,
+                    "label":
+                        "Accepter",
+                    "emoji": {
+                        "name":
+                            "✅",
+                    },
+                    "custom_id":
+                        f"srp_accept:{int(srp_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        4,
+                    "label":
+                        "Refuser",
+                    "emoji": {
+                        "name":
+                            "❌",
+                    },
+                    "custom_id":
+                        f"srp_refuse:{int(srp_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        2,
+                    "label":
+                        "Clôturer",
+                    "emoji": {
+                        "name":
+                            "🏁",
+                    },
+                    "custom_id":
+                        f"srp_close:{int(srp_id)}",
+                },
+            ],
+        }
+    ]
+
+
+def freeborn_srp_select_forum_tags(
+    forum,
+    status
+):
+    available_tags = (
+        forum.get(
+            "available_tags"
+        )
+        or []
+    )
+
+    aliases = {
+        "pending": {
+            "en attente",
+            "attente",
+            "pending",
+            "ouvert",
+        },
+        "accepted": {
+            "accepté",
+            "accepte",
+            "accepted",
+            "validé",
+            "valide",
+        },
+        "refused": {
+            "refusé",
+            "refuse",
+            "refused",
+        },
+        "closed": {
+            "clôturé",
+            "cloture",
+            "closed",
+            "terminé",
+            "termine",
+        },
+    }.get(
+        str(status),
+        set(),
+    )
+
+    for tag in available_tags:
+        tag_name = str(
+            tag.get(
+                "name"
+            )
+            or ""
+        ).strip().casefold()
+
+        if tag_name in aliases:
+            tag_id = str(
+                tag.get(
+                    "id"
+                )
+                or ""
+            ).strip()
+
+            if tag_id:
+                return [
+                    tag_id
+                ]
+
+    if available_tags:
+        first_id = str(
+            available_tags[0].get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        if first_id:
+            return [
+                first_id
+            ]
+
+    return []
+
+
+def freeborn_srp_publish(
+    srp_id
+):
+    request_row = freeborn_srp_get(
+        srp_id
+    )
+
+    if not request_row:
+        raise RuntimeError(
+            "SRP request not found"
+        )
+
+    forum_id = str(
+        DISCORD_SRP_FORUM_ID
+        or ""
+    ).strip()
+
+    if not forum_id:
+        raise RuntimeError(
+            "DISCORD_SRP_FORUM_ID missing"
+        )
+
+    forum = discord_get_channel(
+        forum_id
+    )
+
+    if int(
+        forum.get(
+            "type",
+            -1,
+        )
+    ) not in {
+        15,
+        16,
+    }:
+        raise RuntimeError(
+            "SRP destination is not a Forum/Media channel"
+        )
+
+    payload = {
+        "name":
+            (
+                f"{freeborn_srp_reference(srp_id)}"
+                " — Demande SRP"
+            )[:100],
+        "auto_archive_duration":
+            10080,
+        "message": {
+            "embeds": [
+                freeborn_srp_build_embed(
+                    request_row
+                )
+            ],
+            "components":
+                freeborn_srp_components(
+                    srp_id,
+                    request_row[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+    }
+
+    tags = freeborn_srp_select_forum_tags(
+        forum,
+        request_row[
+            "status"
+        ],
+    )
+
+    if tags:
+        payload[
+            "applied_tags"
+        ] = tags
+
+    response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{forum_id}/threads"
+        ),
+        headers=discord_bot_headers(),
+        json=payload,
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn SRP forum publication failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    body = (
+        response.json()
+        or {}
+    )
+
+    thread_id = str(
+        body[
+            "id"
+        ]
+    )
+
+    starter = (
+        body.get(
+            "message"
+        )
+        or {}
+    )
+
+    message_id = str(
+        starter.get(
+            "id"
+        )
+        or thread_id
+    )
+
+    freeborn_srp_save_discord_link(
+        srp_id,
+        thread_id,
+        message_id,
+    )
+
+
+def freeborn_srp_refresh(
+    srp_id
+):
+    request_row = freeborn_srp_get(
+        srp_id
+    )
+
+    if not request_row:
+        raise RuntimeError(
+            "SRP request not found"
+        )
+
+    thread_id = str(
+        request_row.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    message_id = str(
+        request_row.get(
+            "discord_post_message_id"
+        )
+        or ""
+    ).strip()
+
+    if (
+        not thread_id
+        or not message_id
+    ):
+        raise RuntimeError(
+            "SRP Discord linkage missing"
+        )
+
+    response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}/messages/"
+            f"{message_id}"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "embeds": [
+                freeborn_srp_build_embed(
+                    request_row
+                )
+            ],
+            "components":
+                freeborn_srp_components(
+                    srp_id,
+                    request_row[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn SRP post update failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    forum_id = str(
+        DISCORD_SRP_FORUM_ID
+        or ""
+    ).strip()
+
+    if forum_id:
+        try:
+            forum = discord_get_channel(
+                forum_id
+            )
+
+            tags = freeborn_srp_select_forum_tags(
+                forum,
+                request_row[
+                    "status"
+                ],
+            )
+
+            if tags:
+                requests.patch(
+                    (
+                        f"{DISCORD_API}/channels/"
+                        f"{thread_id}"
+                    ),
+                    headers=discord_bot_headers(),
+                    json={
+                        "applied_tags":
+                            tags,
+                    },
+                    timeout=12,
+                )
+
+        except Exception as error:
+            print(
+                "Freeborn SRP tag update warning:",
+                repr(
+                    error
+                ),
+            )
+
+
+def freeborn_srp_set_status(
+    srp_id,
+    status,
+    actor_user_id,
+):
+    if status not in {
+        "accepted",
+        "refused",
+        "closed",
+    }:
+        raise ValueError(
+            "Invalid SRP status"
+        )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            if status == "closed":
+                cur.execute(
+                    """
+                    UPDATE srp_requests
+                    SET
+                        status = 'closed',
+                        closed_by_discord_user_id = %s,
+                        closed_at = NOW(),
+                        updated_at = NOW()
+                    WHERE srp_id = %s
+                      AND status <> 'closed'
+                    RETURNING srp_id;
+                    """,
+                    (
+                        str(actor_user_id),
+                        int(srp_id),
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE srp_requests
+                    SET
+                        status = %s,
+                        decided_by_discord_user_id = %s,
+                        decided_at = NOW(),
+                        updated_at = NOW()
+                    WHERE srp_id = %s
+                      AND status <> 'closed'
+                    RETURNING srp_id;
+                    """,
+                    (
+                        str(status),
+                        str(actor_user_id),
+                        int(srp_id),
+                    ),
+                )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_srp_archive_thread(
+    srp_id
+):
+    request_row = freeborn_srp_get(
+        srp_id
+    )
+
+    if not request_row:
+        return
+
+    thread_id = str(
+        request_row.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    if not thread_id:
+        return
+
+    response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "archived":
+                True,
+        },
+        timeout=12,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        print(
+            "Freeborn SRP archive warning:",
+            response.status_code,
+            response.text[:500],
+        )
+
+
+# ============================================================
 # FREEBORN OP CORP
 # ============================================================
 
@@ -13827,6 +14973,142 @@ def handle_message_component(
             "",
         )
     )
+
+    # ========================================================
+    # FREEBORN SRP — DECISION / CLOSURE
+    # ========================================================
+
+    srp_action_match = re.fullmatch(
+        r"srp_(accept|refuse|close):(\d+)",
+        str(
+            custom_id
+        ),
+    )
+
+    if srp_action_match:
+        action = str(
+            srp_action_match.group(
+                1
+            )
+        )
+
+        srp_id = int(
+            srp_action_match.group(
+                2
+            )
+        )
+
+        request_row = freeborn_srp_get(
+            srp_id
+        )
+
+        if not request_row:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette demande SRP n'existe plus.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_roles = interaction_member_role_ids(
+            data
+        )
+
+        if not (
+            actor_roles
+            & SRP_MANAGER_ROLE_IDS
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **Action refusée.**\n"
+                            "Seuls les rôles **Direction** et **CEO** "
+                            "peuvent accepter, refuser ou clôturer un SRP."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+        status_map = {
+            "accept":
+                "accepted",
+            "refuse":
+                "refused",
+            "close":
+                "closed",
+        }
+
+        new_status = status_map[
+            action
+        ]
+
+        if not freeborn_srp_set_status(
+            srp_id,
+            new_status,
+            actor_user_id,
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette demande SRP est déjà clôturée.",
+                    "flags":
+                        64,
+                },
+            })
+
+        freeborn_srp_refresh(
+            srp_id
+        )
+
+        if action == "close":
+            freeborn_srp_archive_thread(
+                srp_id
+            )
+
+        response_text = {
+            "accept":
+                "✅ Demande SRP **acceptée**.",
+            "refuse":
+                "❌ Demande SRP **refusée**.",
+            "close":
+                "🏁 Demande SRP **clôturée et archivée**.",
+        }[
+            action
+        ]
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        f"{response_text}\n"
+                        f"Référence : **{freeborn_srp_reference(srp_id)}**"
+                    ),
+                "flags":
+                    64,
+            },
+        })
 
     # ========================================================
     # FREEBORN OP CORP — PARTICIPATION / MANAGEMENT
@@ -27659,6 +28941,11 @@ def interactions():
             or ""
         )
 
+        if modal_custom_id == "freeborn_srp_create":
+            return handle_srp_modal_submit(
+                data
+            )
+
         if (
             modal_custom_id.startswith(
                 "freeborn_op_create:"
@@ -28152,6 +29439,167 @@ def interactions():
                             64,
                     },
                 })
+
+    # ========================================================
+    # FREEBORN SRP
+    # ========================================================
+
+    if command_name == "srp":
+        # Accessible to members through normal Discord command permissions.
+        # The bot only blocks obvious pre-member states.
+        actor_roles = interaction_member_role_ids(
+            data
+        )
+
+        blocked_pre_member_roles = configured_role_ids(
+            DISCORD_ACCESS_ROLE_ID,
+            DISCORD_GUEST_ROLE_ID,
+            DISCORD_CANDIDATE_ROLE_ID,
+            DISCORD_CANDIDATE_ACCEPTED_ROLE_ID,
+        )
+
+        if (
+            actor_roles
+            & blocked_pre_member_roles
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **Accès refusé.**\n"
+                            "La commande `/srp` est réservée aux membres de la corporation."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                9,
+            "data": {
+                "custom_id":
+                    "freeborn_srp_create",
+                "title":
+                    "Freeborn — Demande SRP",
+                "components": [
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Vaisseau perdu / Nom du fit Corpo",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_ship_fit",
+                            "style":
+                                1,
+                            "min_length":
+                                2,
+                            "max_length":
+                                120,
+                            "required":
+                                True,
+                            "placeholder":
+                                "Ex. Golem — Ironclad / Doctrine PvP...",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Lien zKillboard",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_zkill",
+                            "style":
+                                1,
+                            "min_length":
+                                20,
+                            "max_length":
+                                300,
+                            "required":
+                                True,
+                            "placeholder":
+                                "https://zkillboard.com/kill/...",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Opération / Fleet Commander",
+                        "description":
+                            "Facultatif",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_operation_fc",
+                            "style":
+                                1,
+                            "max_length":
+                                120,
+                            "required":
+                                False,
+                            "placeholder":
+                                "Ex. OP C3 / FC Le Gardien",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Circonstances",
+                        "description":
+                            "Quelques lignes maximum",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_circumstances",
+                            "style":
+                                2,
+                            "min_length":
+                                5,
+                            "max_length":
+                                1000,
+                            "required":
+                                True,
+                            "placeholder":
+                                "Explique brièvement les circonstances de la perte...",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Informations complémentaires",
+                        "description":
+                            "Facultatif",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_extra",
+                            "style":
+                                2,
+                            "max_length":
+                                1000,
+                            "required":
+                                False,
+                            "placeholder":
+                                "Informations utiles si nécessaire...",
+                        },
+                    },
+                ],
+            },
+        })
 
     # ========================================================
     # FREEBORN OP CORP
@@ -32788,6 +34236,17 @@ def register_commands():
 
             "description":
                 "Finaliser ton intégration Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "srp",
+
+            "description":
+                "Créer une demande de remboursement SRP",
 
             "type":
                 1,
