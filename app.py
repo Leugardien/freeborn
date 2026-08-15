@@ -406,7 +406,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "OP-CORP-P1.2-SEPARATE-TIMES + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "OP-CORP-P1.3-DETAILS-FIX + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -13172,6 +13172,17 @@ def freeborn_op_components(
 def freeborn_op_parse_details(
     details_text
 ):
+    """
+    Parse optional OP details.
+
+    Accepted forms are intentionally tolerant:
+      FC: Le Gardien
+      FC : Le Gardien
+      Fleet Commander: Le Gardien
+      Doctrine: Miner1.0
+      Doctrine : Miner1.0
+      Consignes: Rendez-vous 20:20
+    """
     fleet_commander = None
     doctrine = None
     notes_lines = []
@@ -13185,41 +13196,48 @@ def freeborn_op_parse_details(
         if not line:
             continue
 
-        lower = line.casefold()
+        fc_match = re.match(
+            r"^(?:fc|fleet\s+commander)\s*:\s*(.*)$",
+            line,
+            flags=re.IGNORECASE,
+        )
 
-        if lower.startswith(
-            "fc:"
-        ):
+        if fc_match:
             fleet_commander = (
-                line.split(
-                    ":",
-                    1,
-                )[1].strip()
+                fc_match.group(
+                    1
+                ).strip()
                 or None
             )
 
             continue
 
-        if lower.startswith(
-            "doctrine:"
-        ):
+        doctrine_match = re.match(
+            r"^doctrine\s*:\s*(.*)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+
+        if doctrine_match:
             doctrine = (
-                line.split(
-                    ":",
-                    1,
-                )[1].strip()
+                doctrine_match.group(
+                    1
+                ).strip()
                 or None
             )
 
             continue
 
-        if lower.startswith(
-            "consignes:"
-        ):
-            value = line.split(
-                ":",
-                1,
-            )[1].strip()
+        notes_match = re.match(
+            r"^(?:consignes?|infos?|informations?)\s*:\s*(.*)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+
+        if notes_match:
+            value = notes_match.group(
+                1
+            ).strip()
 
             if value:
                 notes_lines.append(
@@ -14169,7 +14187,7 @@ def handle_message_component(
                         "label":
                             "FC / Doctrine / Consignes",
                         "description":
-                            "Une ligne par information, préfixée par FC:, Doctrine: ou Consignes:",
+                            "Une ligne par information : FC:, Doctrine: ou Consignes:",
                         "component": {
                             "type":
                                 4,
