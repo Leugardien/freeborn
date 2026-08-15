@@ -420,7 +420,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "SRP-P1 + OP-CORP-P1.3 + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "SRP-P1.1-ACCESS-FIX + OP-CORP-P1.3 + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -13134,12 +13134,13 @@ def freeborn_srp_build_embed(
     return {
         "title":
             (
-                f"{freeborn_srp_reference(srp_id)} "
+                f"💰 {freeborn_srp_reference(srp_id)} "
                 "— Demande de remboursement SRP"
             ),
         "description":
             (
-                "Demande SRP Freeborn Legacy.\n"
+                "💳 **Ship Replacement Program — Freeborn Legacy**\n"
+                "Demande de remboursement liée à une perte de vaisseau.\n"
                 "Décision réservée à la Direction et au CEO."
             ),
         "color":
@@ -29451,16 +29452,20 @@ def interactions():
             data
         )
 
-        blocked_pre_member_roles = configured_role_ids(
-            DISCORD_ACCESS_ROLE_ID,
-            DISCORD_GUEST_ROLE_ID,
-            DISCORD_CANDIDATE_ROLE_ID,
-            DISCORD_CANDIDATE_ACCEPTED_ROLE_ID,
+        srp_member_role_ids = configured_role_ids(
+            DISCORD_MEMBER_ROLE_ID,
+            DISCORD_VETERAN_ROLE_ID,
+            DISCORD_FLEET_COMMANDER_ROLE_ID,
+            DISCORD_OFFICER_ROLE_ID,
+            DISCORD_HR_ROLE_ID,
+            DISCORD_DIRECTION_ROLE_ID,
+            DISCORD_HIGH_COUNCIL_ROLE_ID,
+            DISCORD_CEO_ROLE_ID,
         )
 
-        if (
+        if not (
             actor_roles
-            & blocked_pre_member_roles
+            & srp_member_role_ids
         ):
             return jsonify({
                 "type":
