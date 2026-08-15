@@ -406,7 +406,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "OP-CORP-P1 + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "OP-CORP-P1.2-SEPARATE-TIMES + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -9572,9 +9572,14 @@ def handle_op_corp_modal_submit(
         "op_date",
     )
 
-    times_text = freeborn_op_modal_value(
+    start_text = freeborn_op_modal_value(
         data,
-        "op_times",
+        "op_start",
+    )
+
+    end_text = freeborn_op_modal_value(
+        data,
+        "op_end",
     )
 
     details_text = freeborn_op_modal_value(
@@ -9589,7 +9594,8 @@ def handle_op_corp_modal_submit(
             end_time,
         ) = freeborn_op_parse_date_time(
             date_text,
-            times_text,
+            start_text,
+            end_text,
         )
     except (
         TypeError,
@@ -9602,8 +9608,9 @@ def handle_op_corp_modal_submit(
                 "content":
                     (
                         "❌ **Date ou horaires invalides.**\n\n"
-                        "Date : `AAAA-MM-JJ`\n"
-                        "Horaires : `HH:MM-HH:MM`"
+                        "Date : `JJ/MM/AAAA`\n"
+                        "Début : `HH:MM`\n"
+                        "Fin : `HH:MM`"
                     ),
                 "flags":
                     64,
@@ -9618,32 +9625,17 @@ def handle_op_corp_modal_submit(
         details_text
     )
 
-    if custom_id == "freeborn_op_create":
-        operation_type = (
-            freeborn_op_modal_value(
-                data,
-                "op_type",
-            )
-            .strip()
-            .lower()
-        )
+    create_match = re.fullmatch(
+        r"freeborn_op_create:(mining|pve|pvp|other)",
+        custom_id,
+    )
 
-        if operation_type not in {
-            "mining",
-            "pve",
-            "pvp",
-            "other",
-        }:
-            return jsonify({
-                "type":
-                    4,
-                "data": {
-                    "content":
-                        "❌ Type d'OP invalide.",
-                    "flags":
-                        64,
-                },
-            })
+    if create_match:
+        operation_type = str(
+            create_match.group(
+                1
+            )
+        )
 
         operation_id = None
 
@@ -13354,35 +13346,21 @@ def freeborn_op_modal_value(
 
 def freeborn_op_parse_date_time(
     date_text,
-    times_text,
+    start_text,
+    end_text,
 ):
     operation_date = datetime.strptime(
         str(date_text).strip(),
-        "%Y-%m-%d",
+        "%d/%m/%Y",
     ).date()
 
-    time_parts = re.split(
-        r"\s*(?:-|→)\s*",
-        str(
-            times_text
-        ).strip(),
-        maxsplit=1,
-    )
-
-    if len(
-        time_parts
-    ) != 2:
-        raise ValueError(
-            "Invalid OP time range"
-        )
-
     start_time = datetime.strptime(
-        time_parts[0],
+        str(start_text).strip(),
         "%H:%M",
     ).time()
 
     end_time = datetime.strptime(
-        time_parts[1],
+        str(end_text).strip(),
         "%H:%M",
     ).time()
 
@@ -13557,6 +13535,19 @@ def freeborn_op_publish(
         200,
         201,
     }:
+        if (
+            response.status_code == 403
+            and '"code": 50013' in response.text
+        ):
+            raise RuntimeError(
+                "Freeborn OP Corp forum publication failed (403 / 50013): "
+                "Missing Permissions. Vérifier dans le forum OP Corp les droits "
+                "du rôle Freeborn : Voir le salon, Envoyer des messages, "
+                "Créer des fils publics / créer des publications, "
+                "Envoyer des messages dans les fils, Intégrer des liens "
+                "et Joindre des fichiers si utilisés."
+            )
+
         raise RuntimeError(
             "Freeborn OP Corp forum publication failed "
             f"({response.status_code}): "
@@ -14106,7 +14097,7 @@ def handle_message_component(
                         "label":
                             "Date",
                         "description":
-                            "Format AAAA-MM-JJ",
+                            "Format JJ/MM/AAAA",
                         "component": {
                             "type":
                                 4,
@@ -14119,30 +14110,56 @@ def handle_message_component(
                             "value":
                                 operation[
                                     "operation_date"
-                                ].isoformat(),
+                                ].strftime(
+                                    "%d/%m/%Y"
+                                ),
                         },
                     },
                     {
                         "type":
                             18,
                         "label":
-                            "Horaires",
+                            "Début de l'OP",
                         "description":
-                            "Format HH:MM-HH:MM",
+                            "Format HH:MM",
                         "component": {
                             "type":
                                 4,
                             "custom_id":
-                                "op_times",
+                                "op_start",
                             "style":
                                 1,
                             "required":
                                 True,
                             "value":
-                                (
-                                    f"{operation['start_time'].strftime('%H:%M')}"
-                                    "-"
-                                    f"{operation['end_time'].strftime('%H:%M')}"
+                                operation[
+                                    "start_time"
+                                ].strftime(
+                                    "%H:%M"
+                                ),
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Fin de l'OP",
+                        "description":
+                            "Format HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_end",
+                            "style":
+                                1,
+                            "required":
+                                True,
+                            "value":
+                                operation[
+                                    "end_time"
+                                ].strftime(
+                                    "%H:%M"
                                 ),
                         },
                     },
@@ -27625,8 +27642,9 @@ def interactions():
         )
 
         if (
-            modal_custom_id
-            == "freeborn_op_create"
+            modal_custom_id.startswith(
+                "freeborn_op_create:"
+            )
             or modal_custom_id.startswith(
                 "freeborn_op_edit:"
             )
@@ -28167,12 +28185,55 @@ def interactions():
                 },
             })
 
+        op_type = None
+
+        for option in (
+            (
+                data.get(
+                    "data"
+                )
+                or {}
+            ).get(
+                "options",
+                [],
+            )
+            or []
+        ):
+            if option.get(
+                "name"
+            ) == "type":
+                op_type = str(
+                    option.get(
+                        "value"
+                    )
+                    or ""
+                ).strip()
+
+                break
+
+        if op_type not in {
+            "mining",
+            "pve",
+            "pvp",
+            "other",
+        }:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "❌ Type d'OP invalide ou manquant.",
+                    "flags":
+                        64,
+                },
+            })
+
         return jsonify({
             "type":
                 9,
             "data": {
                 "custom_id":
-                    "freeborn_op_create",
+                    f"freeborn_op_create:{op_type}",
                 "title":
                     "Freeborn — Nouvelle OP Corp",
                 "components": [
@@ -28202,79 +28263,9 @@ def interactions():
                         "type":
                             18,
                         "label":
-                            "Type d'opération",
-                        "component": {
-                            "type":
-                                3,
-                            "custom_id":
-                                "op_type",
-                            "placeholder":
-                                "Choisir le type d'OP",
-                            "min_values":
-                                1,
-                            "max_values":
-                                1,
-                            "required":
-                                True,
-                            "options": [
-                                {
-                                    "label":
-                                        "Minage",
-                                    "value":
-                                        "mining",
-                                    "description":
-                                        "Opération minière / industrie",
-                                    "emoji": {
-                                        "name":
-                                            "⛏️",
-                                    },
-                                },
-                                {
-                                    "label":
-                                        "PvE",
-                                    "value":
-                                        "pve",
-                                    "description":
-                                        "Sites, missions, anomalies, wormhole...",
-                                    "emoji": {
-                                        "name":
-                                            "🛡️",
-                                    },
-                                },
-                                {
-                                    "label":
-                                        "PvP",
-                                    "value":
-                                        "pvp",
-                                    "description":
-                                        "Roam, défense, combat organisé...",
-                                    "emoji": {
-                                        "name":
-                                            "⚔️",
-                                    },
-                                },
-                                {
-                                    "label":
-                                        "Autre",
-                                    "value":
-                                        "other",
-                                    "description":
-                                        "Toute autre opération corporation",
-                                    "emoji": {
-                                        "name":
-                                            "✨",
-                                    },
-                                },
-                            ],
-                        },
-                    },
-                    {
-                        "type":
-                            18,
-                        "label":
                             "Date",
                         "description":
-                            "Format AAAA-MM-JJ",
+                            "Format JJ/MM/AAAA",
                         "component": {
                             "type":
                                 4,
@@ -28289,31 +28280,55 @@ def interactions():
                             "required":
                                 True,
                             "placeholder":
-                                "2026-08-16",
+                                "16/08/2026",
                         },
                     },
                     {
                         "type":
                             18,
                         "label":
-                            "Horaires",
+                            "Début de l'OP",
                         "description":
-                            "Heure de début et de fin — format HH:MM-HH:MM",
+                            "Format HH:MM",
                         "component": {
                             "type":
                                 4,
                             "custom_id":
-                                "op_times",
+                                "op_start",
                             "style":
                                 1,
                             "min_length":
-                                11,
+                                5,
                             "max_length":
-                                11,
+                                5,
                             "required":
                                 True,
                             "placeholder":
-                                "20:30-22:30",
+                                "20:30",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Fin de l'OP",
+                        "description":
+                            "Format HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_end",
+                            "style":
+                                1,
+                            "min_length":
+                                5,
+                            "max_length":
+                                5,
+                            "required":
+                                True,
+                            "placeholder":
+                                "22:30",
                         },
                     },
                     {
@@ -32769,6 +32784,45 @@ def register_commands():
 
             "type":
                 1,
+
+            "options": [
+                {
+                    "type":
+                        3,
+                    "name":
+                        "type",
+                    "description":
+                        "Type d'opération corporation",
+                    "required":
+                        True,
+                    "choices": [
+                        {
+                            "name":
+                                "⛏️ Minage",
+                            "value":
+                                "mining",
+                        },
+                        {
+                            "name":
+                                "🛡️ PvE",
+                            "value":
+                                "pve",
+                        },
+                        {
+                            "name":
+                                "⚔️ PvP",
+                            "value":
+                                "pvp",
+                        },
+                        {
+                            "name":
+                                "✨ Autre",
+                            "value":
+                                "other",
+                        },
+                    ],
+                }
+            ],
         },
 
         {
