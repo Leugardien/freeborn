@@ -209,6 +209,19 @@ DISCORD_MARKET_CHANNEL_ID = os.environ.get(
     "DISCORD_MARKET_CHANNEL_ID"
 )
 
+# Freeborn OP Corp:
+# /op-corp is launched from a normal management text channel.
+# The actual operation is always published in the dedicated forum.
+DISCORD_OP_CORP_COMMAND_CHANNEL_ID = os.environ.get(
+    "DISCORD_OP_CORP_COMMAND_CHANNEL_ID",
+    "1535676808157077576",
+)
+
+DISCORD_OP_CORP_FORUM_ID = os.environ.get(
+    "DISCORD_OP_CORP_FORUM_ID",
+    "1538026284972642325",
+)
+
 # Market page line count:
 # - operational default: 10
 # - hard ceiling: 15
@@ -355,6 +368,15 @@ MARKET_CORP_ROLE_IDS = configured_role_ids(
     DISCORD_CEO_ROLE_ID,
 )
 
+# OP Corp creation / management:
+# CEO + Direction + Officier + Fleet Commander.
+OP_CORP_CREATOR_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_OFFICER_ROLE_ID,
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+)
+
 
 # ============================================================
 # URLS
@@ -384,7 +406,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
+FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "OP-CORP-P1 + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
 print(
     "FREEBORN FITTINGS BUILD:",
     FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
@@ -989,6 +1011,98 @@ def init_database():
                     ON market_order_items (
                         market_id,
                         line_number
+                    );
+                    """
+                )
+
+                # ====================================================
+                # FREEBORN OP CORP
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS corp_operations (
+                        operation_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        operation_type TEXT NOT NULL CHECK (
+                            operation_type IN (
+                                'mining',
+                                'pve',
+                                'pvp',
+                                'other'
+                            )
+                        ),
+                        operation_date DATE NOT NULL,
+                        start_time TIME NOT NULL,
+                        end_time TIME NOT NULL,
+                        fleet_commander TEXT,
+                        doctrine TEXT,
+                        notes TEXT,
+                        created_by_discord_user_id TEXT NOT NULL,
+                        discord_thread_id TEXT,
+                        discord_post_message_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'open' CHECK (
+                            status IN (
+                                'open',
+                                'closed',
+                                'cancelled'
+                            )
+                        ),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        closed_at TIMESTAMPTZ,
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS corp_operation_attendance (
+                        operation_id BIGINT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        attendance_status TEXT NOT NULL CHECK (
+                            attendance_status IN (
+                                'present',
+                                'absent',
+                                'maybe'
+                            )
+                        ),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (
+                            operation_id,
+                            discord_user_id
+                        ),
+                        FOREIGN KEY (operation_id)
+                            REFERENCES corp_operations (operation_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_corp_operations_guild_status_date
+                    ON corp_operations (
+                        guild_id,
+                        status,
+                        operation_date,
+                        start_time
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_corp_operation_attendance_operation
+                    ON corp_operation_attendance (
+                        operation_id,
+                        attendance_status
                     );
                     """
                 )
@@ -9416,6 +9530,297 @@ def modal_values(data):
     return values
 
 
+def handle_op_corp_modal_submit(
+    data
+):
+    custom_id = str(
+        (
+            data.get(
+                "data"
+            )
+            or {}
+        ).get(
+            "custom_id"
+        )
+        or ""
+    )
+
+    guild_id = str(
+        data.get(
+            "guild_id"
+        )
+        or ""
+    )
+
+    actor_user_id = str(
+        data[
+            "member"
+        ][
+            "user"
+        ][
+            "id"
+        ]
+    )
+
+    title = freeborn_op_modal_value(
+        data,
+        "op_title",
+    )
+
+    date_text = freeborn_op_modal_value(
+        data,
+        "op_date",
+    )
+
+    times_text = freeborn_op_modal_value(
+        data,
+        "op_times",
+    )
+
+    details_text = freeborn_op_modal_value(
+        data,
+        "op_details",
+    )
+
+    try:
+        (
+            operation_date,
+            start_time,
+            end_time,
+        ) = freeborn_op_parse_date_time(
+            date_text,
+            times_text,
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "❌ **Date ou horaires invalides.**\n\n"
+                        "Date : `AAAA-MM-JJ`\n"
+                        "Horaires : `HH:MM-HH:MM`"
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    (
+        fleet_commander,
+        doctrine,
+        notes,
+    ) = freeborn_op_parse_details(
+        details_text
+    )
+
+    if custom_id == "freeborn_op_create":
+        operation_type = (
+            freeborn_op_modal_value(
+                data,
+                "op_type",
+            )
+            .strip()
+            .lower()
+        )
+
+        if operation_type not in {
+            "mining",
+            "pve",
+            "pvp",
+            "other",
+        }:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "❌ Type d'OP invalide.",
+                    "flags":
+                        64,
+                },
+            })
+
+        operation_id = None
+
+        try:
+            operation_id = freeborn_op_insert(
+                guild_id,
+                title,
+                operation_type,
+                operation_date,
+                start_time,
+                end_time,
+                fleet_commander,
+                doctrine,
+                notes,
+                actor_user_id,
+            )
+
+            freeborn_op_publish(
+                operation_id
+            )
+
+        except Exception as error:
+            print(
+                "Freeborn OP Corp creation failed:",
+                repr(
+                    error
+                ),
+            )
+
+            if operation_id is not None:
+                try:
+                    freeborn_op_delete(
+                        operation_id
+                    )
+                except Exception as rollback_error:
+                    print(
+                        "Freeborn OP Corp rollback failed:",
+                        repr(
+                            rollback_error
+                        ),
+                    )
+
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⚠️ **La création de l'OP Corp a échoué.**\n"
+                            "Aucune OP incomplète ne doit être conservée."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        f"✅ **{freeborn_op_reference(operation_id)} créée.**\n"
+                        "Le post a été publié automatiquement dans "
+                        f"<#{DISCORD_OP_CORP_FORUM_ID}>."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    edit_match = re.fullmatch(
+        r"freeborn_op_edit:(\d+)",
+        custom_id,
+    )
+
+    if edit_match:
+        operation_id = int(
+            edit_match.group(
+                1
+            )
+        )
+
+        operation = freeborn_op_get(
+            operation_id
+        )
+
+        if not operation:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette OP Corp n'existe plus.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_roles = interaction_member_role_ids(
+            data
+        )
+
+        if not (
+            actor_user_id
+            == str(
+                operation[
+                    "created_by_discord_user_id"
+                ]
+            )
+            or bool(
+                actor_roles
+                & OP_CORP_CREATOR_ROLE_IDS
+            )
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "⛔ Tu n'es pas autorisé à modifier cette OP Corp.",
+                    "flags":
+                        64,
+                },
+            })
+
+        if not freeborn_op_update(
+            operation_id,
+            title,
+            operation_date,
+            start_time,
+            end_time,
+            fleet_commander,
+            doctrine,
+            notes,
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette OP Corp n'est plus modifiable.",
+                    "flags":
+                        64,
+                },
+            })
+
+        freeborn_op_refresh_post(
+            operation_id
+        )
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        f"✏️ **{freeborn_op_reference(operation_id)} "
+                        "mise à jour.**"
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    return jsonify({
+        "type":
+            4,
+        "data": {
+            "content":
+                "❌ Formulaire OP Corp inconnu.",
+            "flags":
+                64,
+        },
+    })
+
+
 def handle_fit_modal_submit(data):
     diplomacy_denial = ensure_fitting_channel_allowed(
         data
@@ -12127,6 +12532,1277 @@ def handle_autocomplete(
 
 
 # ============================================================
+# FREEBORN OP CORP
+# ============================================================
+
+FREEBORN_OP_TYPE_META = {
+    "mining": {
+        "label": "Minage",
+        "emoji": "⛏️",
+        "type_id": 28606,  # Orca
+    },
+    "pve": {
+        "label": "PvE",
+        "emoji": "🛡️",
+        "type_id": 28710,  # Golem
+    },
+    "pvp": {
+        "label": "PvP",
+        "emoji": "⚔️",
+        "type_id": 24702,  # Hurricane
+    },
+    "other": {
+        "label": "Autre",
+        "emoji": "✨",
+        "type_id": None,
+    },
+}
+
+
+def freeborn_op_reference(operation_id):
+    return (
+        f"OP-{int(operation_id):04d}"
+    )
+
+
+def freeborn_op_type_meta(operation_type):
+    return FREEBORN_OP_TYPE_META.get(
+        str(operation_type),
+        FREEBORN_OP_TYPE_META["other"],
+    )
+
+
+def freeborn_op_image_url(operation_type):
+    meta = freeborn_op_type_meta(
+        operation_type
+    )
+
+    type_id = meta.get(
+        "type_id"
+    )
+
+    if type_id:
+        return (
+            "https://images.evetech.net/types/"
+            f"{int(type_id)}/render?size=512"
+        )
+
+    return (
+        f"{PUBLIC_BASE_URL}"
+        "/assets/logo-freeborn-legacy.png"
+    )
+
+
+def freeborn_op_get(operation_id):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    operation_id,
+                    guild_id,
+                    title,
+                    operation_type,
+                    operation_date,
+                    start_time,
+                    end_time,
+                    fleet_commander,
+                    doctrine,
+                    notes,
+                    created_by_discord_user_id,
+                    discord_thread_id,
+                    discord_post_message_id,
+                    status,
+                    created_at,
+                    updated_at,
+                    closed_at
+                FROM corp_operations
+                WHERE operation_id = %s
+                LIMIT 1;
+                """,
+                (
+                    int(operation_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "operation_id":
+            int(row[0]),
+        "guild_id":
+            str(row[1]),
+        "title":
+            row[2],
+        "operation_type":
+            row[3],
+        "operation_date":
+            row[4],
+        "start_time":
+            row[5],
+        "end_time":
+            row[6],
+        "fleet_commander":
+            row[7],
+        "doctrine":
+            row[8],
+        "notes":
+            row[9],
+        "created_by_discord_user_id":
+            str(row[10]),
+        "discord_thread_id":
+            row[11],
+        "discord_post_message_id":
+            row[12],
+        "status":
+            row[13],
+        "created_at":
+            row[14],
+        "updated_at":
+            row[15],
+        "closed_at":
+            row[16],
+    }
+
+
+def freeborn_op_delete(operation_id):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM corp_operations
+                WHERE operation_id = %s;
+                """,
+                (
+                    int(operation_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_op_insert(
+    guild_id,
+    title,
+    operation_type,
+    operation_date,
+    start_time,
+    end_time,
+    fleet_commander,
+    doctrine,
+    notes,
+    creator_user_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO corp_operations (
+                    guild_id,
+                    title,
+                    operation_type,
+                    operation_date,
+                    start_time,
+                    end_time,
+                    fleet_commander,
+                    doctrine,
+                    notes,
+                    created_by_discord_user_id,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    'open', NOW(), NOW()
+                )
+                RETURNING operation_id;
+                """,
+                (
+                    str(guild_id),
+                    str(title),
+                    str(operation_type),
+                    operation_date,
+                    start_time,
+                    end_time,
+                    fleet_commander,
+                    doctrine,
+                    notes,
+                    str(creator_user_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    if not row:
+        raise RuntimeError(
+            "OP Corp insert failed"
+        )
+
+    return int(
+        row[0]
+    )
+
+
+def freeborn_op_save_discord_link(
+    operation_id,
+    thread_id,
+    message_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE corp_operations
+                SET
+                    discord_thread_id = %s,
+                    discord_post_message_id = %s,
+                    updated_at = NOW()
+                WHERE operation_id = %s;
+                """,
+                (
+                    str(thread_id),
+                    str(message_id),
+                    int(operation_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_op_attendance(operation_id):
+    result = {
+        "present":
+            [],
+        "absent":
+            [],
+        "maybe":
+            [],
+    }
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    discord_user_id,
+                    attendance_status
+                FROM corp_operation_attendance
+                WHERE operation_id = %s
+                ORDER BY updated_at ASC;
+                """,
+                (
+                    int(operation_id),
+                ),
+            )
+
+            rows = cur.fetchall()
+
+    for user_id, status in rows:
+        status = str(
+            status
+        )
+
+        if status in result:
+            result[
+                status
+            ].append(
+                str(user_id)
+            )
+
+    return result
+
+
+def freeborn_op_set_attendance(
+    operation_id,
+    discord_user_id,
+    attendance_status,
+):
+    if attendance_status not in {
+        "present",
+        "absent",
+        "maybe",
+    }:
+        raise ValueError(
+            "Invalid OP Corp attendance status"
+        )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO corp_operation_attendance (
+                    operation_id,
+                    discord_user_id,
+                    attendance_status,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (
+                    operation_id,
+                    discord_user_id
+                )
+                DO UPDATE SET
+                    attendance_status =
+                        EXCLUDED.attendance_status,
+                    updated_at = NOW();
+                """,
+                (
+                    int(operation_id),
+                    str(discord_user_id),
+                    str(attendance_status),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_op_format_attendance(
+    attendance
+):
+    def render(
+        status,
+        label,
+        emoji,
+    ):
+        users = attendance.get(
+            status,
+            [],
+        )
+
+        if not users:
+            return (
+                f"{emoji} **{label} (0)**\n"
+                "—"
+            )
+
+        mentions = " • ".join(
+            f"<@{user_id}>"
+            for user_id in users
+        )
+
+        return (
+            f"{emoji} **{label} ({len(users)})**\n"
+            f"{mentions}"
+        )
+
+    return "\n\n".join([
+        render(
+            "present",
+            "Présents",
+            "✅",
+        ),
+        render(
+            "absent",
+            "Absents",
+            "❌",
+        ),
+        render(
+            "maybe",
+            "Indécis",
+            "❔",
+        ),
+    ])
+
+
+def freeborn_op_build_embed(
+    operation
+):
+    meta = freeborn_op_type_meta(
+        operation[
+            "operation_type"
+        ]
+    )
+
+    attendance = freeborn_op_attendance(
+        operation[
+            "operation_id"
+        ]
+    )
+
+    status_label = (
+        "🟢 OUVERTE"
+        if operation[
+            "status"
+        ] == "open"
+        else "🏁 CLÔTURÉE"
+    )
+
+    fields = [
+        {
+            "name":
+                "Statut",
+            "value":
+                status_label,
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Type d'OP",
+            "value":
+                (
+                    f"{meta['emoji']} "
+                    f"**{meta['label']}**"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Créée par",
+            "value":
+                (
+                    f"<@{operation['created_by_discord_user_id']}>"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Date",
+            "value":
+                (
+                    f"**{operation['operation_date'].strftime('%d/%m/%Y')}**"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Horaire",
+            "value":
+                (
+                    f"**{operation['start_time'].strftime('%H:%M')} "
+                    f"→ {operation['end_time'].strftime('%H:%M')}**"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Fleet Commander",
+            "value":
+                (
+                    operation.get(
+                        "fleet_commander"
+                    )
+                    or "Non précisé"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Doctrine",
+            "value":
+                (
+                    operation.get(
+                        "doctrine"
+                    )
+                    or "Libre / non précisée"
+                ),
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Participations",
+            "value":
+                freeborn_op_format_attendance(
+                    attendance
+                )[:1024],
+            "inline":
+                False,
+        },
+    ]
+
+    if operation.get(
+        "notes"
+    ):
+        fields.append({
+            "name":
+                "Informations / consignes",
+            "value":
+                str(
+                    operation[
+                        "notes"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        })
+
+    return {
+        "title":
+            (
+                f"{freeborn_op_reference(operation['operation_id'])}"
+                f" — {operation['title']}"
+            )[:256],
+        "description":
+            (
+                "Opération corporation Freeborn Legacy.\n"
+                "Indique ta disponibilité avec les boutons ci-dessous."
+            ),
+        "color":
+            0x2F81F7,
+        "thumbnail": {
+            "url":
+                freeborn_op_image_url(
+                    operation[
+                        "operation_type"
+                    ]
+                )
+        },
+        "fields":
+            fields,
+        "footer": {
+            "text":
+                (
+                    "Freeborn Legacy • OP Corp • "
+                    "Présent / Absent / Indécis"
+                )
+        },
+    }
+
+
+def freeborn_op_components(
+    operation_id,
+    status,
+):
+    if status != "open":
+        return []
+
+    return [
+        {
+            "type":
+                1,
+            "components": [
+                {
+                    "type":
+                        2,
+                    "style":
+                        3,
+                    "label":
+                        "Présent",
+                    "emoji": {
+                        "name":
+                            "✅",
+                    },
+                    "custom_id":
+                        f"op_attend_present:{int(operation_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        4,
+                    "label":
+                        "Absent",
+                    "emoji": {
+                        "name":
+                            "❌",
+                    },
+                    "custom_id":
+                        f"op_attend_absent:{int(operation_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        2,
+                    "label":
+                        "Indécis",
+                    "emoji": {
+                        "name":
+                            "❔",
+                    },
+                    "custom_id":
+                        f"op_attend_maybe:{int(operation_id)}",
+                },
+            ],
+        },
+        {
+            "type":
+                1,
+            "components": [
+                {
+                    "type":
+                        2,
+                    "style":
+                        1,
+                    "label":
+                        "Modifier l'OP",
+                    "emoji": {
+                        "name":
+                            "✏️",
+                    },
+                    "custom_id":
+                        f"op_edit:{int(operation_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        4,
+                    "label":
+                        "Clôturer l'OP",
+                    "emoji": {
+                        "name":
+                            "🏁",
+                    },
+                    "custom_id":
+                        f"op_close:{int(operation_id)}",
+                },
+            ],
+        },
+    ]
+
+
+def freeborn_op_parse_details(
+    details_text
+):
+    fleet_commander = None
+    doctrine = None
+    notes_lines = []
+
+    for raw_line in str(
+        details_text
+        or ""
+    ).splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        lower = line.casefold()
+
+        if lower.startswith(
+            "fc:"
+        ):
+            fleet_commander = (
+                line.split(
+                    ":",
+                    1,
+                )[1].strip()
+                or None
+            )
+
+            continue
+
+        if lower.startswith(
+            "doctrine:"
+        ):
+            doctrine = (
+                line.split(
+                    ":",
+                    1,
+                )[1].strip()
+                or None
+            )
+
+            continue
+
+        if lower.startswith(
+            "consignes:"
+        ):
+            value = line.split(
+                ":",
+                1,
+            )[1].strip()
+
+            if value:
+                notes_lines.append(
+                    value
+                )
+
+            continue
+
+        notes_lines.append(
+            line
+        )
+
+    notes = (
+        "\n".join(
+            notes_lines
+        ).strip()
+        or None
+    )
+
+    return (
+        fleet_commander,
+        doctrine,
+        notes,
+    )
+
+
+def freeborn_op_modal_value(
+    data,
+    custom_id,
+):
+    """
+    Read a modal field from both legacy ActionRow/TextInput structures
+    and Discord's current Label-wrapped modal components.
+    """
+    def walk(
+        component
+    ):
+        if not isinstance(
+            component,
+            dict,
+        ):
+            return None
+
+        if str(
+            component.get(
+                "custom_id"
+            )
+            or ""
+        ) == str(
+            custom_id
+        ):
+            if "values" in component:
+                values = (
+                    component.get(
+                        "values"
+                    )
+                    or []
+                )
+
+                return (
+                    str(
+                        values[0]
+                    )
+                    if values
+                    else ""
+                )
+
+            return str(
+                component.get(
+                    "value",
+                    ""
+                )
+                or ""
+            )
+
+        child = component.get(
+            "component"
+        )
+
+        if child:
+            result = walk(
+                child
+            )
+
+            if result is not None:
+                return result
+
+        for nested in (
+            component.get(
+                "components"
+            )
+            or []
+        ):
+            result = walk(
+                nested
+            )
+
+            if result is not None:
+                return result
+
+        return None
+
+    for top in (
+        (
+            data.get(
+                "data"
+            )
+            or {}
+        ).get(
+            "components",
+            [],
+        )
+        or []
+    ):
+        result = walk(
+            top
+        )
+
+        if result is not None:
+            return result.strip()
+
+    return ""
+
+
+def freeborn_op_parse_date_time(
+    date_text,
+    times_text,
+):
+    operation_date = datetime.strptime(
+        str(date_text).strip(),
+        "%Y-%m-%d",
+    ).date()
+
+    time_parts = re.split(
+        r"\s*(?:-|→)\s*",
+        str(
+            times_text
+        ).strip(),
+        maxsplit=1,
+    )
+
+    if len(
+        time_parts
+    ) != 2:
+        raise ValueError(
+            "Invalid OP time range"
+        )
+
+    start_time = datetime.strptime(
+        time_parts[0],
+        "%H:%M",
+    ).time()
+
+    end_time = datetime.strptime(
+        time_parts[1],
+        "%H:%M",
+    ).time()
+
+    return (
+        operation_date,
+        start_time,
+        end_time,
+    )
+
+
+def freeborn_op_select_forum_tags(
+    forum,
+    operation_type,
+):
+    available_tags = (
+        forum.get(
+            "available_tags"
+        )
+        or []
+    )
+
+    aliases = {
+        "mining": {
+            "minage",
+            "mining",
+        },
+        "pve": {
+            "pve",
+            "pve corp",
+        },
+        "pvp": {
+            "pvp",
+            "pvp corp",
+        },
+        "other": {
+            "autre",
+            "other",
+        },
+    }.get(
+        operation_type,
+        set(),
+    )
+
+    for tag in available_tags:
+        tag_name = str(
+            tag.get(
+                "name"
+            )
+            or ""
+        ).strip().casefold()
+
+        if tag_name in aliases:
+            tag_id = str(
+                tag.get(
+                    "id"
+                )
+                or ""
+            ).strip()
+
+            if tag_id:
+                return [
+                    tag_id
+                ]
+
+    # Required-tag forum fallback: use the first configured tag.
+    if available_tags:
+        fallback_id = str(
+            available_tags[0].get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        if fallback_id:
+            return [
+                fallback_id
+            ]
+
+    return []
+
+
+def freeborn_op_publish(
+    operation_id
+):
+    operation = freeborn_op_get(
+        operation_id
+    )
+
+    if not operation:
+        raise RuntimeError(
+            "OP Corp not found"
+        )
+
+    forum_id = str(
+        DISCORD_OP_CORP_FORUM_ID
+        or ""
+    ).strip()
+
+    if not forum_id:
+        raise RuntimeError(
+            "DISCORD_OP_CORP_FORUM_ID missing"
+        )
+
+    forum = discord_get_channel(
+        forum_id
+    )
+
+    if int(
+        forum.get(
+            "type",
+            -1,
+        )
+    ) not in {
+        15,
+        16,
+    }:
+        raise RuntimeError(
+            "OP Corp destination is not a Forum/Media channel"
+        )
+
+    payload = {
+        "name":
+            (
+                f"{freeborn_op_reference(operation_id)}"
+                f" — {operation['title']}"
+            )[:100],
+        "auto_archive_duration":
+            10080,
+        "message": {
+            "embeds": [
+                freeborn_op_build_embed(
+                    operation
+                )
+            ],
+            "components":
+                freeborn_op_components(
+                    operation_id,
+                    operation[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+    }
+
+    applied_tags = freeborn_op_select_forum_tags(
+        forum,
+        operation[
+            "operation_type"
+        ],
+    )
+
+    if applied_tags:
+        payload[
+            "applied_tags"
+        ] = applied_tags
+
+    response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{forum_id}/threads"
+        ),
+        headers=discord_bot_headers(),
+        json=payload,
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn OP Corp forum publication failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    body = (
+        response.json()
+        or {}
+    )
+
+    thread_id = str(
+        body[
+            "id"
+        ]
+    )
+
+    starter = (
+        body.get(
+            "message"
+        )
+        or {}
+    )
+
+    message_id = str(
+        starter.get(
+            "id"
+        )
+        or thread_id
+    )
+
+    freeborn_op_save_discord_link(
+        operation_id,
+        thread_id,
+        message_id,
+    )
+
+    return {
+        "thread_id":
+            thread_id,
+        "message_id":
+            message_id,
+    }
+
+
+def freeborn_op_refresh_post(
+    operation_id
+):
+    operation = freeborn_op_get(
+        operation_id
+    )
+
+    if not operation:
+        raise RuntimeError(
+            "OP Corp not found"
+        )
+
+    thread_id = str(
+        operation.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    message_id = str(
+        operation.get(
+            "discord_post_message_id"
+        )
+        or ""
+    ).strip()
+
+    if (
+        not thread_id
+        or not message_id
+    ):
+        raise RuntimeError(
+            "OP Corp Discord linkage missing"
+        )
+
+    response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}/messages/"
+            f"{message_id}"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "embeds": [
+                freeborn_op_build_embed(
+                    operation
+                )
+            ],
+            "components":
+                freeborn_op_components(
+                    operation_id,
+                    operation[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn OP Corp post update failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+
+def freeborn_op_update(
+    operation_id,
+    title,
+    operation_date,
+    start_time,
+    end_time,
+    fleet_commander,
+    doctrine,
+    notes,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE corp_operations
+                SET
+                    title = %s,
+                    operation_date = %s,
+                    start_time = %s,
+                    end_time = %s,
+                    fleet_commander = %s,
+                    doctrine = %s,
+                    notes = %s,
+                    updated_at = NOW()
+                WHERE operation_id = %s
+                  AND status = 'open'
+                RETURNING operation_id;
+                """,
+                (
+                    str(title),
+                    operation_date,
+                    start_time,
+                    end_time,
+                    fleet_commander,
+                    doctrine,
+                    notes,
+                    int(operation_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_op_close(
+    operation_id
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE corp_operations
+                SET
+                    status = 'closed',
+                    closed_at = NOW(),
+                    updated_at = NOW()
+                WHERE operation_id = %s
+                  AND status = 'open'
+                RETURNING operation_id;
+                """,
+                (
+                    int(operation_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_op_archive_thread(
+    operation_id
+):
+    operation = freeborn_op_get(
+        operation_id
+    )
+
+    if not operation:
+        return
+
+    thread_id = str(
+        operation.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    if not thread_id:
+        return
+
+    response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "archived":
+                True,
+        },
+        timeout=12,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        print(
+            "Freeborn OP Corp archive warning:",
+            response.status_code,
+            response.text[:500],
+        )
+
+
+# ============================================================
 # MESSAGE COMPONENT HANDLER
 # ============================================================
 
@@ -12142,6 +13818,359 @@ def handle_message_component(
             "",
         )
     )
+
+    # ========================================================
+    # FREEBORN OP CORP — PARTICIPATION / MANAGEMENT
+    # ========================================================
+
+    attendance_match = re.fullmatch(
+        r"op_attend_(present|absent|maybe):(\d+)",
+        str(
+            custom_id
+        ),
+    )
+
+    if attendance_match:
+        attendance_status = (
+            attendance_match.group(
+                1
+            )
+        )
+
+        operation_id = int(
+            attendance_match.group(
+                2
+            )
+        )
+
+        operation = freeborn_op_get(
+            operation_id
+        )
+
+        if (
+            not operation
+            or operation[
+                "status"
+            ] != "open"
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette OP Corp n'est plus ouverte.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+        freeborn_op_set_attendance(
+            operation_id,
+            actor_user_id,
+            attendance_status,
+        )
+
+        freeborn_op_refresh_post(
+            operation_id
+        )
+
+        labels = {
+            "present":
+                "Présent",
+            "absent":
+                "Absent",
+            "maybe":
+                "Indécis",
+        }
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "✅ Ton statut pour "
+                        f"**{freeborn_op_reference(operation_id)}** "
+                        f"est maintenant **{labels[attendance_status]}**."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    op_action_match = re.fullmatch(
+        r"op_(edit|close):(\d+)",
+        str(
+            custom_id
+        ),
+    )
+
+    if op_action_match:
+        action = (
+            op_action_match.group(
+                1
+            )
+        )
+
+        operation_id = int(
+            op_action_match.group(
+                2
+            )
+        )
+
+        operation = freeborn_op_get(
+            operation_id
+        )
+
+        if not operation:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette OP Corp n'existe plus.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+        can_manage = (
+            actor_user_id
+            == str(
+                operation[
+                    "created_by_discord_user_id"
+                ]
+            )
+            or bool(
+                interaction_member_role_ids(
+                    data
+                )
+                & OP_CORP_CREATOR_ROLE_IDS
+            )
+        )
+
+        if not can_manage:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "⛔ Tu n'es pas autorisé à gérer cette OP Corp.",
+                    "flags":
+                        64,
+                },
+            })
+
+        if action == "close":
+            if not freeborn_op_close(
+                operation_id
+            ):
+                return jsonify({
+                    "type":
+                        4,
+                    "data": {
+                        "content":
+                            "ℹ️ Cette OP Corp est déjà clôturée.",
+                        "flags":
+                            64,
+                    },
+                })
+
+            freeborn_op_refresh_post(
+                operation_id
+            )
+
+            freeborn_op_archive_thread(
+                operation_id
+            )
+
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            f"🏁 **{freeborn_op_reference(operation_id)} "
+                            "clôturée.**\n"
+                            "Le post a été archivé dans le forum OP Corp."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        details_value = "\n".join(
+            value
+            for value in [
+                (
+                    "FC: "
+                    + str(
+                        operation.get(
+                            "fleet_commander"
+                        )
+                    )
+                    if operation.get(
+                        "fleet_commander"
+                    )
+                    else ""
+                ),
+                (
+                    "Doctrine: "
+                    + str(
+                        operation.get(
+                            "doctrine"
+                        )
+                    )
+                    if operation.get(
+                        "doctrine"
+                    )
+                    else ""
+                ),
+                (
+                    "Consignes: "
+                    + str(
+                        operation.get(
+                            "notes"
+                        )
+                    )
+                    if operation.get(
+                        "notes"
+                    )
+                    else ""
+                ),
+            ]
+            if value
+        )
+
+        return jsonify({
+            "type":
+                9,
+            "data": {
+                "custom_id":
+                    f"freeborn_op_edit:{operation_id}",
+                "title":
+                    (
+                        f"Modifier "
+                        f"{freeborn_op_reference(operation_id)}"
+                    )[:45],
+                "components": [
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Nom de l'OP",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_title",
+                            "style":
+                                1,
+                            "min_length":
+                                2,
+                            "max_length":
+                                80,
+                            "required":
+                                True,
+                            "value":
+                                str(
+                                    operation[
+                                        "title"
+                                    ]
+                                )[:80],
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Date",
+                        "description":
+                            "Format AAAA-MM-JJ",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_date",
+                            "style":
+                                1,
+                            "required":
+                                True,
+                            "value":
+                                operation[
+                                    "operation_date"
+                                ].isoformat(),
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Horaires",
+                        "description":
+                            "Format HH:MM-HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_times",
+                            "style":
+                                1,
+                            "required":
+                                True,
+                            "value":
+                                (
+                                    f"{operation['start_time'].strftime('%H:%M')}"
+                                    "-"
+                                    f"{operation['end_time'].strftime('%H:%M')}"
+                                ),
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "FC / Doctrine / Consignes",
+                        "description":
+                            "Une ligne par information, préfixée par FC:, Doctrine: ou Consignes:",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_details",
+                            "style":
+                                2,
+                            "required":
+                                False,
+                            "max_length":
+                                1000,
+                            "value":
+                                details_value[:1000],
+                        },
+                    },
+                ],
+            },
+        })
 
     # ========================================================
     # FREEBORN MARKET — PHASE 4 LIFECYCLE COMPONENTS
@@ -25583,6 +27612,28 @@ def interactions():
         ==
         5
     ):
+        modal_custom_id = str(
+            (
+                data.get(
+                    "data"
+                )
+                or {}
+            ).get(
+                "custom_id"
+            )
+            or ""
+        )
+
+        if (
+            modal_custom_id
+            == "freeborn_op_create"
+            or modal_custom_id.startswith(
+                "freeborn_op_edit:"
+            )
+        ):
+            return handle_op_corp_modal_submit(
+                data
+            )
 
         return handle_fit_modal_submit(
             data
@@ -26065,6 +28116,235 @@ def interactions():
                             64,
                     },
                 })
+
+    # ========================================================
+    # FREEBORN OP CORP
+    # ========================================================
+
+    if command_name == "op-corp":
+        if str(
+            data.get(
+                "channel_id",
+                "",
+            )
+        ) != str(
+            DISCORD_OP_CORP_COMMAND_CHANNEL_ID
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **/op-corp doit être lancée dans le "
+                            "salon de gestion dédié.**\n"
+                            f"Utilise <#{DISCORD_OP_CORP_COMMAND_CHANNEL_ID}>."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        if not (
+            interaction_member_role_ids(
+                data
+            )
+            & OP_CORP_CREATOR_ROLE_IDS
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **Accès refusé**\n\n"
+                            "La création d'OP Corp est réservée aux rôles "
+                            "**CEO**, **Direction**, **Officier** et "
+                            "**Fleet Commander**."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                9,
+            "data": {
+                "custom_id":
+                    "freeborn_op_create",
+                "title":
+                    "Freeborn — Nouvelle OP Corp",
+                "components": [
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Nom de l'OP",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_title",
+                            "style":
+                                1,
+                            "min_length":
+                                2,
+                            "max_length":
+                                80,
+                            "required":
+                                True,
+                            "placeholder":
+                                "Ex. Mining Night, C3 PvE, Roam PvP...",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Type d'opération",
+                        "component": {
+                            "type":
+                                3,
+                            "custom_id":
+                                "op_type",
+                            "placeholder":
+                                "Choisir le type d'OP",
+                            "min_values":
+                                1,
+                            "max_values":
+                                1,
+                            "required":
+                                True,
+                            "options": [
+                                {
+                                    "label":
+                                        "Minage",
+                                    "value":
+                                        "mining",
+                                    "description":
+                                        "Opération minière / industrie",
+                                    "emoji": {
+                                        "name":
+                                            "⛏️",
+                                    },
+                                },
+                                {
+                                    "label":
+                                        "PvE",
+                                    "value":
+                                        "pve",
+                                    "description":
+                                        "Sites, missions, anomalies, wormhole...",
+                                    "emoji": {
+                                        "name":
+                                            "🛡️",
+                                    },
+                                },
+                                {
+                                    "label":
+                                        "PvP",
+                                    "value":
+                                        "pvp",
+                                    "description":
+                                        "Roam, défense, combat organisé...",
+                                    "emoji": {
+                                        "name":
+                                            "⚔️",
+                                    },
+                                },
+                                {
+                                    "label":
+                                        "Autre",
+                                    "value":
+                                        "other",
+                                    "description":
+                                        "Toute autre opération corporation",
+                                    "emoji": {
+                                        "name":
+                                            "✨",
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Date",
+                        "description":
+                            "Format AAAA-MM-JJ",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_date",
+                            "style":
+                                1,
+                            "min_length":
+                                10,
+                            "max_length":
+                                10,
+                            "required":
+                                True,
+                            "placeholder":
+                                "2026-08-16",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Horaires",
+                        "description":
+                            "Heure de début et de fin — format HH:MM-HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_times",
+                            "style":
+                                1,
+                            "min_length":
+                                11,
+                            "max_length":
+                                11,
+                            "required":
+                                True,
+                            "placeholder":
+                                "20:30-22:30",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "FC / Doctrine / Consignes",
+                        "description":
+                            "Facultatif — utilise FC:, Doctrine: et Consignes:",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_details",
+                            "style":
+                                2,
+                            "required":
+                                False,
+                            "max_length":
+                                1000,
+                            "placeholder":
+                                (
+                                    "FC: Le Gardien\n"
+                                    "Doctrine: Golem / Logi\n"
+                                    "Consignes: rendez-vous 20:20..."
+                                ),
+                        },
+                    },
+                ],
+            },
+        })
 
     # ========================================================
     # FREEBORN JITA CHECK — CEO ONLY
@@ -30475,6 +32755,17 @@ def register_commands():
 
             "description":
                 "Finaliser ton intégration Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "op-corp",
+
+            "description":
+                "Créer une opération corporation Freeborn",
 
             "type":
                 1,
