@@ -1,11 +1,23 @@
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import base64
+import hashlib
+import json
 import os
+import re
+import tempfile
+import time
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import escape
 from urllib.parse import urlencode
 
 import psycopg
 import requests
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, redirect, request, send_from_directory
 from nacl.exceptions import BadSignatureError
+from nacl.secret import SecretBox
 from nacl.signing import VerifyKey
 
 from itsdangerous import (
@@ -21,6 +33,18 @@ from jose import jwt
 app = Flask(__name__)
 
 
+@app.get("/assets/<path:filename>")
+def freeborn_assets(filename):
+
+    return send_from_directory(
+        os.path.join(
+            os.path.dirname(__file__),
+            "assets",
+        ),
+        filename,
+    )
+
+
 # ============================================================
 # ENVIRONMENT VARIABLES
 # ============================================================
@@ -28,6 +52,11 @@ app = Flask(__name__)
 EVE_CLIENT_ID = os.environ["EVE_CLIENT_ID"]
 EVE_CLIENT_SECRET = os.environ["EVE_CLIENT_SECRET"]
 EVE_CALLBACK_URL = os.environ["EVE_CALLBACK_URL"]
+
+PUBLIC_BASE_URL = EVE_CALLBACK_URL.rsplit(
+    "/callback",
+    1,
+)[0].rstrip("/")
 
 FREEBORN_CORPORATION_ID = int(
     os.environ["FREEBORN_CORPORATION_ID"]
@@ -38,16 +67,61 @@ DISCORD_PUBLIC_KEY = os.environ["DISCORD_PUBLIC_KEY"]
 DISCORD_APPLICATION_ID = os.environ["DISCORD_APPLICATION_ID"]
 DISCORD_GUILD_ID = os.environ["DISCORD_GUILD_ID"]
 
-# Discord channels used for persistent command history
-DISCORD_EVE_VERIFICATION_CHANNEL_ID = "1535497827503964190"
-DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID = "1535497895929708648"
+# ============================================================
+# DISCORD V3 CONFIGURATION
+# ============================================================
+
+DISCORD_RECRUITMENT_CHANNEL_ID = os.environ.get(
+    "DISCORD_RECRUITMENT_CHANNEL_ID",
+    "1535497827503964190",
+)
+
+DISCORD_BOT_MANAGEMENT_CHANNEL_ID = os.environ.get(
+    "DISCORD_BOT_MANAGEMENT_CHANNEL_ID",
+    "1535497895929708648",
+)
+
+DISCORD_LOGS_CHANNEL_ID = os.environ.get(
+    "DISCORD_LOGS_CHANNEL_ID"
+)
+
+
+DISCORD_ORIENTATION_CHANNEL_ID = os.environ.get(
+    "DISCORD_ORIENTATION_CHANNEL_ID"
+)
+
+DISCORD_CORP_RULES_CHANNEL_ID = os.environ.get(
+    "DISCORD_CORP_RULES_CHANNEL_ID"
+)
+
+DISCORD_CHARTER_CHANNEL_ID = os.environ.get(
+    "DISCORD_CHARTER_CHANNEL_ID"
+)
+
+
+# Version identifiers recorded with each acceptance.
+# Increase a version when the corresponding document changes and
+# members must accept the new version again.
+CORP_RULES_VERSION = os.environ.get(
+    "CORP_RULES_VERSION",
+    "1.0",
+)
+
+FREEBORN_CHARTER_VERSION = os.environ.get(
+    "FREEBORN_CHARTER_VERSION",
+    "1.0",
+)
+
+DISCORD_EVE_VERIFICATION_CHANNEL_ID = (
+    DISCORD_RECRUITMENT_CHANNEL_ID
+)
+
+DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID = (
+    DISCORD_BOT_MANAGEMENT_CHANNEL_ID
+)
 
 DISCORD_MEMBER_ROLE_ID = os.environ[
     "DISCORD_MEMBER_ROLE_ID"
-]
-
-DISCORD_RECRUIT_ROLE_ID = os.environ[
-    "DISCORD_RECRUIT_ROLE_ID"
 ]
 
 DISCORD_EVE_VERIFIED_ROLE_ID = os.environ[
@@ -62,31 +136,267 @@ DISCORD_ALT_CHARACTER_ROLE_ID = os.environ[
     "DISCORD_ALT_CHARACTER_ROLE_ID"
 ]
 
-DISCORD_FOUNDER_ROLE_ID = os.environ[
-    "DISCORD_FOUNDER_ROLE_ID"
-]
+DISCORD_GUEST_ROLE_ID = os.environ.get(
+    "DISCORD_GUEST_ROLE_ID"
+)
+
+DISCORD_CANDIDATE_ROLE_ID = (
+    os.environ.get("DISCORD_CANDIDATE_ROLE_ID")
+    or
+    os.environ.get("DISCORD_RECRUIT_ROLE_ID")
+)
+
+DISCORD_CANDIDATE_ACCEPTED_ROLE_ID = os.environ.get(
+    "DISCORD_CANDIDATE_ACCEPTED_ROLE_ID"
+)
+
+DISCORD_RECRUIT_ROLE_ID = (
+    DISCORD_CANDIDATE_ROLE_ID
+)
 
 DISCORD_CEO_ROLE_ID = os.environ[
     "DISCORD_CEO_ROLE_ID"
 ]
 
-DISCORD_DIRECTOR_ROLE_ID = os.environ[
-    "DISCORD_DIRECTOR_ROLE_ID"
-]
+DISCORD_HIGH_COUNCIL_ROLE_ID = os.environ.get(
+    "DISCORD_HIGH_COUNCIL_ROLE_ID"
+)
+
+DISCORD_DIRECTION_ROLE_ID = (
+    os.environ.get("DISCORD_DIRECTION_ROLE_ID")
+    or
+    os.environ.get("DISCORD_DIRECTOR_ROLE_ID")
+)
+
+DISCORD_HR_ROLE_ID = os.environ.get(
+    "DISCORD_HR_ROLE_ID"
+)
+
+DISCORD_OFFICER_ROLE_ID = os.environ.get(
+    "DISCORD_OFFICER_ROLE_ID"
+)
+
+DISCORD_FLEET_COMMANDER_ROLE_ID = os.environ.get(
+    "DISCORD_FLEET_COMMANDER_ROLE_ID"
+)
+
+DISCORD_VETERAN_ROLE_ID = os.environ.get(
+    "DISCORD_VETERAN_ROLE_ID"
+)
+
+# Freeborn Fittings must NEVER be exposed inside the Diplomatie category.
+# Render may override this ID later, but the current Freeborn Legacy ID
+# is kept as a safe built-in fallback.
+DISCORD_DIPLOMACY_CATEGORY_ID = os.environ.get(
+    "DISCORD_DIPLOMACY_CATEGORY_ID",
+    "1535676807343374413",
+)
+
+# Dedicated corporate Fittings channel.
+# Required for 4T-D-A automatic publication.
+DISCORD_FITTINGS_CHANNEL_ID = os.environ.get(
+    "DISCORD_FITTINGS_CHANNEL_ID"
+)
+
+# ============================================================
+# FREEBORN MARKET
+# ============================================================
+
+# Dedicated Freeborn Market forum/channel.
+# Configured in Render for automatic forum publication.
+DISCORD_MARKET_CHANNEL_ID = os.environ.get(
+    "DISCORD_MARKET_CHANNEL_ID"
+)
+
+# Freeborn OP Corp:
+# /op-corp is launched from a normal management text channel.
+# The actual operation is always published in the dedicated forum.
+DISCORD_OP_CORP_COMMAND_CHANNEL_ID = os.environ.get(
+    "DISCORD_OP_CORP_COMMAND_CHANNEL_ID",
+    "1535676808157077576",
+)
+
+DISCORD_OP_CORP_FORUM_ID = os.environ.get(
+    "DISCORD_OP_CORP_FORUM_ID",
+    "1538026284972642325",
+)
+
+# Dedicated SRP forum. /srp can be launched from any allowed text channel;
+# the resulting request is always published here.
+DISCORD_SRP_FORUM_ID = os.environ.get(
+    "DISCORD_SRP_FORUM_ID",
+    "1536573060285730817",
+)
+
+# Market page line count:
+# - operational default: 10
+# - hard ceiling: 15
+# This keeps Discord/forum posts readable while leaving a future override.
+try:
+    FREEBORN_MARKET_MAX_LINES = int(
+        os.environ.get(
+            "FREEBORN_MARKET_MAX_LINES",
+            "10",
+        )
+    )
+except (TypeError, ValueError):
+    FREEBORN_MARKET_MAX_LINES = 10
+
+FREEBORN_MARKET_MAX_LINES = max(
+    1,
+    min(
+        15,
+        FREEBORN_MARKET_MAX_LINES,
+    ),
+)
+
+DISCORD_DIRECTOR_ROLE_ID = (
+    DISCORD_DIRECTION_ROLE_ID
+)
 
 FLASK_SECRET_KEY = os.environ["FLASK_SECRET_KEY"]
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 
 # ============================================================
-# STAFF ROLES
+# V3 ROLE ACCESS GROUPS
 # ============================================================
 
-STAFF_ROLE_IDS = {
-    DISCORD_FOUNDER_ROLE_ID,
+def configured_role_ids(*role_ids):
+    return {
+        str(role_id)
+        for role_id in role_ids
+        if role_id
+    }
+
+
+SYSTEM_ADMIN_ROLE_IDS = configured_role_ids(
     DISCORD_CEO_ROLE_ID,
-    DISCORD_DIRECTOR_ROLE_ID,
-}
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+)
+
+RECRUITMENT_MANAGER_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+)
+
+MODERATION_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+    DISCORD_OFFICER_ROLE_ID,
+)
+
+AUDIT_VIEWER_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+)
+
+RECRUITMENT_REVIEWER_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+)
+
+STAFF_ROLE_IDS = SYSTEM_ADMIN_ROLE_IDS
+
+
+# ============================================================
+# FREEBORN FITTINGS — ACCESS
+# ============================================================
+
+# Reading the corporate fitting library remains available to Freeborn members.
+FITTING_VIEWER_ROLE_IDS = configured_role_ids(
+    DISCORD_MEMBER_ROLE_ID,
+    DISCORD_VETERAN_ROLE_ID,
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+    DISCORD_OFFICER_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# A fit may be proposed only by Fleet Commanders, Direction, High Council or CEO.
+# Officer / HR / Member / Veteran alone are deliberately excluded.
+FITTING_CREATOR_ROLE_IDS = configured_role_ids(
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# Editing follows the proposal chain:
+# - original authorized creator while the fit is still PROPOSED
+# - CEO override on every fit
+FITTING_EDITOR_ROLE_IDS = configured_role_ids(
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# Final corporate authority: approve, reject and permanently delete = CEO only.
+FITTING_MANAGER_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+)
+
+
+# ============================================================
+# FREEBORN MARKET — ACCESS
+# ============================================================
+
+# Personal BUY / SELL announcements:
+# Freeborn members and every internal role above Member.
+MARKET_MEMBER_ROLE_IDS = configured_role_ids(
+    DISCORD_MEMBER_ROLE_ID,
+    DISCORD_VETERAN_ROLE_ID,
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+    DISCORD_OFFICER_ROLE_ID,
+    DISCORD_HR_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# Corporation BUY / SELL announcements officially engage Freeborn Legacy.
+# Validated rule: Direction + High Council + CEO.
+MARKET_CORP_ROLE_IDS = configured_role_ids(
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# OP Corp creation / management:
+# CEO + Direction + Officier + Fleet Commander.
+OP_CORP_CREATOR_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_OFFICER_ROLE_ID,
+    DISCORD_FLEET_COMMANDER_ROLE_ID,
+)
+
+# OP Corp management:
+# the original creator may manage their own OP;
+# Direction and CEO may manage any OP.
+OP_CORP_MANAGER_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+)
+
+# SRP moderation / decision roles.
+# Only CEO + Direction may accept, refuse or close an SRP request.
+SRP_MANAGER_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+)
 
 
 # ============================================================
@@ -108,8 +418,20 @@ EVE_METADATA_URL = (
 
 ESI_BASE_URL = "https://esi.evetech.net/latest"
 
+# Private ESI permissions requested only during the /freeborn
+# candidate/member integration flow. Guests never use EVE SSO.
+FREEBORN_EVE_SCOPES = (
+    "esi-skills.read_skills.v1",
+)
+
 DISCORD_API = "https://discord.com/api/v10"
 
+# Production build identifier.
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-PRODUCTION-FINAL"
+print(
+    "FREEBORN BUILD:",
+    FREEBORN_BUILD_VERSION,
+)
 
 VALID_EVE_ISSUERS = {
     "login.eveonline.com",
@@ -124,6 +446,43 @@ state_serializer = URLSafeTimedSerializer(
 member_remove_signer = TimestampSigner(
     FLASK_SECRET_KEY,
     salt="freeborn-member-remove",
+)
+
+alt_remove_signer = TimestampSigner(
+    FLASK_SECRET_KEY,
+    salt="freeborn-alt-remove",
+)
+
+main_change_signer = TimestampSigner(
+    FLASK_SECRET_KEY,
+    salt="freeborn-main-change",
+)
+
+
+sync_apply_signer = TimestampSigner(
+    FLASK_SECRET_KEY,
+    salt="freeborn-sync-apply",
+)
+
+fit_delete_signer = TimestampSigner(
+    FLASK_SECRET_KEY,
+    salt="freeborn-fit-delete",
+)
+
+fit_web_serializer = URLSafeTimedSerializer(
+    FLASK_SECRET_KEY,
+    salt="freeborn-fit-web",
+)
+
+
+fit_pilot_serializer = URLSafeTimedSerializer(
+    FLASK_SECRET_KEY,
+    salt="freeborn-fit-pilot",
+)
+
+market_web_serializer = URLSafeTimedSerializer(
+    FLASK_SECRET_KEY,
+    salt="freeborn-market-web",
 )
 
 
@@ -212,6 +571,880 @@ def init_database():
                     idx_eve_characters_discord_user_id
                     ON eve_characters (discord_user_id);
                     """
+                )
+
+
+                # ====================================================
+                # V3 MULTI-GUILD / RECRUITMENT FOUNDATION
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS discord_guilds (
+                        guild_id TEXT PRIMARY KEY,
+                        guild_name TEXT,
+                        corporation_id BIGINT,
+                        recruitment_channel_id TEXT,
+                        bot_management_channel_id TEXT,
+                        logs_channel_id TEXT,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        orientation_channel_id TEXT,
+                        corp_rules_channel_id TEXT,
+                        charter_channel_id TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE discord_guilds
+                    ADD COLUMN IF NOT EXISTS
+                    orientation_channel_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE discord_guilds
+                    ADD COLUMN IF NOT EXISTS
+                    corp_rules_channel_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE discord_guilds
+                    ADD COLUMN IF NOT EXISTS
+                    charter_channel_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS guild_roles (
+                        guild_id TEXT NOT NULL,
+                        role_type TEXT NOT NULL,
+                        role_id TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (guild_id, role_type),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS member_statuses (
+                        guild_id TEXT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (
+                            status IN (
+                                'guest',
+                                'candidate',
+                                'candidate_accepted',
+                                'member'
+                            )
+                        ),
+                        changed_by_discord_user_id TEXT,
+                        changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (guild_id, discord_user_id),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS policy_documents (
+                        guild_id TEXT NOT NULL,
+                        document_type TEXT NOT NULL,
+                        document_version TEXT NOT NULL,
+                        message_id TEXT,
+                        channel_id TEXT,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (
+                            guild_id,
+                            document_type,
+                            document_version
+                        ),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS policy_acceptances (
+                        guild_id TEXT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        document_type TEXT NOT NULL,
+                        document_version TEXT NOT NULL,
+                        accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        message_id TEXT,
+                        channel_id TEXT,
+                        PRIMARY KEY (
+                            guild_id,
+                            discord_user_id,
+                            document_type,
+                            document_version
+                        ),
+                        FOREIGN KEY (
+                            guild_id,
+                            document_type,
+                            document_version
+                        )
+                            REFERENCES policy_documents (
+                                guild_id,
+                                document_type,
+                                document_version
+                            )
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        event_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        target_discord_user_id TEXT,
+                        actor_discord_user_id TEXT,
+                        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                # ====================================================
+                # FREEBORN FITTINGS — DATABASE
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS fits (
+                        fit_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        ship_name TEXT NOT NULL,
+                        usage TEXT NOT NULL,
+                        eft_text TEXT NOT NULL,
+                        notes TEXT,
+                        status TEXT NOT NULL DEFAULT 'proposed'
+                            CHECK (
+                                status IN (
+                                    'proposed',
+                                    'testing',
+                                    'approved',
+                                    'rejected',
+                                    'archived'
+                                )
+                            ),
+                        created_by_discord_user_id TEXT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_fits_guild_ship
+                    ON fits (guild_id, ship_name);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_fits_guild_status
+                    ON fits (guild_id, status);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS ship_type_id BIGINT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS technical_snapshot JSONB;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS technical_snapshot_version TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS technical_snapshot_updated_at TIMESTAMPTZ;
+                    """
+                )
+
+                # FREEBORN FITTINGS — 4T-C STATUS MIGRATION
+                # The original status constraint only allowed
+                # proposed/testing/approved. The workflow now also uses
+                # rejected (and keeps archived reserved for lifecycle cleanup).
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    DROP CONSTRAINT IF EXISTS fits_status_check;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD CONSTRAINT fits_status_check
+                    CHECK (
+                        status IN (
+                            'proposed',
+                            'testing',
+                            'approved',
+                            'rejected',
+                            'archived'
+                        )
+                    );
+                    """
+                )
+
+                # FREEBORN FITTINGS — 4T-D-A
+                # Keep the ONE Discord publication linked to the ONE FREE-xxxx.
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_post_channel_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_post_message_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_thread_id TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_post_created_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE fits
+                    ADD COLUMN IF NOT EXISTS discord_post_updated_at TIMESTAMPTZ;
+                    """
+                )
+
+                # ====================================================
+                # FREEBORN MARKET FOUNDATION
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS market_orders (
+                        market_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        order_type TEXT NOT NULL CHECK (
+                            order_type IN ('buy', 'sell')
+                        ),
+                        owner_scope TEXT NOT NULL CHECK (
+                            owner_scope IN ('member', 'corporation')
+                        ),
+                        status TEXT NOT NULL DEFAULT 'open' CHECK (
+                            status IN (
+                                'open',
+                                'in_progress',
+                                'completed',
+                                'cancelled'
+                            )
+                        ),
+                        created_by_discord_user_id TEXT NOT NULL,
+                        accepted_by_discord_user_id TEXT,
+                        adjustment_percent NUMERIC(7, 2)
+                            NOT NULL DEFAULT 0,
+                        notes TEXT,
+                        discord_post_channel_id TEXT,
+                        discord_post_message_id TEXT,
+                        discord_thread_id TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        closed_at TIMESTAMPTZ,
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS jita_snapshot_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS total_isk NUMERIC(28, 2);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS discord_post_created_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_orders
+                    ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS market_order_items (
+                        market_item_id BIGSERIAL PRIMARY KEY,
+                        market_id BIGINT NOT NULL,
+                        line_number INTEGER NOT NULL CHECK (
+                            line_number BETWEEN 1 AND 15
+                        ),
+                        type_id BIGINT NOT NULL,
+                        type_name TEXT NOT NULL,
+                        quantity BIGINT NOT NULL CHECK (
+                            quantity > 0
+                        ),
+                        jita_reference_side TEXT NOT NULL CHECK (
+                            jita_reference_side IN ('buy', 'sell')
+                        ),
+                        jita_reference_unit_price NUMERIC(24, 2),
+                        adjusted_unit_price NUMERIC(24, 2),
+                        line_total NUMERIC(28, 2),
+                        price_fetched_at TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        UNIQUE (market_id, line_number),
+                        FOREIGN KEY (market_id)
+                            REFERENCES market_orders (market_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_order_items
+                    ADD COLUMN IF NOT EXISTS chosen_unit_price NUMERIC(24, 2);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_order_items
+                    ADD COLUMN IF NOT EXISTS manual_price_override BOOLEAN
+                        NOT NULL DEFAULT FALSE;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_market_orders_guild_status
+                    ON market_orders (
+                        guild_id,
+                        status,
+                        created_at DESC
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_market_orders_guild_scope_type
+                    ON market_orders (
+                        guild_id,
+                        owner_scope,
+                        order_type,
+                        created_at DESC
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_market_items_market
+                    ON market_order_items (
+                        market_id,
+                        line_number
+                    );
+                    """
+                )
+
+                # ====================================================
+                # FREEBORN SRP
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS srp_requests (
+                        srp_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        created_by_discord_user_id TEXT NOT NULL,
+                        pilot_name TEXT,
+                        ship_fit TEXT NOT NULL,
+                        zkill_url TEXT NOT NULL,
+                        operation_fc TEXT,
+                        circumstances TEXT NOT NULL,
+                        extra_info TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                            status IN (
+                                'pending',
+                                'accepted',
+                                'refused',
+                                'closed'
+                            )
+                        ),
+                        decided_by_discord_user_id TEXT,
+                        decided_at TIMESTAMPTZ,
+                        closed_by_discord_user_id TEXT,
+                        closed_at TIMESTAMPTZ,
+                        discord_thread_id TEXT,
+                        discord_post_message_id TEXT,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_srp_requests_guild_status
+                    ON srp_requests (
+                        guild_id,
+                        status,
+                        created_at
+                    );
+                    """
+                )
+
+                # ====================================================
+                # FREEBORN OP CORP
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS corp_operations (
+                        operation_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        operation_type TEXT NOT NULL CHECK (
+                            operation_type IN (
+                                'mining',
+                                'pve',
+                                'pvp',
+                                'other'
+                            )
+                        ),
+                        operation_date DATE NOT NULL,
+                        start_time TIME NOT NULL,
+                        end_time TIME NOT NULL,
+                        fleet_commander TEXT,
+                        doctrine TEXT,
+                        notes TEXT,
+                        created_by_discord_user_id TEXT NOT NULL,
+                        discord_thread_id TEXT,
+                        discord_post_message_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'open' CHECK (
+                            status IN (
+                                'open',
+                                'closed',
+                                'cancelled'
+                            )
+                        ),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        closed_at TIMESTAMPTZ,
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS corp_operation_attendance (
+                        operation_id BIGINT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        attendance_status TEXT NOT NULL CHECK (
+                            attendance_status IN (
+                                'present',
+                                'absent',
+                                'maybe'
+                            )
+                        ),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (
+                            operation_id,
+                            discord_user_id
+                        ),
+                        FOREIGN KEY (operation_id)
+                            REFERENCES corp_operations (operation_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_corp_operations_guild_status_date
+                    ON corp_operations (
+                        guild_id,
+                        status,
+                        operation_date,
+                        start_time
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_corp_operation_attendance_operation
+                    ON corp_operation_attendance (
+                        operation_id,
+                        attendance_status
+                    );
+                    """
+                )
+
+                # ----------------------------------------------------
+                # FREEBORN MARKET — STATIC EVE TYPE SEARCH INDEX
+                #
+                # /search/ is no longer available on current ESI.
+                # Market autocomplete therefore uses CCP's official SDE,
+                # imported once into the existing Neon database.
+                # ----------------------------------------------------
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS market_type_index (
+                        type_id BIGINT PRIMARY KEY,
+                        type_name TEXT NOT NULL,
+                        type_name_lower TEXT NOT NULL,
+                        group_id BIGINT,
+                        market_group_id BIGINT NOT NULL,
+                        sde_build TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE market_type_index
+                    ADD COLUMN IF NOT EXISTS volume_m3 DOUBLE PRECISION;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_market_type_index_name_lower
+                    ON market_type_index (
+                        type_name_lower
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS guild_eve_characters (
+                        guild_id TEXT NOT NULL,
+                        character_id BIGINT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        character_name TEXT NOT NULL,
+                        character_type TEXT NOT NULL CHECK (
+                            character_type IN ('main', 'alt')
+                        ),
+                        corporation_id BIGINT NOT NULL,
+                        in_corporation BOOLEAN NOT NULL DEFAULT TRUE,
+                        verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        last_checked_at TIMESTAMPTZ,
+                        left_corporation_at TIMESTAMPTZ,
+                        PRIMARY KEY (guild_id, character_id),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                # Authenticated ESI data kept with the guild-scoped Main.
+                # The refresh token is encrypted before it reaches Neon.
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    eve_refresh_token_encrypted TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    eve_scopes TEXT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    total_skill_points BIGINT;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    skills_updated_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    skills_snapshot JSONB;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    ALTER TABLE guild_eve_characters
+                    ADD COLUMN IF NOT EXISTS
+                    sso_authorized_at TIMESTAMPTZ;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                    uq_guild_eve_one_main_per_discord
+                    ON guild_eve_characters (
+                        guild_id,
+                        discord_user_id
+                    )
+                    WHERE character_type = 'main';
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_guild_eve_discord_user
+                    ON guild_eve_characters (
+                        guild_id,
+                        discord_user_id
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_member_statuses_status
+                    ON member_statuses (guild_id, status);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_policy_acceptances_user
+                    ON policy_acceptances (
+                        guild_id,
+                        discord_user_id,
+                        accepted_at
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_audit_log_guild_created_at
+                    ON audit_log (guild_id, created_at DESC);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO discord_guilds (
+                        guild_id,
+                        corporation_id,
+                        recruitment_channel_id,
+                        bot_management_channel_id,
+                        logs_channel_id,
+                        orientation_channel_id,
+                        corp_rules_channel_id,
+                        charter_channel_id,
+                        updated_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, NOW()
+                    )
+                    ON CONFLICT (guild_id)
+                    DO UPDATE SET
+                        corporation_id = EXCLUDED.corporation_id,
+                        recruitment_channel_id =
+                            EXCLUDED.recruitment_channel_id,
+                        bot_management_channel_id =
+                            EXCLUDED.bot_management_channel_id,
+                        logs_channel_id = COALESCE(
+                            EXCLUDED.logs_channel_id,
+                            discord_guilds.logs_channel_id
+                        ),
+                        orientation_channel_id = COALESCE(
+                            EXCLUDED.orientation_channel_id,
+                            discord_guilds.orientation_channel_id
+                        ),
+                        corp_rules_channel_id = COALESCE(
+                            EXCLUDED.corp_rules_channel_id,
+                            discord_guilds.corp_rules_channel_id
+                        ),
+                        charter_channel_id = COALESCE(
+                            EXCLUDED.charter_channel_id,
+                            discord_guilds.charter_channel_id
+                        ),
+                        updated_at = NOW();
+                    """,
+                    (
+                        str(DISCORD_GUILD_ID),
+                        int(FREEBORN_CORPORATION_ID),
+                        str(DISCORD_RECRUITMENT_CHANNEL_ID),
+                        str(DISCORD_BOT_MANAGEMENT_CHANNEL_ID),
+                        (
+                            str(DISCORD_LOGS_CHANNEL_ID)
+                            if DISCORD_LOGS_CHANNEL_ID
+                            else None
+                        ),
+                        (
+                            str(DISCORD_ORIENTATION_CHANNEL_ID)
+                            if DISCORD_ORIENTATION_CHANNEL_ID
+                            else None
+                        ),
+                        (
+                            str(DISCORD_CORP_RULES_CHANNEL_ID)
+                            if DISCORD_CORP_RULES_CHANNEL_ID
+                            else None
+                        ),
+                        (
+                            str(DISCORD_CHARTER_CHANNEL_ID)
+                            if DISCORD_CHARTER_CHANNEL_ID
+                            else None
+                        ),
+                    ),
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO guild_eve_characters (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        character_name,
+                        character_type,
+                        corporation_id,
+                        in_corporation,
+                        verified_at,
+                        updated_at,
+                        last_checked_at,
+                        left_corporation_at
+                    )
+                    SELECT
+                        %s,
+                        character_id,
+                        discord_user_id,
+                        character_name,
+                        character_type,
+                        corporation_id,
+                        in_corporation,
+                        verified_at,
+                        updated_at,
+                        last_checked_at,
+                        left_corporation_at
+                    FROM eve_characters
+                    ON CONFLICT (guild_id, character_id)
+                    DO NOTHING;
+                    """,
+                    (
+                        str(DISCORD_GUILD_ID),
+                    ),
                 )
 
             conn.commit()
@@ -527,6 +1760,1150 @@ def get_database_stats():
 
 
 # ============================================================
+# V3 MULTI-GUILD HELPERS
+# ============================================================
+
+VALID_MEMBER_STATUSES = {
+    "guest",
+    "candidate",
+    "candidate_accepted",
+    "member",
+}
+
+
+def get_guild_config(guild_id):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    guild_id,
+                    guild_name,
+                    corporation_id,
+                    recruitment_channel_id,
+                    bot_management_channel_id,
+                    logs_channel_id,
+                    is_active,
+                    orientation_channel_id,
+                    corp_rules_channel_id,
+                    charter_channel_id
+                FROM discord_guilds
+                WHERE guild_id = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                ),
+            )
+
+            return cur.fetchone()
+
+
+def get_guild_role_id(
+    guild_id,
+    role_type,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT role_id
+                FROM guild_roles
+                WHERE guild_id = %s
+                AND role_type = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(role_type),
+                ),
+            )
+
+            row = cur.fetchone()
+
+            return row[0] if row else None
+
+
+def set_guild_role_id(
+    guild_id,
+    role_type,
+    role_id,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO guild_roles (
+                    guild_id,
+                    role_type,
+                    role_id,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (guild_id, role_type)
+                DO UPDATE SET
+                    role_id = EXCLUDED.role_id,
+                    updated_at = NOW();
+                """,
+                (
+                    str(guild_id),
+                    str(role_type),
+                    str(role_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def resolve_guild_role_id(
+    guild_id,
+    role_type,
+):
+    """
+    Resolve a V3 role for one guild.
+
+    Priority:
+    1. guild_roles table (true multi-guild configuration)
+    2. current Freeborn environment variables as bootstrap fallback
+    """
+
+    role_id = get_guild_role_id(
+        guild_id,
+        role_type,
+    )
+
+    if role_id:
+
+        return str(role_id)
+
+    if str(guild_id) != str(DISCORD_GUILD_ID):
+
+        return None
+
+    bootstrap_roles = {
+        "guest":
+            DISCORD_GUEST_ROLE_ID,
+
+        "candidate":
+            DISCORD_CANDIDATE_ROLE_ID,
+
+        "candidate_accepted":
+            DISCORD_CANDIDATE_ACCEPTED_ROLE_ID,
+
+        "member":
+            DISCORD_MEMBER_ROLE_ID,
+
+        "ceo":
+            DISCORD_CEO_ROLE_ID,
+
+        "high_council":
+            DISCORD_HIGH_COUNCIL_ROLE_ID,
+
+        "direction":
+            DISCORD_DIRECTION_ROLE_ID,
+
+        "hr":
+            DISCORD_HR_ROLE_ID,
+
+        "officer":
+            DISCORD_OFFICER_ROLE_ID,
+
+        "fleet_commander":
+            DISCORD_FLEET_COMMANDER_ROLE_ID,
+
+        "veteran":
+            DISCORD_VETERAN_ROLE_ID,
+
+        "eve_verified":
+            DISCORD_EVE_VERIFIED_ROLE_ID,
+
+        "main_character":
+            DISCORD_MAIN_CHARACTER_ROLE_ID,
+
+        "alt_character":
+            DISCORD_ALT_CHARACTER_ROLE_ID,
+    }
+
+    role_id = bootstrap_roles.get(
+        str(role_type)
+    )
+
+    return (
+        str(role_id)
+        if role_id
+        else None
+    )
+
+
+def interaction_member_role_ids(data):
+
+    try:
+
+        return {
+            str(role_id)
+            for role_id
+            in data["member"]["roles"]
+        }
+
+    except (
+        KeyError,
+        TypeError,
+    ):
+
+        return set()
+
+
+
+def infer_recruitment_status_from_interaction_roles(
+    data,
+    guild_id,
+):
+    """
+    Infer the current V3 recruitment status from the live Discord
+    member roles included in an interaction payload.
+
+    The database remains the normal source of truth. This helper is
+    only used to recover from a missing/stale member_statuses row,
+    for example after a manual role adjustment by staff.
+    """
+
+    live_role_ids = interaction_member_role_ids(
+        data
+    )
+
+    role_priority = (
+        "member",
+        "candidate_accepted",
+        "candidate",
+    )
+
+    for status in role_priority:
+
+        role_id = resolve_guild_role_id(
+            guild_id,
+            status,
+        )
+
+        if (
+            role_id
+            and
+            str(role_id) in live_role_ids
+        ):
+
+            return status
+
+    return None
+
+
+def apply_recruitment_status_role(
+    guild_id,
+    discord_user_id,
+    new_status,
+):
+    """
+    Apply only the recruitment/status roles involved in a V3 transition.
+
+    This helper deliberately does not touch EVE identity roles
+    (EVE Verified / Main / Alt).
+    """
+
+    if new_status not in VALID_MEMBER_STATUSES:
+
+        raise ValueError(
+            f"Invalid V3 member status: {new_status}"
+        )
+
+    target_role_id = resolve_guild_role_id(
+        guild_id,
+        new_status,
+    )
+
+    if not target_role_id:
+
+        raise ValueError(
+            f"Discord role not configured for status: {new_status}"
+        )
+
+    transition_role_types = (
+        "guest",
+        "candidate",
+        "candidate_accepted",
+        "member",
+    )
+
+    removal_results = []
+
+    for role_type in transition_role_types:
+
+        role_id = resolve_guild_role_id(
+            guild_id,
+            role_type,
+        )
+
+        if (
+            not role_id
+            or
+            role_id == target_role_id
+        ):
+
+            continue
+
+        response = remove_discord_role(
+            guild_id,
+            discord_user_id,
+            role_id,
+        )
+
+        removal_results.append({
+            "role_type":
+                role_type,
+
+            "role_id":
+                role_id,
+
+            "status_code":
+                response.status_code,
+        })
+
+    add_response = add_discord_role(
+        guild_id,
+        discord_user_id,
+        target_role_id,
+    )
+
+    return {
+        "target_role_id":
+            target_role_id,
+
+        "add_status_code":
+            add_response.status_code,
+
+        "removals":
+            removal_results,
+    }
+
+
+def get_member_status_v3(
+    guild_id,
+    discord_user_id,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    status,
+                    changed_by_discord_user_id,
+                    changed_at,
+                    updated_at
+                FROM member_statuses
+                WHERE guild_id = %s
+                AND discord_user_id = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                ),
+            )
+
+            return cur.fetchone()
+
+
+def set_member_status_v3(
+    guild_id,
+    discord_user_id,
+    status,
+    changed_by_discord_user_id=None,
+):
+
+    if status not in VALID_MEMBER_STATUSES:
+
+        raise ValueError(
+            f"Invalid V3 member status: {status}"
+        )
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO member_statuses (
+                    guild_id,
+                    discord_user_id,
+                    status,
+                    changed_by_discord_user_id,
+                    changed_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (
+                    guild_id,
+                    discord_user_id
+                )
+                DO UPDATE SET
+                    status = EXCLUDED.status,
+                    changed_by_discord_user_id =
+                        EXCLUDED.changed_by_discord_user_id,
+                    changed_at = NOW(),
+                    updated_at = NOW();
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                    str(status),
+                    (
+                        str(changed_by_discord_user_id)
+                        if changed_by_discord_user_id
+                        else None
+                    ),
+                ),
+            )
+
+        conn.commit()
+
+
+def add_audit_event_v3(
+    guild_id,
+    event_type,
+    target_discord_user_id=None,
+    actor_discord_user_id=None,
+    metadata_json="{}",
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO audit_log (
+                    guild_id,
+                    event_type,
+                    target_discord_user_id,
+                    actor_discord_user_id,
+                    metadata
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb);
+                """,
+                (
+                    str(guild_id),
+                    str(event_type),
+                    (
+                        str(target_discord_user_id)
+                        if target_discord_user_id
+                        else None
+                    ),
+                    (
+                        str(actor_discord_user_id)
+                        if actor_discord_user_id
+                        else None
+                    ),
+                    str(metadata_json),
+                ),
+            )
+
+        conn.commit()
+
+
+def has_policy_acceptance_v3(
+    guild_id,
+    discord_user_id,
+    document_type,
+    document_version,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT accepted_at
+                FROM policy_acceptances
+                WHERE guild_id = %s
+                AND discord_user_id = %s
+                AND document_type = %s
+                AND document_version = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                    str(document_type),
+                    str(document_version),
+                ),
+            )
+
+            return cur.fetchone()
+
+
+def has_required_policy_acceptances_v3(
+    guild_id,
+    discord_user_id,
+):
+
+    corp_rules = has_policy_acceptance_v3(
+        guild_id,
+        discord_user_id,
+        "corp_rules",
+        CORP_RULES_VERSION,
+    )
+
+    charter = has_policy_acceptance_v3(
+        guild_id,
+        discord_user_id,
+        "freeborn_charter",
+        FREEBORN_CHARTER_VERSION,
+    )
+
+    return {
+        "corp_rules":
+            corp_rules,
+
+        "charter":
+            charter,
+
+        "complete":
+            bool(
+                corp_rules
+                and
+                charter
+            ),
+    }
+
+
+def get_guild_main_character_v3(
+    guild_id,
+    discord_user_id,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    character_id,
+                    character_name,
+                    corporation_id,
+                    in_corporation,
+                    verified_at,
+                    last_checked_at,
+                    left_corporation_at,
+                    total_skill_points,
+                    skills_updated_at
+                FROM guild_eve_characters
+                WHERE guild_id = %s
+                AND discord_user_id = %s
+                AND character_type = 'main'
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                ),
+            )
+
+            return cur.fetchone()
+
+
+def get_guild_main_by_character_id_v3(
+    guild_id,
+    character_id,
+):
+    """Return one verified guild Main from its EVE character ID."""
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    discord_user_id,
+                    character_id,
+                    character_name,
+                    corporation_id,
+                    in_corporation,
+                    total_skill_points,
+                    skills_updated_at,
+                    skills_snapshot
+                FROM guild_eve_characters
+                WHERE guild_id = %s
+                AND character_id = %s
+                AND character_type = 'main'
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    int(character_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "discord_user_id": str(row[0]),
+        "character_id": int(row[1]),
+        "character_name": row[2],
+        "corporation_id": int(row[3]),
+        "in_corporation": bool(row[4]),
+        "total_skill_points": (
+            int(row[5])
+            if row[5] is not None
+            else None
+        ),
+        "skills_updated_at": row[6],
+        "skills_snapshot": row[7],
+    }
+
+
+def update_guild_main_skills_snapshot_v3(
+    guild_id,
+    character_id,
+    skill_summary,
+):
+    """Refresh the stored skills snapshot after a voluntary pilot test."""
+
+    snapshot = skill_summary.get("skills", []) or []
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                UPDATE guild_eve_characters
+                SET
+                    total_skill_points = %s,
+                    skills_snapshot = %s::jsonb,
+                    skills_updated_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                AND character_id = %s
+                AND character_type = 'main';
+                """,
+                (
+                    int(skill_summary.get("total_sp", 0) or 0),
+                    json.dumps(
+                        snapshot,
+                        separators=(",", ":"),
+                    ),
+                    str(guild_id),
+                    int(character_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def save_main_character_v3(
+    guild_id,
+    discord_user_id,
+    character_id,
+    character_name,
+    corporation_id,
+    refresh_token=None,
+    granted_scopes=None,
+    total_skill_points=None,
+    skills_snapshot=None,
+):
+
+    guild_id = str(guild_id)
+    discord_user_id = str(discord_user_id)
+    character_id = int(character_id)
+    corporation_id = int(corporation_id)
+
+    encrypted_refresh_token = (
+        encrypt_eve_refresh_token(refresh_token)
+        if refresh_token
+        else None
+    )
+
+    scopes_text = (
+        " ".join(sorted(set(granted_scopes or [])))
+        if granted_scopes
+        else None
+    )
+
+    skills_snapshot_json = (
+        json.dumps(
+            skills_snapshot,
+            separators=(",", ":"),
+        )
+        if skills_snapshot is not None
+        else None
+    )
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        try:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT
+                        character_id,
+                        character_name
+                    FROM guild_eve_characters
+                    WHERE guild_id = %s
+                    AND discord_user_id = %s
+                    AND character_type = 'main'
+                    FOR UPDATE;
+                    """,
+                    (
+                        guild_id,
+                        discord_user_id,
+                    ),
+                )
+
+                existing_main = cur.fetchone()
+
+                if (
+                    existing_main
+                    and
+                    int(existing_main[0]) != character_id
+                ):
+
+                    raise ValueError(
+                        "Discord account already has main character"
+                    )
+
+                cur.execute(
+                    """
+                    SELECT discord_user_id
+                    FROM guild_eve_characters
+                    WHERE guild_id = %s
+                    AND character_id = %s
+                    FOR UPDATE;
+                    """,
+                    (
+                        guild_id,
+                        character_id,
+                    ),
+                )
+
+                linked = cur.fetchone()
+
+                if (
+                    linked
+                    and
+                    str(linked[0]) != discord_user_id
+                ):
+
+                    raise ValueError(
+                        "Character already linked to another Discord account"
+                    )
+
+                cur.execute(
+                    """
+                    INSERT INTO guild_eve_characters (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        character_name,
+                        character_type,
+                        corporation_id,
+                        in_corporation,
+                        verified_at,
+                        updated_at,
+                        last_checked_at,
+                        left_corporation_at,
+                        eve_refresh_token_encrypted,
+                        eve_scopes,
+                        total_skill_points,
+                        skills_updated_at,
+                        skills_snapshot,
+                        sso_authorized_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, 'main',
+                        %s, TRUE, NOW(), NOW(), NOW(), NULL,
+                        %s, %s, %s,
+                        CASE WHEN %s::BIGINT IS NULL THEN NULL ELSE NOW() END,
+                        %s::jsonb,
+                        CASE WHEN %s::TEXT IS NULL THEN NULL ELSE NOW() END
+                    )
+                    ON CONFLICT (guild_id, character_id)
+                    DO UPDATE SET
+                        discord_user_id =
+                            EXCLUDED.discord_user_id,
+                        character_name =
+                            EXCLUDED.character_name,
+                        character_type =
+                            'main',
+                        corporation_id =
+                            EXCLUDED.corporation_id,
+                        in_corporation =
+                            TRUE,
+                        updated_at =
+                            NOW(),
+                        last_checked_at =
+                            NOW(),
+                        left_corporation_at =
+                            NULL,
+                        eve_refresh_token_encrypted = COALESCE(
+                            EXCLUDED.eve_refresh_token_encrypted,
+                            guild_eve_characters.eve_refresh_token_encrypted
+                        ),
+                        eve_scopes = COALESCE(
+                            EXCLUDED.eve_scopes,
+                            guild_eve_characters.eve_scopes
+                        ),
+                        total_skill_points = COALESCE(
+                            EXCLUDED.total_skill_points,
+                            guild_eve_characters.total_skill_points
+                        ),
+                        skills_updated_at = COALESCE(
+                            EXCLUDED.skills_updated_at,
+                            guild_eve_characters.skills_updated_at
+                        ),
+                        skills_snapshot = COALESCE(
+                            EXCLUDED.skills_snapshot,
+                            guild_eve_characters.skills_snapshot
+                        ),
+                        sso_authorized_at = COALESCE(
+                            EXCLUDED.sso_authorized_at,
+                            guild_eve_characters.sso_authorized_at
+                        );
+                    """,
+                    (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        str(character_name),
+                        corporation_id,
+                        encrypted_refresh_token,
+                        scopes_text,
+                        (
+                            int(total_skill_points)
+                            if total_skill_points is not None
+                            else None
+                        ),
+                        (
+                            int(total_skill_points)
+                            if total_skill_points is not None
+                            else None
+                        ),
+                        skills_snapshot_json,
+                        encrypted_refresh_token,
+                    ),
+                )
+
+            conn.commit()
+
+        except Exception:
+
+            conn.rollback()
+            raise
+
+
+def save_alt_character_v3(
+    guild_id,
+    discord_user_id,
+    character_id,
+    character_name,
+    corporation_id,
+):
+
+    guild_id = str(guild_id)
+    discord_user_id = str(discord_user_id)
+    character_id = int(character_id)
+    corporation_id = int(corporation_id)
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        try:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT
+                        discord_user_id,
+                        character_type
+                    FROM guild_eve_characters
+                    WHERE guild_id = %s
+                    AND character_id = %s
+                    FOR UPDATE;
+                    """,
+                    (
+                        guild_id,
+                        character_id,
+                    ),
+                )
+
+                linked = cur.fetchone()
+
+                if linked:
+
+                    if str(linked[0]) != discord_user_id:
+
+                        raise ValueError(
+                            "Character already linked to another Discord account"
+                        )
+
+                    if linked[1] == "main":
+
+                        raise ValueError(
+                            "Main character cannot be registered as alt"
+                        )
+
+                cur.execute(
+                    """
+                    INSERT INTO guild_eve_characters (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        character_name,
+                        character_type,
+                        corporation_id,
+                        in_corporation,
+                        verified_at,
+                        updated_at,
+                        last_checked_at,
+                        left_corporation_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, 'alt',
+                        %s, TRUE, NOW(), NOW(), NOW(), NULL
+                    )
+                    ON CONFLICT (guild_id, character_id)
+                    DO UPDATE SET
+                        discord_user_id =
+                            EXCLUDED.discord_user_id,
+                        character_name =
+                            EXCLUDED.character_name,
+                        corporation_id =
+                            EXCLUDED.corporation_id,
+                        in_corporation =
+                            TRUE,
+                        updated_at =
+                            NOW(),
+                        last_checked_at =
+                            NOW(),
+                        left_corporation_at =
+                            NULL;
+                    """,
+                    (
+                        guild_id,
+                        character_id,
+                        discord_user_id,
+                        str(character_name),
+                        corporation_id,
+                    ),
+                )
+
+            conn.commit()
+
+        except Exception:
+
+            conn.rollback()
+            raise
+
+
+def has_verified_main_v3(
+    guild_id,
+    discord_user_id,
+):
+    """
+    Read the guild-scoped V3 table first.
+
+    During the Freeborn migration, fall back to the legacy
+    eve_characters table for the bootstrap guild because /verification
+    still writes there until its dedicated V3 conversion step.
+    """
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT 1
+                FROM guild_eve_characters
+                WHERE guild_id = %s
+                AND discord_user_id = %s
+                AND character_type = 'main'
+                AND in_corporation = TRUE
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                ),
+            )
+
+            if cur.fetchone():
+
+                return True
+
+    if str(guild_id) == str(DISCORD_GUILD_ID):
+
+        return has_main_character(
+            discord_user_id
+        )
+
+    return False
+
+
+def save_policy_acceptance_v3(
+    guild_id,
+    discord_user_id,
+    document_type,
+    document_version,
+    message_id=None,
+    channel_id=None,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO policy_documents (
+                    guild_id,
+                    document_type,
+                    document_version,
+                    message_id,
+                    channel_id,
+                    is_active,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, TRUE, NOW())
+                ON CONFLICT (
+                    guild_id,
+                    document_type,
+                    document_version
+                )
+                DO UPDATE SET
+                    message_id = COALESCE(
+                        EXCLUDED.message_id,
+                        policy_documents.message_id
+                    ),
+                    channel_id = COALESCE(
+                        EXCLUDED.channel_id,
+                        policy_documents.channel_id
+                    ),
+                    updated_at = NOW();
+                """,
+                (
+                    str(guild_id),
+                    str(document_type),
+                    str(document_version),
+                    (
+                        str(message_id)
+                        if message_id
+                        else None
+                    ),
+                    (
+                        str(channel_id)
+                        if channel_id
+                        else None
+                    ),
+                ),
+            )
+
+            cur.execute(
+                """
+                INSERT INTO policy_acceptances (
+                    guild_id,
+                    discord_user_id,
+                    document_type,
+                    document_version,
+                    accepted_at,
+                    message_id,
+                    channel_id
+                )
+                VALUES (%s, %s, %s, %s, NOW(), %s, %s)
+                ON CONFLICT (
+                    guild_id,
+                    discord_user_id,
+                    document_type,
+                    document_version
+                )
+                DO NOTHING;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                    str(document_type),
+                    str(document_version),
+                    (
+                        str(message_id)
+                        if message_id
+                        else None
+                    ),
+                    (
+                        str(channel_id)
+                        if channel_id
+                        else None
+                    ),
+                ),
+            )
+
+        conn.commit()
+
+
+# ============================================================
+# AUTHENTICATED ESI STORAGE
+# ============================================================
+
+def _eve_token_box():
+    """Build the symmetric box used to encrypt EVE refresh tokens at rest."""
+
+    key = hashlib.sha256(
+        FLASK_SECRET_KEY.encode("utf-8")
+    ).digest()
+
+    return SecretBox(key)
+
+
+def encrypt_eve_refresh_token(refresh_token):
+    """Encrypt an EVE refresh token before saving it to Neon."""
+
+    encrypted = _eve_token_box().encrypt(
+        str(refresh_token).encode("utf-8")
+    )
+
+    return base64.urlsafe_b64encode(
+        bytes(encrypted)
+    ).decode("ascii")
+
+
+def decrypt_eve_refresh_token(encrypted_refresh_token):
+    """Decrypt a stored EVE refresh token for a future token refresh."""
+
+    raw = base64.urlsafe_b64decode(
+        str(encrypted_refresh_token).encode("ascii")
+    )
+
+    return _eve_token_box().decrypt(
+        raw
+    ).decode("utf-8")
+
+
+# ============================================================
 # DATABASE WRITE FUNCTIONS
 # ============================================================
 
@@ -832,8 +3209,8 @@ def remove_alt_character(
                 ):
 
                     raise ValueError(
-                        "Main Character cannot "
-                        "be removed with /alt-remove"
+                        "Le personnage principal ne peut pas "
+                        "être supprimé avec /alt-supprimer"
                     )
 
                 character_name = (
@@ -1229,7 +3606,7 @@ def build_member_info(
     if not characters:
 
         return (
-            "👤 **Freeborn Member Info**\n\n"
+            "👤 **Profil membre Freeborn**\n\n"
 
             f"Discord : "
             f"**{discord_display_name}**\n"
@@ -1254,7 +3631,7 @@ def build_member_info(
     ]
 
     lines = [
-        "👤 **Freeborn Member Info**",
+        "👤 **Profil membre Freeborn**",
         "",
         f"Discord : **{discord_display_name}**",
         f"Discord ID : `{discord_user_id}`",
@@ -1286,7 +3663,7 @@ def build_member_info(
         )
 
         lines.extend([
-            "### 🔗 Main Character",
+            "### 🔗 Personnage principal",
             f"**{main_name}**",
             f"Character ID : `{main_id}`",
             f"Statut : {main_status}",
@@ -1300,20 +3677,20 @@ def build_member_info(
     else:
 
         lines.extend([
-            "### 🔗 Main Character",
+            "### 🔗 Personnage principal",
             "❌ Aucun Main enregistré",
             "",
         ])
 
     lines.append(
-        f"### 🔹 Alt Characters "
+        f"### 🔹 Personnages secondaires "
         f"({len(alt_rows)})"
     )
 
     if not alt_rows:
 
         lines.append(
-            "Aucun Alt Character enregistré."
+            "Aucun personnage secondaire enregistré."
         )
 
     else:
@@ -1379,9 +3756,9 @@ def build_member_list_message():
     if not characters:
 
         return (
-            "👥 **Freeborn Member List**\n\n"
+            "👥 **Liste des membres Freeborn**\n\n"
             "ℹ️ Aucun compte EVE n'est actuellement "
-            "enregistré dans Freeborn Verify.\n\n"
+            "enregistré dans Freeborn.\n\n"
             "🛡️ **Mode lecture seule**\n"
             "Aucune donnée Neon n'a été modifiée.\n"
             "Aucun rôle Discord n'a été modifié."
@@ -1444,7 +3821,7 @@ def build_member_list_message():
     )
 
     header = [
-        "👥 **Freeborn Member List**",
+        "👥 **Liste des membres Freeborn**",
         "",
         (
             "Comptes enregistrés : "
@@ -1458,8 +3835,8 @@ def build_member_list_message():
         "### 📊 Résumé",
         f"👥 Comptes Discord : **{stats['members']}**",
         f"🎮 Personnages : **{stats['characters']}**",
-        f"🔗 Main Characters : **{stats['mains']}**",
-        f"🔹 Alt Characters : **{stats['alts']}**",
+        f"🔗 Personnages principaux : **{stats['mains']}**",
+        f"🔹 Personnages secondaires : **{stats['alts']}**",
         (
             "🚪 Hors corporation : "
             f"**{stats['outside_corporation']}**"
@@ -1572,6 +3949,6428 @@ def build_member_list_message():
 
 
 # ============================================================
+# FREEBORN FITTINGS
+# ============================================================
+
+def parse_eft_header(eft_text):
+    """Extract ship and optional fit name from the first EFT header line."""
+
+    normalized = str(eft_text or "").strip()
+
+    if not normalized:
+        raise ValueError("Le champ EFT est vide.")
+
+    first_line = normalized.splitlines()[0].strip()
+
+    if not (first_line.startswith("[") and first_line.endswith("]")):
+        raise ValueError(
+            "Le format EFT doit commencer par une ligne du type "
+            "[Vaisseau, Nom du fit]."
+        )
+
+    header = first_line[1:-1].strip()
+
+    if not header:
+        raise ValueError("Le nom du vaisseau est introuvable dans l'EFT.")
+
+    parts = [part.strip() for part in header.split(",", 1)]
+    ship_name = parts[0]
+    eft_fit_name = parts[1] if len(parts) > 1 else ""
+
+    if not ship_name:
+        raise ValueError("Le nom du vaisseau est introuvable dans l'EFT.")
+
+    return {
+        "ship_name": ship_name,
+        "eft_fit_name": eft_fit_name,
+        "normalized_eft": normalized,
+    }
+
+
+_eve_inventory_single_id_cache = {}
+
+
+def resolve_eve_inventory_type_id(type_name):
+    """Resolve an exact EVE inventory type name with process caching."""
+
+    clean_name = str(type_name or "").strip()
+
+    if not clean_name:
+        return None
+
+    key = clean_name.casefold()
+
+    if key in _eve_inventory_single_id_cache:
+        return _eve_inventory_single_id_cache[key]
+
+    try:
+        response = requests.post(
+            f"{ESI_BASE_URL}/universe/ids/",
+            json=[clean_name],
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        for item in payload.get("inventory_types", []):
+            if str(item.get("name", "")).casefold() == key:
+                type_id = int(item["id"])
+                _eve_inventory_single_id_cache[key] = type_id
+                return type_id
+
+    except Exception as error:
+        print("Freeborn Fittings ESI type resolution failed:", repr(error))
+
+    _eve_inventory_single_id_cache[key] = None
+    return None
+
+
+def eve_type_render_url(type_id, size=512):
+    if not type_id:
+        return None
+
+    return (
+        f"https://images.evetech.net/types/{int(type_id)}/render"
+        f"?size={int(size)}&tenant=tranquility"
+    )
+
+
+def save_fit_phase1(
+    guild_id,
+    discord_user_id,
+    fit_name,
+    usage,
+    eft_text,
+    notes=None,
+):
+    parsed = parse_eft_header(eft_text)
+
+    clean_name = str(fit_name or "").strip() or parsed["eft_fit_name"]
+    clean_usage = str(usage or "").strip()
+    clean_notes = str(notes or "").strip() or None
+
+    if not clean_name:
+        raise ValueError("Le nom du fit est obligatoire.")
+
+    if not clean_usage:
+        raise ValueError("L'usage du fit est obligatoire.")
+
+    ship_type_id = resolve_eve_inventory_type_id(parsed["ship_name"])
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fits (
+                    guild_id,
+                    name,
+                    ship_name,
+                    ship_type_id,
+                    usage,
+                    eft_text,
+                    notes,
+                    status,
+                    created_by_discord_user_id,
+                    created_at,
+                    updated_at,
+                    technical_snapshot,
+                    technical_snapshot_version,
+                    technical_snapshot_updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s,
+                    'proposed', %s, NOW(), NOW(),
+                    NULL, NULL, NULL
+                )
+                RETURNING fit_id;
+                """,
+                (
+                    str(guild_id),
+                    clean_name,
+                    parsed["ship_name"],
+                    ship_type_id,
+                    clean_usage,
+                    parsed["normalized_eft"],
+                    clean_notes,
+                    str(discord_user_id),
+                ),
+            )
+
+            fit_id = cur.fetchone()[0]
+
+        conn.commit()
+
+    return {
+        "fit_id": int(fit_id),
+        "name": clean_name,
+        "ship_name": parsed["ship_name"],
+        "ship_type_id": ship_type_id,
+        "usage": clean_usage,
+        "notes": clean_notes,
+        "status": "proposed",
+    }
+
+
+def parse_fit_reference(value):
+    """Accept 1, "1", "FREE-0001", "free0001" or "FREE 0001"."""
+
+    text = str(value or "").strip().upper()
+
+    if not text:
+        raise ValueError("Identifiant de fit manquant.")
+
+    compact = text.replace("-", "").replace(" ", "")
+
+    if compact.startswith("FREE"):
+        compact = compact[4:]
+
+    if not compact.isdigit():
+        raise ValueError("Identifiant de fit invalide. Utilise par exemple FREE-0001.")
+
+    fit_id = int(compact)
+
+    if fit_id < 1:
+        raise ValueError("Identifiant de fit invalide.")
+
+    return fit_id
+
+
+def format_fit_reference(fit_id):
+    return f"FREE-{int(fit_id):04d}"
+
+
+def get_fit(guild_id, fit_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    fit_id,
+                    guild_id,
+                    name,
+                    ship_name,
+                    ship_type_id,
+                    usage,
+                    eft_text,
+                    notes,
+                    status,
+                    created_by_discord_user_id,
+                    created_at,
+                    updated_at,
+                    technical_snapshot,
+                    technical_snapshot_version,
+                    technical_snapshot_updated_at,
+                    discord_post_channel_id,
+                    discord_post_message_id,
+                    discord_thread_id,
+                    discord_post_created_at,
+                    discord_post_updated_at
+                FROM fits
+                WHERE guild_id = %s
+                AND fit_id = %s
+                LIMIT 1;
+                """,
+                (str(guild_id), int(fit_id)),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    keys = (
+        "fit_id", "guild_id", "name", "ship_name", "ship_type_id",
+        "usage", "eft_text", "notes", "status",
+        "created_by_discord_user_id", "created_at", "updated_at",
+        "technical_snapshot", "technical_snapshot_version",
+        "technical_snapshot_updated_at",
+        "discord_post_channel_id", "discord_post_message_id",
+        "discord_thread_id", "discord_post_created_at",
+        "discord_post_updated_at",
+    )
+    return dict(zip(keys, row))
+
+
+def list_fits(guild_id, limit=50):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    fit_id,
+                    name,
+                    ship_name,
+                    usage,
+                    status,
+                    created_by_discord_user_id,
+                    created_at
+                FROM fits
+                WHERE guild_id = %s
+                ORDER BY fit_id DESC
+                LIMIT %s;
+                """,
+                (str(guild_id), int(limit)),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "fit_id": row[0],
+            "name": row[1],
+            "ship_name": row[2],
+            "usage": row[3],
+            "status": row[4],
+            "created_by_discord_user_id": row[5],
+            "created_at": row[6],
+        }
+        for row in rows
+    ]
+
+
+def ensure_fit_ship_type_id(fit):
+    if not fit or fit.get("ship_type_id"):
+        return fit
+
+    type_id = resolve_eve_inventory_type_id(fit.get("ship_name"))
+
+    if not type_id:
+        return fit
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET ship_type_id = %s,
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                AND fit_id = %s;
+                """,
+                (int(type_id), str(fit["guild_id"]), int(fit["fit_id"])),
+            )
+        conn.commit()
+
+    fit["ship_type_id"] = int(type_id)
+    return fit
+
+
+def fit_status_label(status):
+    labels = {
+        "proposed": "⚪ PROPOSÉ",
+        "approved": "🟢 FREEBORN APPROVED",
+        "rejected": "🔴 REFUSÉ",
+        "archived": "⚫ ARCHIVÉ",
+    }
+    return labels.get(str(status or "").lower(), str(status or "INCONNU").upper())
+
+
+def fit_embed_color(status):
+    colors = {
+        "proposed": 0xD6A84B,
+        "approved": 0x78C94A,
+        "rejected": 0xC94A4A,
+        "archived": 0x666666,
+    }
+    return colors.get(str(status or "").lower(), 0x149CFF)
+
+
+def build_fit_embed(fit):
+    fit = ensure_fit_ship_type_id(fit)
+    notes = str(fit.get("notes") or "Aucune note particulière.")[:1024]
+
+    embed = {
+        "title": f"🛡️ FREEBORN FITTINGS — {format_fit_reference(fit['fit_id'])}",
+        "description": (
+            f"## {fit['ship_name']}\n"
+            f"**{fit['name']}**\n\n"
+            f"Usage : **{fit['usage']}**"
+        ),
+        "color": fit_embed_color(fit.get("status")),
+        "fields": [
+            {
+                "name": "Statut",
+                "value": fit_status_label(fit.get("status")),
+                "inline": True,
+            },
+            {
+                "name": "Créateur",
+                "value": f"<@{fit['created_by_discord_user_id']}>",
+                "inline": True,
+            },
+            {
+                "name": "Notes du créateur",
+                "value": notes,
+                "inline": False,
+            },
+        ],
+        "footer": {
+            "text": "Freeborn Legacy • Fittings • EFT conservé dans Freeborn",
+        },
+    }
+
+    render_url = eve_type_render_url(fit.get("ship_type_id"), 512)
+    if render_url:
+        embed["thumbnail"] = {"url": render_url}
+
+    return embed
+
+
+# ============================================================
+# FREEBORN MARKET — EVE DATA & JITA ENGINE
+# SEARCH EVE + JITA PRICING + FINAL VISUAL FOUNDATION
+# ============================================================
+
+FREEBORN_JITA_REGION_ID = 10000002
+FREEBORN_JITA_44_LOCATION_ID = 60003760
+FREEBORN_MARKET_SEARCH_LIMIT = 8
+FREEBORN_MARKET_PRICE_CACHE_SECONDS = 300
+FREEBORN_MARKET_SEARCH_CACHE_SECONDS = 300
+
+_freeborn_market_price_cache = {}
+_freeborn_market_search_cache = {}
+
+
+def format_market_reference(market_id):
+    return f"FREE-MKT-{int(market_id):04d}"
+
+
+def create_market_web_token(
+    guild_id,
+    discord_user_id,
+    order_type,
+    owner_scope,
+):
+    return market_web_serializer.dumps({
+        "guild_id": str(guild_id),
+        "discord_user_id": str(discord_user_id),
+        "order_type": str(order_type),
+        "owner_scope": str(owner_scope),
+    })
+
+
+def read_market_web_token(token):
+    payload = market_web_serializer.loads(
+        str(token or ""),
+        max_age=1800,
+    )
+
+    order_type = str(
+        payload["order_type"]
+    )
+
+    owner_scope = str(
+        payload["owner_scope"]
+    )
+
+    if order_type not in {
+        "buy",
+        "sell",
+    }:
+        raise ValueError(
+            "Invalid market order type"
+        )
+
+    if owner_scope not in {
+        "member",
+        "corporation",
+    }:
+        raise ValueError(
+            "Invalid market owner scope"
+        )
+
+    return {
+        "guild_id":
+            str(payload["guild_id"]),
+        "discord_user_id":
+            str(payload["discord_user_id"]),
+        "order_type":
+            order_type,
+        "owner_scope":
+            owner_scope,
+    }
+
+
+def build_market_web_url(
+    guild_id,
+    discord_user_id,
+    order_type,
+    owner_scope,
+):
+    token = create_market_web_token(
+        guild_id,
+        discord_user_id,
+        order_type,
+        owner_scope,
+    )
+
+    return (
+        f"{PUBLIC_BASE_URL}/market/nouveau?"
+        + urlencode({
+            "token": token,
+        })
+    )
+
+
+def freeborn_market_validate_token(token):
+    context = read_market_web_token(
+        token
+    )
+
+    if (
+        context["guild_id"]
+        != str(DISCORD_GUILD_ID)
+    ):
+        raise ValueError(
+            "Wrong guild"
+        )
+
+    return context
+
+
+FREEBORN_SDE_LATEST_JSONL_URL = (
+    "https://developers.eveonline.com/static-data/"
+    "eve-online-static-data-latest-jsonl.zip"
+)
+
+_freeborn_market_sde_sync_lock = False
+
+
+def freeborn_market_type_index_count():
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM market_type_index;
+                """
+            )
+            row = cur.fetchone()
+
+    return int(
+        row[0]
+        if row
+        else 0
+    )
+
+
+def freeborn_market_extract_localized_name(value):
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, dict):
+        for key in (
+            "en",
+            "en-us",
+            "en_US",
+            "enUS",
+        ):
+            candidate = value.get(
+                key
+            )
+
+            if candidate:
+                return str(
+                    candidate
+                ).strip()
+
+        # Last-resort deterministic first non-empty localization.
+        for candidate in value.values():
+            if candidate:
+                return str(
+                    candidate
+                ).strip()
+
+    return ""
+
+
+def freeborn_market_sde_record_value(
+    record,
+    *names,
+):
+    for name in names:
+        if name in record:
+            return record.get(
+                name
+            )
+
+    return None
+
+
+def freeborn_market_sync_type_index():
+    """
+    Populate market_type_index from CCP's official JSONL SDE.
+
+    This is intentionally a persistent Neon index:
+      - the large SDE download happens only when the index is absent;
+      - subsequent Render restarts keep using the same tiny searchable table;
+      - no second database/service is created.
+
+    Only published types with a Market Group are imported.
+    """
+    global _freeborn_market_sde_sync_lock
+
+    if _freeborn_market_sde_sync_lock:
+        return
+
+    _freeborn_market_sde_sync_lock = True
+    temp_path = None
+
+    try:
+        print(
+            "Freeborn Market SDE type index: download start"
+        )
+
+        response = requests.get(
+            FREEBORN_SDE_LATEST_JSONL_URL,
+            headers={
+                "User-Agent":
+                    "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            stream=True,
+            timeout=90,
+        )
+        response.raise_for_status()
+
+        build_hint = (
+            response.url
+            or FREEBORN_SDE_LATEST_JSONL_URL
+        )
+
+        with tempfile.NamedTemporaryFile(
+            prefix="freeborn-sde-",
+            suffix=".zip",
+            delete=False,
+        ) as temp_file:
+            temp_path = temp_file.name
+
+            for chunk in response.iter_content(
+                chunk_size=1024 * 1024
+            ):
+                if chunk:
+                    temp_file.write(
+                        chunk
+                    )
+
+        with zipfile.ZipFile(
+            temp_path,
+            "r",
+        ) as archive:
+            candidates = [
+                name
+                for name in archive.namelist()
+                if name.casefold().endswith(
+                    "types.jsonl"
+                )
+            ]
+
+            if not candidates:
+                raise RuntimeError(
+                    "types.jsonl absent du SDE CCP"
+                )
+
+            # Prefer the shortest path if the archive contains aliases/copies.
+            types_member = sorted(
+                candidates,
+                key=lambda value: (
+                    value.count("/"),
+                    len(value),
+                ),
+            )[0]
+
+            rows = []
+
+            with archive.open(
+                types_member,
+                "r",
+            ) as raw_types:
+                for raw_line in raw_types:
+                    if not raw_line.strip():
+                        continue
+
+                    try:
+                        record = json.loads(
+                            raw_line.decode(
+                                "utf-8"
+                            )
+                        )
+                    except Exception:
+                        continue
+
+                    raw_type_id = (
+                        record.get("_key")
+                        if isinstance(record, dict)
+                        else None
+                    )
+
+                    if raw_type_id is None:
+                        raw_type_id = (
+                            freeborn_market_sde_record_value(
+                                record,
+                                "typeID",
+                                "typeId",
+                                "id",
+                            )
+                            if isinstance(record, dict)
+                            else None
+                        )
+
+                    try:
+                        type_id = int(
+                            raw_type_id
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        continue
+
+                    published = (
+                        freeborn_market_sde_record_value(
+                            record,
+                            "published",
+                            "isPublished",
+                        )
+                    )
+
+                    if published is False:
+                        continue
+
+                    market_group_id = (
+                        freeborn_market_sde_record_value(
+                            record,
+                            "marketGroupID",
+                            "marketGroupId",
+                            "market_group_id",
+                        )
+                    )
+
+                    try:
+                        market_group_id = int(
+                            market_group_id
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        continue
+
+                    group_id = (
+                        freeborn_market_sde_record_value(
+                            record,
+                            "groupID",
+                            "groupId",
+                            "group_id",
+                        )
+                    )
+
+                    try:
+                        group_id = (
+                            int(group_id)
+                            if group_id is not None
+                            else None
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        group_id = None
+
+                    type_name = (
+                        freeborn_market_extract_localized_name(
+                            freeborn_market_sde_record_value(
+                                record,
+                                "name",
+                                "typeName",
+                            )
+                        )
+                    )
+
+                    if not type_name:
+                        continue
+
+                    raw_volume = (
+                        freeborn_market_sde_record_value(
+                            record,
+                            "volume",
+                            "volumeM3",
+                            "volume_m3",
+                        )
+                    )
+
+                    try:
+                        volume_m3 = (
+                            float(raw_volume)
+                            if raw_volume is not None
+                            else None
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        volume_m3 = None
+
+                    rows.append((
+                        type_id,
+                        type_name,
+                        type_name.casefold(),
+                        group_id,
+                        market_group_id,
+                        volume_m3,
+                        build_hint,
+                    ))
+
+        if not rows:
+            raise RuntimeError(
+                "Aucun type commercialisable trouvé dans le SDE CCP"
+            )
+
+        with psycopg.connect(
+            DATABASE_URL
+        ) as conn:
+            with conn.cursor() as cur:
+                # Atomic refresh: do not leave a partial index.
+                cur.execute(
+                    """
+                    CREATE TEMP TABLE
+                    market_type_index_stage (
+                        type_id BIGINT PRIMARY KEY,
+                        type_name TEXT NOT NULL,
+                        type_name_lower TEXT NOT NULL,
+                        group_id BIGINT,
+                        market_group_id BIGINT NOT NULL,
+                        volume_m3 DOUBLE PRECISION,
+                        sde_build TEXT
+                    ) ON COMMIT DROP;
+                    """
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO market_type_index_stage (
+                        type_id,
+                        type_name,
+                        type_name_lower,
+                        group_id,
+                        market_group_id,
+                        volume_m3,
+                        sde_build
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (type_id) DO UPDATE
+                    SET
+                        type_name =
+                            EXCLUDED.type_name,
+                        type_name_lower =
+                            EXCLUDED.type_name_lower,
+                        group_id =
+                            EXCLUDED.group_id,
+                        market_group_id =
+                            EXCLUDED.market_group_id,
+                        volume_m3 =
+                            EXCLUDED.volume_m3,
+                        sde_build =
+                            EXCLUDED.sde_build;
+                    """,
+                    rows,
+                )
+
+                cur.execute(
+                    """
+                    DELETE FROM market_type_index;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO market_type_index (
+                        type_id,
+                        type_name,
+                        type_name_lower,
+                        group_id,
+                        market_group_id,
+                        volume_m3,
+                        sde_build,
+                        updated_at
+                    )
+                    SELECT
+                        type_id,
+                        type_name,
+                        type_name_lower,
+                        group_id,
+                        market_group_id,
+                        volume_m3,
+                        sde_build,
+                        NOW()
+                    FROM market_type_index_stage;
+                    """
+                )
+
+            conn.commit()
+
+        print(
+            "Freeborn Market SDE type index ready:",
+            len(rows),
+            "market types",
+        )
+
+    finally:
+        _freeborn_market_sde_sync_lock = False
+
+        if temp_path:
+            try:
+                os.remove(
+                    temp_path
+                )
+            except OSError:
+                pass
+
+
+def freeborn_market_ensure_type_index():
+    count = freeborn_market_type_index_count()
+
+    if count >= 1000:
+        return count
+
+    freeborn_market_sync_type_index()
+
+    count = freeborn_market_type_index_count()
+
+    if count < 1000:
+        raise RuntimeError(
+            "Index SDE Freeborn Market incomplet"
+        )
+
+    return count
+
+
+def freeborn_jita_check_ensure_volumes():
+    """Refresh the existing SDE type index once if volume_m3 is still absent."""
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM market_type_index
+                WHERE volume_m3 IS NOT NULL;
+                """
+            )
+            row = cur.fetchone()
+
+    volume_count = int(
+        row[0]
+        if row
+        else 0
+    )
+
+    if volume_count >= 1000:
+        return volume_count
+
+    freeborn_market_sync_type_index()
+    return freeborn_market_type_index_count()
+
+
+def freeborn_market_search_types(query):
+    """
+    Fast local autocomplete from CCP's official SDE, persisted in Neon.
+
+    No ESI /search route is used.
+    """
+    normalized = " ".join(
+        str(query or "").strip().split()
+    )
+
+    if len(normalized) < 2:
+        return []
+
+    cache_key = normalized.casefold()
+    now = time.time()
+
+    cached = _freeborn_market_search_cache.get(
+        cache_key
+    )
+
+    if (
+        cached
+        and
+        now - cached["at"]
+        < FREEBORN_MARKET_SEARCH_CACHE_SECONDS
+    ):
+        return cached["items"]
+
+    freeborn_market_ensure_type_index()
+
+    contains_pattern = (
+        "%"
+        + cache_key
+        + "%"
+    )
+    prefix_pattern = (
+        cache_key
+        + "%"
+    )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    type_id,
+                    type_name,
+                    group_id,
+                    market_group_id,
+                    volume_m3
+                FROM market_type_index
+                WHERE type_name_lower LIKE %s
+                ORDER BY
+                    CASE
+                        WHEN type_name_lower LIKE %s
+                        THEN 0
+                        ELSE 1
+                    END,
+                    LENGTH(type_name),
+                    type_name
+                LIMIT %s;
+                """,
+                (
+                    contains_pattern,
+                    prefix_pattern,
+                    int(
+                        FREEBORN_MARKET_SEARCH_LIMIT
+                    ),
+                ),
+            )
+
+            rows = cur.fetchall()
+
+    items = [
+        {
+            "type_id":
+                int(row[0]),
+            "name":
+                str(row[1]),
+            "group_id":
+                row[2],
+            "market_group_id":
+                row[3],
+            "volume_m3":
+                (
+                    float(row[4])
+                    if row[4] is not None
+                    else None
+                ),
+            "icon_url":
+                eve_type_icon_url(
+                    int(row[0]),
+                    64,
+                ),
+        }
+        for row in rows
+    ]
+
+    _freeborn_market_search_cache[
+        cache_key
+    ] = {
+        "at": now,
+        "items": items,
+    }
+
+    return items
+
+
+def freeborn_market_jita_price(type_id):
+    """
+    Return Jita 4-4 station-local reference prices for one type.
+
+    Current ESI uses compatibility-date versioning. Do NOT use Freeborn's
+    legacy global ESI_BASE_URL (/latest) for this market-order route.
+
+    SELL = lowest sell order physically located at Jita 4-4.
+    BUY  = highest buy order physically located at Jita 4-4.
+
+    The market-order endpoint is rate-limited and cached by ESI. Freeborn keeps
+    its own aligned five-minute cache and fetches additional pages only when
+    ESI explicitly reports them.
+    """
+    type_id = int(type_id)
+    now = time.time()
+
+    cached = _freeborn_market_price_cache.get(
+        type_id
+    )
+
+    if (
+        cached
+        and
+        now - cached["at"]
+        < FREEBORN_MARKET_PRICE_CACHE_SECONDS
+    ):
+        return cached["data"]
+
+    market_url = (
+        "https://esi.evetech.net/markets/"
+        f"{FREEBORN_JITA_REGION_ID}/orders"
+    )
+
+    headers = {
+        "User-Agent":
+            "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+        "X-Compatibility-Date":
+            "2026-08-14",
+    }
+
+    base_params = {
+        "datasource":
+            "tranquility",
+        "order_type":
+            "all",
+        "type_id":
+            type_id,
+    }
+
+    orders = []
+    page = 1
+    total_pages = 1
+
+    while page <= total_pages:
+        params = dict(
+            base_params
+        )
+        params["page"] = page
+
+        response = requests.get(
+            market_url,
+            params=params,
+            headers=headers,
+            timeout=15,
+        )
+
+        if response.status_code != 200:
+            print(
+                "Freeborn Market Jita ESI HTTP error [P2E]:",
+                response.status_code,
+                response.text[:800],
+                "type_id=",
+                type_id,
+                "page=",
+                page,
+                "url=",
+                response.url,
+                "compat=",
+                response.headers.get(
+                    "X-Compatibility-Date"
+                ),
+            )
+
+        response.raise_for_status()
+
+        page_orders = (
+            response.json()
+            or []
+        )
+
+        if isinstance(
+            page_orders,
+            list,
+        ):
+            orders.extend(
+                page_orders
+            )
+
+        try:
+            total_pages = max(
+                1,
+                int(
+                    response.headers.get(
+                        "X-Pages",
+                        "1",
+                    )
+                ),
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            total_pages = 1
+
+        # Safety bound. One market type should never require anything close to
+        # this, but this protects Freeborn from a malformed X-Pages response.
+        total_pages = min(
+            total_pages,
+            25,
+        )
+
+        page += 1
+
+    station_orders = []
+
+    for order in orders:
+        try:
+            location_id = int(
+                order.get(
+                    "location_id"
+                )
+                or 0
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+        if (
+            location_id
+            == FREEBORN_JITA_44_LOCATION_ID
+        ):
+            station_orders.append(
+                order
+            )
+
+    sell_prices = []
+
+    for order in station_orders:
+        if order.get(
+            "is_buy_order"
+        ):
+            continue
+
+        try:
+            sell_prices.append(
+                float(
+                    order["price"]
+                )
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+    buy_prices = []
+
+    for order in station_orders:
+        if not order.get(
+            "is_buy_order"
+        ):
+            continue
+
+        try:
+            buy_prices.append(
+                float(
+                    order["price"]
+                )
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+    best_sell = (
+        min(
+            sell_prices
+        )
+        if sell_prices
+        else None
+    )
+
+    best_buy = (
+        max(
+            buy_prices
+        )
+        if buy_prices
+        else None
+    )
+
+    # Search index already contains the authoritative type name, so avoid
+    # depending on a legacy /latest type route just to label the response.
+    type_name = None
+
+    try:
+        with psycopg.connect(
+            DATABASE_URL
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT type_name
+                    FROM market_type_index
+                    WHERE type_id = %s
+                    LIMIT 1;
+                    """,
+                    (
+                        type_id,
+                    ),
+                )
+                row = cur.fetchone()
+
+        if row:
+            type_name = str(
+                row[0]
+            )
+
+    except Exception as error:
+        print(
+            "Freeborn Market type-name lookup warning:",
+            type_id,
+            repr(error),
+        )
+
+    if not type_name:
+        type_name = (
+            f"Type {type_id}"
+        )
+
+    fetched_at = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    data = {
+        "type_id":
+            type_id,
+        "type_name":
+            type_name,
+        "jita_sell":
+            best_sell,
+        "jita_buy":
+            best_buy,
+        "location_id":
+            FREEBORN_JITA_44_LOCATION_ID,
+        "region_id":
+            FREEBORN_JITA_REGION_ID,
+        "fetched_at":
+            fetched_at,
+        "orders_checked":
+            len(orders),
+        "jita_44_orders":
+            len(station_orders),
+    }
+
+    print(
+        "Freeborn Market Jita price [P2E]:",
+        type_id,
+        type_name,
+        "sell=",
+        best_sell,
+        "buy=",
+        best_buy,
+        "orders=",
+        len(orders),
+        "jita44=",
+        len(station_orders),
+    )
+
+    _freeborn_market_price_cache[
+        type_id
+    ] = {
+        "at":
+            now,
+        "data":
+            data,
+    }
+
+    return data
+
+
+def freeborn_market_decimal(
+    value,
+    default="0",
+):
+    try:
+        return Decimal(
+            str(value)
+            .strip()
+            .replace(" ", "")
+            .replace(",", ".")
+        )
+    except (
+        InvalidOperation,
+        AttributeError,
+        TypeError,
+        ValueError,
+    ):
+        return Decimal(
+            default
+        )
+
+
+def freeborn_market_money_decimal(value):
+    return freeborn_market_decimal(
+        value
+    ).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+
+
+def freeborn_market_format_isk(value):
+    amount = freeborn_market_money_decimal(
+        value
+    )
+
+    rendered = f"{amount:,.2f}"
+    rendered = (
+        rendered
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+    return (
+        rendered
+        + " ISK"
+    )
+
+
+def freeborn_market_format_quantity(value):
+    try:
+        quantity = int(
+            value
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        quantity = 0
+
+    return f"{quantity:,}".replace(
+        ",",
+        " ",
+    )
+
+
+def freeborn_market_reference_side(
+    order_type,
+):
+    return (
+        "buy"
+        if order_type == "buy"
+        else "sell"
+    )
+
+
+def freeborn_market_validate_submission(
+    market_context,
+    payload,
+):
+    """
+    Validate browser payload, refresh ALL Jita references at one common
+    validation time, and compute authoritative server-side totals.
+
+    Manual unit prices are preserved only when the member explicitly changed
+    the default field. Otherwise the freshly refreshed Jita price becomes the
+    chosen unit price.
+    """
+    raw_items = (
+        payload.get("items")
+        if isinstance(
+            payload,
+            dict,
+        )
+        else None
+    )
+
+    if not isinstance(
+        raw_items,
+        list,
+    ):
+        raise ValueError(
+            "items_missing"
+        )
+
+    if not (
+        1
+        <= len(raw_items)
+        <= FREEBORN_MARKET_MAX_LINES
+    ):
+        raise ValueError(
+            "invalid_line_count"
+        )
+
+    adjustment = (
+        freeborn_market_decimal(
+            payload.get(
+                "adjustment_percent",
+                0,
+            )
+        )
+        .quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+
+    if (
+        adjustment
+        < Decimal("-100.00")
+        or adjustment
+        > Decimal("100.00")
+    ):
+        raise ValueError(
+            "invalid_adjustment"
+        )
+
+    notes = str(
+        payload.get(
+            "notes"
+        )
+        or ""
+    ).strip()
+
+    if len(notes) > 500:
+        raise ValueError(
+            "notes_too_long"
+        )
+
+    reference_side = (
+        freeborn_market_reference_side(
+            market_context[
+                "order_type"
+            ]
+        )
+    )
+
+    snapshot_at = datetime.now(
+        timezone.utc
+    )
+
+    validated_items = []
+    total_isk = Decimal(
+        "0.00"
+    )
+
+    for line_number, raw_item in enumerate(
+        raw_items,
+        start=1,
+    ):
+        if not isinstance(
+            raw_item,
+            dict,
+        ):
+            raise ValueError(
+                "invalid_item"
+            )
+
+        try:
+            type_id = int(
+                raw_item.get(
+                    "type_id"
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            raise ValueError(
+                "invalid_type_id"
+            )
+
+        try:
+            quantity = int(
+                str(
+                    raw_item.get(
+                        "quantity",
+                        "0",
+                    )
+                ).replace(
+                    " ",
+                    "",
+                )
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            raise ValueError(
+                "invalid_quantity"
+            )
+
+        if quantity <= 0:
+            raise ValueError(
+                "invalid_quantity"
+            )
+
+        # The type MUST exist in Freeborn's official SDE market index.
+        with psycopg.connect(
+            DATABASE_URL
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        type_name,
+                        market_group_id
+                    FROM market_type_index
+                    WHERE type_id = %s
+                    LIMIT 1;
+                    """,
+                    (
+                        type_id,
+                    ),
+                )
+                type_row = cur.fetchone()
+
+        if not type_row:
+            raise ValueError(
+                "unknown_market_type"
+            )
+
+        type_name = str(
+            type_row[0]
+        )
+
+        price_data = (
+            freeborn_market_jita_price(
+                type_id
+            )
+        )
+
+        fresh_jita = (
+            price_data.get(
+                "jita_buy"
+            )
+            if reference_side == "buy"
+            else price_data.get(
+                "jita_sell"
+            )
+        )
+
+        if fresh_jita is None:
+            raise ValueError(
+                f"jita_price_missing:{type_name}"
+            )
+
+        fresh_jita = (
+            freeborn_market_money_decimal(
+                fresh_jita
+            )
+        )
+
+        manual_override = bool(
+            raw_item.get(
+                "manual_price_override"
+            )
+        )
+
+        if manual_override:
+            chosen_unit_price = (
+                freeborn_market_money_decimal(
+                    raw_item.get(
+                        "chosen_unit_price"
+                    )
+                )
+            )
+
+            if (
+                chosen_unit_price
+                <= 0
+            ):
+                raise ValueError(
+                    "invalid_manual_price"
+                )
+        else:
+            chosen_unit_price = (
+                fresh_jita
+            )
+
+        multiplier = (
+            Decimal("1.00")
+            + (
+                adjustment
+                / Decimal("100.00")
+            )
+        )
+
+        adjusted_unit_price = (
+            chosen_unit_price
+            * multiplier
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+
+        line_total = (
+            adjusted_unit_price
+            * Decimal(
+                quantity
+            )
+        ).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+
+        total_isk += (
+            line_total
+        )
+
+        validated_items.append({
+            "line_number":
+                line_number,
+            "type_id":
+                type_id,
+            "type_name":
+                type_name,
+            "quantity":
+                quantity,
+            "jita_reference_side":
+                reference_side,
+            "jita_reference_unit_price":
+                fresh_jita,
+            "chosen_unit_price":
+                chosen_unit_price,
+            "manual_price_override":
+                manual_override,
+            "adjusted_unit_price":
+                adjusted_unit_price,
+            "line_total":
+                line_total,
+            "price_fetched_at":
+                snapshot_at,
+        })
+
+    return {
+        "adjustment_percent":
+            adjustment,
+        "notes":
+            notes,
+        "jita_snapshot_at":
+            snapshot_at,
+        "items":
+            validated_items,
+        "total_isk":
+            total_isk.quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            ),
+    }
+
+
+def freeborn_market_insert_order(
+    market_context,
+    validated,
+):
+    """
+    Persist the validated order and its lines.
+    """
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO market_orders (
+                    guild_id,
+                    order_type,
+                    owner_scope,
+                    status,
+                    created_by_discord_user_id,
+                    adjustment_percent,
+                    notes,
+                    jita_snapshot_at,
+                    total_isk,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, 'open',
+                    %s, %s, %s, %s, %s,
+                    NOW(), NOW()
+                )
+                RETURNING market_id;
+                """,
+                (
+                    market_context[
+                        "guild_id"
+                    ],
+                    market_context[
+                        "order_type"
+                    ],
+                    market_context[
+                        "owner_scope"
+                    ],
+                    market_context[
+                        "discord_user_id"
+                    ],
+                    validated[
+                        "adjustment_percent"
+                    ],
+                    validated[
+                        "notes"
+                    ],
+                    validated[
+                        "jita_snapshot_at"
+                    ],
+                    validated[
+                        "total_isk"
+                    ],
+                ),
+            )
+
+            row = cur.fetchone()
+
+            if not row:
+                raise RuntimeError(
+                    "market_order_insert_failed"
+                )
+
+            market_id = int(
+                row[0]
+            )
+
+            for item in validated[
+                "items"
+            ]:
+                cur.execute(
+                    """
+                    INSERT INTO market_order_items (
+                        market_id,
+                        line_number,
+                        type_id,
+                        type_name,
+                        quantity,
+                        jita_reference_side,
+                        jita_reference_unit_price,
+                        chosen_unit_price,
+                        manual_price_override,
+                        adjusted_unit_price,
+                        line_total,
+                        price_fetched_at,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, NOW(), NOW()
+                    );
+                    """,
+                    (
+                        market_id,
+                        item[
+                            "line_number"
+                        ],
+                        item[
+                            "type_id"
+                        ],
+                        item[
+                            "type_name"
+                        ],
+                        item[
+                            "quantity"
+                        ],
+                        item[
+                            "jita_reference_side"
+                        ],
+                        item[
+                            "jita_reference_unit_price"
+                        ],
+                        item[
+                            "chosen_unit_price"
+                        ],
+                        item[
+                            "manual_price_override"
+                        ],
+                        item[
+                            "adjusted_unit_price"
+                        ],
+                        item[
+                            "line_total"
+                        ],
+                        item[
+                            "price_fetched_at"
+                        ],
+                    ),
+                )
+
+        conn.commit()
+
+    return market_id
+
+
+def freeborn_market_delete_order(
+    guild_id,
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM market_orders
+                WHERE guild_id = %s
+                  AND market_id = %s;
+                """,
+                (
+                    str(guild_id),
+                    int(market_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_market_save_publication(
+    guild_id,
+    market_id,
+    channel_id,
+    message_id,
+    thread_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE market_orders
+                SET
+                    discord_post_channel_id = %s,
+                    discord_post_message_id = %s,
+                    discord_thread_id = %s,
+                    discord_post_created_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                  AND market_id = %s;
+                """,
+                (
+                    str(channel_id),
+                    str(message_id),
+                    str(thread_id),
+                    str(guild_id),
+                    int(market_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_market_build_discord_embed(
+    market_id,
+    market_context,
+    validated,
+):
+    ref = format_market_reference(
+        market_id
+    )
+
+    is_buy = (
+        market_context[
+            "order_type"
+        ]
+        == "buy"
+    )
+
+    is_corp = (
+        market_context[
+            "owner_scope"
+        ]
+        == "corporation"
+    )
+
+    operation_label = (
+        "ACHAT"
+        if is_buy
+        else "VENTE"
+    )
+
+    scope_label = (
+        "CORPORATION"
+        if is_corp
+        else "MEMBRE"
+    )
+
+    reference_label = (
+        "JITA BUY"
+        if is_buy
+        else "JITA SELL"
+    )
+
+    lines = []
+
+    for item in validated[
+        "items"
+    ]:
+        chosen_marker = (
+            " • prix personnalisé"
+            if item[
+                "manual_price_override"
+            ]
+            else ""
+        )
+
+        lines.append(
+            (
+                f"**{item['line_number']}. "
+                f"{item['type_name']}** × "
+                f"{freeborn_market_format_quantity(item['quantity'])}\n"
+                f"Jita : "
+                f"{freeborn_market_format_isk(item['jita_reference_unit_price'])}"
+                f" • Base : "
+                f"{freeborn_market_format_isk(item['chosen_unit_price'])}"
+                f"{chosen_marker}\n"
+                f"Final/u. : "
+                f"{freeborn_market_format_isk(item['adjusted_unit_price'])}"
+                f" • **Sous-total : "
+                f"{freeborn_market_format_isk(item['line_total'])}**"
+            )
+        )
+
+    snapshot_local = (
+        validated[
+            "jita_snapshot_at"
+        ]
+        .astimezone(
+            timezone.utc
+        )
+        .strftime(
+            "%d/%m/%Y %H:%M:%S UTC"
+        )
+    )
+
+    adjustment = (
+        validated[
+            "adjustment_percent"
+        ]
+    )
+
+    adjustment_text = (
+        f"{adjustment:+.2f}%"
+        if adjustment != 0
+        else "0.00%"
+    ).replace(
+        ".",
+        ",",
+    )
+
+    fields = [
+        {
+            "name":
+                "Statut",
+            "value":
+                "🟢 OUVERT",
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Créé par",
+            "value":
+                (
+                    f"<@{market_context['discord_user_id']}>"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Référence marché",
+            "value":
+                (
+                    f"{reference_label} • Jita 4-4\n"
+                    f"Actualisée : {snapshot_local}"
+                ),
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Ajustement global",
+            "value":
+                adjustment_text,
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Total",
+            "value":
+                (
+                    f"**{freeborn_market_format_isk(validated['total_isk'])}**"
+                ),
+            "inline":
+                True,
+        },
+    ]
+
+    notes = validated[
+        "notes"
+    ]
+
+    if notes:
+        fields.append({
+            "name":
+                "Notes",
+            "value":
+                notes[:1024],
+            "inline":
+                False,
+        })
+
+    return {
+        "title":
+            (
+                f"{ref} — {operation_label} {scope_label}"
+            ),
+        "description":
+            "\n\n".join(
+                lines
+            )[:4096],
+        "color":
+            (
+                0x2EAADC
+                if is_buy
+                else 0xD8A94E
+            ),
+        "fields":
+            fields,
+        "footer": {
+            "text":
+                (
+                    "Freeborn Legacy • Freeborn Market • "
+                    "Prix Jita figés à la validation"
+                )
+        },
+    }
+
+
+def freeborn_market_normalize_forum_tag_name(value):
+    """
+    Normalize Discord forum tag names for robust matching.
+    """
+    normalized = str(
+        value
+        or ""
+    ).strip().casefold()
+
+    replacements = {
+        "é": "e",
+        "è": "e",
+        "ê": "e",
+        "ë": "e",
+        "à": "a",
+        "â": "a",
+        "ä": "a",
+        "î": "i",
+        "ï": "i",
+        "ô": "o",
+        "ö": "o",
+        "ù": "u",
+        "û": "u",
+        "ü": "u",
+        "ç": "c",
+    }
+
+    for source, target in replacements.items():
+        normalized = normalized.replace(
+            source,
+            target,
+        )
+
+    normalized = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        normalized,
+    )
+
+    return " ".join(
+        normalized.split()
+    )
+
+
+def freeborn_market_select_forum_tags(
+    channel,
+    market_context,
+):
+    """
+    Select Discord Forum tags automatically.
+
+    Priority:
+      1. BUY/SELL business tag.
+      2. CORP tag for corporation orders.
+      3. Generic OPEN tag when available.
+      4. If the forum requires at least one tag and none of our semantic
+         matches exists, use the first available tag as a technical fallback
+         instead of making the whole Market transaction fail.
+
+    No tag IDs are hard-coded: Freeborn reads the forum's current
+    `available_tags` from Discord every time.
+    """
+    available_tags = (
+        channel.get(
+            "available_tags"
+        )
+        or []
+    )
+
+    require_tag = bool(
+        channel.get(
+            "flags",
+            0
+        )
+        & (1 << 4)
+    )
+
+    # Discord may enforce tags even if clients/API expose the state
+    # differently, so we also use the presence of available tags as a
+    # fallback signal when the API later answers code 40067.
+    normalized_tags = []
+
+    for tag in available_tags:
+        tag_id = str(
+            tag.get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        tag_name = str(
+            tag.get(
+                "name"
+            )
+            or ""
+        ).strip()
+
+        if not tag_id:
+            continue
+
+        normalized_tags.append({
+            "id":
+                tag_id,
+            "name":
+                tag_name,
+            "normalized":
+                freeborn_market_normalize_forum_tag_name(
+                    tag_name
+                ),
+        })
+
+    is_buy = (
+        market_context.get(
+            "order_type"
+        )
+        == "buy"
+    )
+
+    is_corp = (
+        market_context.get(
+            "owner_scope"
+        )
+        == "corporation"
+    )
+
+    operation_aliases = (
+        {
+            "achat",
+            "buy",
+            "buy order",
+            "demande achat",
+        }
+        if is_buy
+        else {
+            "vente",
+            "sell",
+            "sell order",
+            "offre vente",
+        }
+    )
+
+    corp_aliases = {
+        "corp",
+        "corporation",
+        "corporate",
+        "corpo",
+    }
+
+    open_aliases = {
+        "ouvert",
+        "ouverte",
+        "open",
+        "en cours",
+        "actif",
+        "active",
+    }
+
+    selected = []
+
+    def add_first_matching(
+        aliases,
+    ):
+        for tag in normalized_tags:
+            if tag["id"] in selected:
+                continue
+
+            if tag["normalized"] in aliases:
+                selected.append(
+                    tag["id"]
+                )
+                return tag
+
+        return None
+
+    operation_tag = add_first_matching(
+        operation_aliases
+    )
+
+    corp_tag = None
+
+    if is_corp:
+        corp_tag = add_first_matching(
+            corp_aliases
+        )
+
+    open_tag = add_first_matching(
+        open_aliases
+    )
+
+    # Forum posts support several applied tags. Keep the post readable and
+    # deterministic; BUY/SELL + CORP + OPEN is enough.
+    selected = selected[:3]
+
+    if (
+        not selected
+        and available_tags
+    ):
+        # We prefer keeping the transaction alive over a 40067 failure.
+        # The log makes the fallback visible so the forum tags can later be
+        # renamed/configured cleanly.
+        fallback_id = str(
+            available_tags[0].get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        if fallback_id:
+            selected = [
+                fallback_id
+            ]
+
+            print(
+                "Freeborn Market forum tag fallback [P3B]:",
+                "using first available tag",
+                available_tags[0].get(
+                    "name"
+                ),
+                fallback_id,
+            )
+
+    print(
+        "Freeborn Market forum tags [P3B]:",
+        {
+            "require_tag":
+                require_tag,
+            "available":
+                [
+                    (
+                        tag["name"],
+                        tag["id"],
+                    )
+                    for tag in normalized_tags
+                ],
+            "selected":
+                selected,
+            "operation":
+                "BUY"
+                if is_buy
+                else "SELL",
+            "scope":
+                "CORP"
+                if is_corp
+                else "MEMBER",
+        },
+    )
+
+    return selected
+
+
+def freeborn_market_get_order(
+    guild_id,
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    market_id,
+                    guild_id,
+                    order_type,
+                    owner_scope,
+                    status,
+                    created_by_discord_user_id,
+                    accepted_by_discord_user_id,
+                    adjustment_percent,
+                    notes,
+                    jita_snapshot_at,
+                    total_isk,
+                    discord_post_channel_id,
+                    discord_post_message_id,
+                    discord_thread_id,
+                    created_at,
+                    accepted_at,
+                    completed_at,
+                    cancelled_at
+                FROM market_orders
+                WHERE guild_id = %s
+                  AND market_id = %s
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    int(market_id),
+                ),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "market_id": int(row[0]),
+        "guild_id": str(row[1]),
+        "order_type": str(row[2]),
+        "owner_scope": str(row[3]),
+        "status": str(row[4]),
+        "created_by_discord_user_id": str(row[5]),
+        "accepted_by_discord_user_id": (
+            str(row[6])
+            if row[6]
+            else None
+        ),
+        "adjustment_percent": row[7],
+        "notes": row[8],
+        "jita_snapshot_at": row[9],
+        "total_isk": row[10],
+        "discord_post_channel_id": row[11],
+        "discord_post_message_id": row[12],
+        "discord_thread_id": row[13],
+        "created_at": row[14],
+        "accepted_at": row[15],
+        "completed_at": row[16],
+        "cancelled_at": row[17],
+    }
+
+
+def freeborn_market_get_items(
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    line_number,
+                    type_id,
+                    type_name,
+                    quantity,
+                    jita_reference_side,
+                    jita_reference_unit_price,
+                    chosen_unit_price,
+                    manual_price_override,
+                    adjusted_unit_price,
+                    line_total,
+                    price_fetched_at
+                FROM market_order_items
+                WHERE market_id = %s
+                ORDER BY line_number ASC;
+                """,
+                (
+                    int(market_id),
+                ),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "line_number": int(row[0]),
+            "type_id": int(row[1]),
+            "type_name": str(row[2]),
+            "quantity": int(row[3]),
+            "jita_reference_side": str(row[4]),
+            "jita_reference_unit_price": row[5],
+            "chosen_unit_price": row[6],
+            "manual_price_override": bool(row[7]),
+            "adjusted_unit_price": row[8],
+            "line_total": row[9],
+            "price_fetched_at": row[10],
+        }
+        for row in rows
+    ]
+
+
+def freeborn_market_context_from_order(
+    order,
+):
+    return {
+        "guild_id": order["guild_id"],
+        "discord_user_id":
+            order["created_by_discord_user_id"],
+        "order_type":
+            order["order_type"],
+        "owner_scope":
+            order["owner_scope"],
+    }
+
+
+def freeborn_market_validated_from_order(
+    order,
+    items,
+):
+    return {
+        "adjustment_percent":
+            freeborn_market_decimal(
+                order["adjustment_percent"]
+                or 0
+            ),
+        "notes":
+            str(
+                order["notes"]
+                or ""
+            ),
+        "jita_snapshot_at":
+            order["jita_snapshot_at"]
+            or order["created_at"]
+            or datetime.now(
+                timezone.utc
+            ),
+        "items":
+            items,
+        "total_isk":
+            freeborn_market_money_decimal(
+                order["total_isk"]
+                or 0
+            ),
+    }
+
+
+def freeborn_market_status_label(
+    status,
+):
+    mapping = {
+        "open":
+            "🟢 OUVERT",
+        "in_progress":
+            "🟠 EN COURS",
+        "completed":
+            "✅ TERMINÉ",
+        "cancelled":
+            "🔴 ANNULÉ",
+    }
+
+    return mapping.get(
+        status,
+        str(status).upper(),
+    )
+
+
+def freeborn_market_status_aliases(
+    status,
+):
+    mapping = {
+        "open": {
+            "ouvert",
+            "ouverte",
+            "open",
+            "actif",
+            "active",
+        },
+        "in_progress": {
+            "en cours",
+            "attribue",
+            "attribué",
+            "assigned",
+            "in progress",
+        },
+        "completed": {
+            "termine",
+            "terminé",
+            "terminee",
+            "terminée",
+            "complete",
+            "completed",
+            "clos",
+            "cloture",
+            "clôturé",
+        },
+        "cancelled": {
+            "annule",
+            "annulé",
+            "annulee",
+            "annulée",
+            "cancelled",
+            "canceled",
+        },
+    }
+
+    return {
+        freeborn_market_normalize_forum_tag_name(
+            value
+        )
+        for value in mapping.get(
+            status,
+            set(),
+        )
+    }
+
+
+def freeborn_market_find_status_tag_id(
+    channel,
+    status,
+):
+    aliases = (
+        freeborn_market_status_aliases(
+            status
+        )
+    )
+
+    for tag in (
+        channel.get(
+            "available_tags"
+        )
+        or []
+    ):
+        tag_id = str(
+            tag.get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        tag_name = (
+            freeborn_market_normalize_forum_tag_name(
+                tag.get(
+                    "name"
+                )
+            )
+        )
+
+        if (
+            tag_id
+            and tag_name in aliases
+        ):
+            return tag_id
+
+    return None
+
+
+def freeborn_market_build_components(
+    market_id,
+    status,
+):
+    if status == "open":
+        return [
+            {
+                "type": 1,
+                "components": [
+                    {
+                        "type": 2,
+                        "style": 1,
+                        "label": "Prendre l'offre",
+                        "emoji": {
+                            "name": "🤝"
+                        },
+                        "custom_id":
+                            f"market_take:{int(market_id)}",
+                    },
+                    {
+                        "type": 2,
+                        "style": 4,
+                        "label": "Annuler",
+                        "emoji": {
+                            "name": "✖️"
+                        },
+                        "custom_id":
+                            f"market_cancel:{int(market_id)}",
+                    },
+                ],
+            }
+        ]
+
+    if status == "in_progress":
+        return [
+            {
+                "type": 1,
+                "components": [
+                    {
+                        "type": 2,
+                        "style": 3,
+                        "label": "Terminer",
+                        "emoji": {
+                            "name": "✅"
+                        },
+                        "custom_id":
+                            f"market_complete:{int(market_id)}",
+                    },
+                    {
+                        "type": 2,
+                        "style": 2,
+                        "label": "Se désister",
+                        "emoji": {
+                            "name": "↩️"
+                        },
+                        "custom_id":
+                            f"market_withdraw:{int(market_id)}",
+                    },
+                    {
+                        "type": 2,
+                        "style": 4,
+                        "label": "Annuler l'annonce",
+                        "emoji": {
+                            "name": "✖️"
+                        },
+                        "custom_id":
+                            f"market_cancel:{int(market_id)}",
+                    },
+                ],
+            }
+        ]
+
+    return []
+
+
+def freeborn_market_build_discord_embed_from_order(
+    order,
+    items,
+):
+    market_context = (
+        freeborn_market_context_from_order(
+            order
+        )
+    )
+
+    validated = (
+        freeborn_market_validated_from_order(
+            order,
+            items,
+        )
+    )
+
+    embed = (
+        freeborn_market_build_discord_embed(
+            order[
+                "market_id"
+            ],
+            market_context,
+            validated,
+        )
+    )
+
+    # Override the lifecycle fields with authoritative current state.
+    for field in embed.get(
+        "fields",
+        []
+    ):
+        if field.get(
+            "name"
+        ) == "Statut":
+            field[
+                "value"
+            ] = (
+                freeborn_market_status_label(
+                    order[
+                        "status"
+                    ]
+                )
+            )
+
+        if field.get(
+            "name"
+        ) == "Créé par":
+            creator = (
+                f"<@{order['created_by_discord_user_id']}>"
+            )
+
+            if order.get(
+                "accepted_by_discord_user_id"
+            ):
+                creator += (
+                    "\nPris par : "
+                    f"<@{order['accepted_by_discord_user_id']}>"
+                )
+
+            field[
+                "value"
+            ] = creator
+
+    return embed
+
+
+def freeborn_market_update_forum_post(
+    order,
+):
+    thread_id = str(
+        order.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    message_id = str(
+        order.get(
+            "discord_post_message_id"
+        )
+        or ""
+    ).strip()
+
+    if (
+        not thread_id
+        or not message_id
+    ):
+        raise RuntimeError(
+            "Market Discord linkage missing"
+        )
+
+    items = (
+        freeborn_market_get_items(
+            order[
+                "market_id"
+            ]
+        )
+    )
+
+    payload = {
+        "embeds": [
+            freeborn_market_build_discord_embed_from_order(
+                order,
+                items,
+            )
+        ],
+        "components":
+            freeborn_market_build_components(
+                order[
+                    "market_id"
+                ],
+                order[
+                    "status"
+                ],
+            ),
+        "allowed_mentions": {
+            "parse": []
+        },
+    }
+
+    message_response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}/messages/"
+            f"{message_id}"
+        ),
+        headers=discord_bot_headers(),
+        json=payload,
+        timeout=15,
+    )
+
+    if message_response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn Market message update failed "
+            f"({message_response.status_code}): "
+            f"{message_response.text[:800]}"
+        )
+
+    # Update lifecycle tag when a matching tag exists.
+    try:
+        channel = discord_get_channel(
+            DISCORD_MARKET_CHANNEL_ID
+        )
+
+        status_tag_id = (
+            freeborn_market_find_status_tag_id(
+                channel,
+                order[
+                    "status"
+                ],
+            )
+        )
+
+        if status_tag_id:
+            thread_response = requests.patch(
+                (
+                    f"{DISCORD_API}/channels/"
+                    f"{thread_id}"
+                ),
+                headers=discord_bot_headers(),
+                json={
+                    "applied_tags": [
+                        status_tag_id
+                    ]
+                },
+                timeout=12,
+            )
+
+            if thread_response.status_code not in {
+                200,
+                201,
+            }:
+                print(
+                    "Freeborn Market tag update warning [P4]:",
+                    thread_response.status_code,
+                    thread_response.text[:500],
+                )
+    except Exception as error:
+        print(
+            "Freeborn Market lifecycle tag warning [P4]:",
+            repr(error),
+        )
+
+
+def freeborn_market_user_is_manager(
+    interaction_data,
+):
+    return interaction_has_any_role(
+        interaction_data,
+        MARKET_CORP_ROLE_IDS,
+    )
+
+
+def freeborn_market_user_can_cancel(
+    interaction_data,
+    order,
+    discord_user_id,
+):
+    return (
+        str(
+            discord_user_id
+        )
+        == str(
+            order[
+                "created_by_discord_user_id"
+            ]
+        )
+        or
+        freeborn_market_user_is_manager(
+            interaction_data
+        )
+    )
+
+
+def freeborn_market_user_can_complete(
+    interaction_data,
+    order,
+    discord_user_id,
+):
+    return (
+        str(
+            discord_user_id
+        )
+        == str(
+            order.get(
+                "accepted_by_discord_user_id"
+            )
+            or ""
+        )
+        or
+        str(
+            discord_user_id
+        )
+        == str(
+            order[
+                "created_by_discord_user_id"
+            ]
+        )
+        or
+        freeborn_market_user_is_manager(
+            interaction_data
+        )
+    )
+
+
+def freeborn_market_take_order(
+    guild_id,
+    market_id,
+    discord_user_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE market_orders
+                SET
+                    status = 'in_progress',
+                    accepted_by_discord_user_id = %s,
+                    accepted_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                  AND market_id = %s
+                  AND status = 'open'
+                RETURNING market_id;
+                """,
+                (
+                    str(
+                        discord_user_id
+                    ),
+                    str(
+                        guild_id
+                    ),
+                    int(
+                        market_id
+                    ),
+                ),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_market_withdraw_order(
+    guild_id,
+    market_id,
+    discord_user_id,
+):
+    """
+    The member who took an IN PROGRESS order withdraws.
+    The order returns to OPEN and becomes available again.
+    """
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE market_orders
+                SET
+                    status = 'open',
+                    accepted_by_discord_user_id = NULL,
+                    accepted_at = NULL,
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                  AND market_id = %s
+                  AND status = 'in_progress'
+                  AND accepted_by_discord_user_id = %s
+                RETURNING market_id;
+                """,
+                (
+                    str(guild_id),
+                    int(market_id),
+                    str(discord_user_id),
+                ),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_market_complete_order(
+    guild_id,
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE market_orders
+                SET
+                    status = 'completed',
+                    completed_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                  AND market_id = %s
+                  AND status = 'in_progress'
+                RETURNING market_id;
+                """,
+                (
+                    str(
+                        guild_id
+                    ),
+                    int(
+                        market_id
+                    ),
+                ),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_market_cancel_order(
+    guild_id,
+    market_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE market_orders
+                SET
+                    status = 'cancelled',
+                    cancelled_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                  AND market_id = %s
+                  AND status IN (
+                      'open',
+                      'in_progress'
+                  )
+                RETURNING market_id;
+                """,
+                (
+                    str(
+                        guild_id
+                    ),
+                    int(
+                        market_id
+                    ),
+                ),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_market_delete_forum_thread(
+    order,
+):
+    thread_id = str(
+        order.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    if not thread_id:
+        return False
+
+    response = requests.delete(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}"
+        ),
+        headers=discord_bot_headers(),
+        timeout=12,
+    )
+
+    if response.status_code in {
+        200,
+        204,
+        404,
+    }:
+        return True
+
+    raise RuntimeError(
+        "Freeborn Market thread delete failed "
+        f"({response.status_code}): "
+        f"{response.text[:600]}"
+    )
+
+
+def freeborn_market_publish_discord(
+    market_id,
+    market_context,
+    validated,
+):
+    """
+    Create exactly one Freeborn Market forum post.
+    """
+    target_channel_id = str(
+        DISCORD_MARKET_CHANNEL_ID
+        or ""
+    ).strip()
+
+    if not target_channel_id:
+        raise RuntimeError(
+            "DISCORD_MARKET_CHANNEL_ID is not configured"
+        )
+
+    channel = discord_get_channel(
+        target_channel_id
+    )
+
+    channel_type = int(
+        channel.get(
+            "type",
+            -1,
+        )
+    )
+
+    if channel_type not in {
+        15,
+        16,
+    }:
+        raise RuntimeError(
+            "Freeborn Market requires a Discord Forum/Media channel "
+            f"(configured type={channel_type})."
+        )
+
+    ref = format_market_reference(
+        market_id
+    )
+
+    operation_label = (
+        "ACHAT"
+        if market_context[
+            "order_type"
+        ] == "buy"
+        else "VENTE"
+    )
+
+    scope_label = (
+        "CORP"
+        if market_context[
+            "owner_scope"
+        ] == "corporation"
+        else "MEMBRE"
+    )
+
+    thread_name = (
+        f"{ref} — {operation_label} {scope_label}"
+    )[:100]
+
+    message_payload = {
+        "content":
+            (
+                f"🛒 **{ref} — {operation_label} {scope_label}**"
+            ),
+        "embeds": [
+            freeborn_market_build_discord_embed(
+                market_id,
+                market_context,
+                validated,
+            )
+        ],
+        "components":
+            freeborn_market_build_components(
+                market_id,
+                "open",
+            ),
+        "allowed_mentions": {
+            "parse": []
+        },
+    }
+
+    applied_tags = (
+        freeborn_market_select_forum_tags(
+            channel,
+            market_context,
+        )
+    )
+
+    thread_payload = {
+        "name":
+            thread_name,
+        "auto_archive_duration":
+            10080,
+        "message":
+            message_payload,
+    }
+
+    if applied_tags:
+        thread_payload[
+            "applied_tags"
+        ] = applied_tags
+
+    response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{target_channel_id}/threads"
+        ),
+        headers=discord_bot_headers(),
+        json=thread_payload,
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        if (
+            response.status_code == 400
+            and "40067" in response.text
+        ):
+            print(
+                "Freeborn Market forum tag rejection [P3B]:",
+                "channel=",
+                target_channel_id,
+                "applied_tags=",
+                applied_tags,
+                "available_tags=",
+                [
+                    (
+                        tag.get("name"),
+                        tag.get("id"),
+                    )
+                    for tag in (
+                        channel.get("available_tags")
+                        or []
+                    )
+                ],
+            )
+
+        raise RuntimeError(
+            "Freeborn Market forum publication failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    created = (
+        response.json()
+        or {}
+    )
+
+    thread_id = str(
+        created[
+            "id"
+        ]
+    )
+
+    starter_message = (
+        created.get(
+            "message"
+        )
+        or {}
+    )
+
+    message_id = str(
+        starter_message.get(
+            "id"
+        )
+        or thread_id
+    )
+
+    return {
+        "channel_id":
+            thread_id,
+        "message_id":
+            message_id,
+        "thread_id":
+            thread_id,
+    }
+
+
+def freeborn_market_phase2_page(
+    market_context,
+    token,
+):
+    order_type = market_context[
+        "order_type"
+    ]
+    owner_scope = market_context[
+        "owner_scope"
+    ]
+
+    is_buy = (
+        order_type == "buy"
+    )
+
+    is_corp = (
+        owner_scope
+        == "corporation"
+    )
+
+    operation_label = (
+        "ACHAT"
+        if is_buy
+        else "VENTE"
+    )
+
+    scope_label = (
+        "CORPORATION"
+        if is_corp
+        else "MEMBRE"
+    )
+
+    # Validated market reference convention:
+    # personal/corp SELL -> lowest Jita Sell
+    # personal/corp BUY  -> highest Jita Buy
+    reference_side = (
+        "buy"
+        if is_buy
+        else "sell"
+    )
+
+    reference_label = (
+        "JITA BUY"
+        if reference_side == "buy"
+        else "JITA SELL"
+    )
+
+    custom_price_label = (
+        "PRIX D'ACHAT"
+        if is_buy
+        else "PRIX VENDEUR"
+    )
+
+    safe_token = escape(
+        str(token),
+        quote=True,
+    )
+
+    return f"""<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Freeborn Market — {operation_label} {scope_label}</title>
+<link rel="icon" type="image/png" href="/assets/logo-freeborn-legacy.png">
+<style>
+:root{{
+  --bg:#020811;
+  --panel:#04111d;
+  --panel2:#071827;
+  --line:#0d567d;
+  --line2:#148ec6;
+  --cyan:#54d9ff;
+  --cyan2:#80e5ff;
+  --gold:#f0c35b;
+  --green:#80f58b;
+  --red:#ff6f70;
+  --text:#e4f3fb;
+  --muted:#79a2b9;
+}}
+*{{box-sizing:border-box}}
+html,body{{min-height:100%}}
+body{{
+  margin:0;
+  color:var(--text);
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-weight:400;
+  background:
+    linear-gradient(rgba(1,8,15,.78),rgba(1,8,15,.88)),
+    url('/assets/bg-space.jpg') center/cover fixed no-repeat,
+    #020811;
+}}
+button,input{{font:inherit}}
+.shell{{
+  width:min(1580px,96vw);
+  margin:14px auto 32px;
+  border:1px solid rgba(36,175,234,.62);
+  background:rgba(2,11,19,.86);
+  box-shadow:0 24px 70px rgba(0,0,0,.58);
+}}
+.topbar{{
+  min-height:92px;
+  display:flex;
+  align-items:center;
+  gap:22px;
+  padding:12px 18px;
+  border-bottom:1px solid rgba(36,175,234,.45);
+  background:linear-gradient(90deg,rgba(2,17,30,.98),rgba(2,12,21,.91));
+  position:relative;
+}}
+.topbar:before{{
+  content:"";
+  position:absolute;
+  left:8px;
+  top:8px;
+  width:82px;
+  height:2px;
+  background:#54ddff;
+  box-shadow:0 0 12px rgba(84,221,255,.42);
+}}
+.logo{{
+  width:86px;
+  height:64px;
+  object-fit:contain;
+  filter:drop-shadow(0 0 12px rgba(45,184,255,.3));
+}}
+.brand h1{{
+  margin:0;
+  font-size:32px;
+  letter-spacing:2.5px;
+  font-weight:500;
+}}
+.brand h1 span{{color:var(--gold)}}
+.brand p{{
+  margin:4px 0 0;
+  color:#b7d8e9;
+  font-size:12px;
+  letter-spacing:2px;
+  text-transform:uppercase;
+}}
+.market-mode{{
+  margin-left:auto;
+  border:1px solid rgba(240,195,91,.65);
+  padding:9px 14px;
+  color:var(--gold);
+  background:rgba(240,195,91,.06);
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:1px;
+}}
+.corp-mode{{
+  border-color:rgba(128,245,139,.65);
+  color:var(--green);
+  background:rgba(128,245,139,.06);
+}}
+.subbar{{
+  padding:7px 16px;
+  border-bottom:1px solid rgba(36,175,234,.35);
+  color:#69d9ff;
+  font-size:11px;
+  letter-spacing:1.6px;
+  text-transform:uppercase;
+}}
+.workspace{{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 320px;
+  gap:10px;
+  padding:10px;
+}}
+.panel{{
+  border:1px solid rgba(32,143,194,.48);
+  background:rgba(2,13,23,.94);
+}}
+.panel-title{{
+  min-height:34px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 10px;
+  border-bottom:1px solid rgba(32,143,194,.38);
+  text-transform:uppercase;
+  letter-spacing:1.1px;
+  font-size:14px;
+  font-weight:600;
+}}
+.panel-title .code{{
+  margin-left:auto;
+  color:#6da8c5;
+  font-size:11px;
+  letter-spacing:1.5px;
+}}
+.symbol{{
+  width:20px;
+  height:20px;
+  border:1px solid #22c9ff;
+  border-radius:50%;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  color:#66e2ff;
+  font-size:11px;
+}}
+.controls{{
+  display:flex;
+  align-items:end;
+  gap:12px;
+  padding:12px;
+}}
+.adjust-wrap label,
+.notes-wrap label{{
+  display:block;
+  color:#79b7d4;
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:1px;
+  margin-bottom:5px;
+}}
+.adjust-control{{
+  display:grid;
+  grid-template-columns:34px 86px 34px 28px;
+  align-items:center;
+}}
+.adjust-control button{{
+  height:38px;
+  border:1px solid rgba(35,160,215,.52);
+  background:#041522;
+  color:#70ddff;
+  cursor:pointer;
+  font-weight:600;
+}}
+.adjust-control input{{
+  height:38px;
+  width:86px;
+  border:1px solid rgba(35,160,215,.52);
+  border-left:0;
+  border-right:0;
+  outline:none;
+  background:#020a11;
+  color:#fff;
+  text-align:center;
+  font-weight:500;
+}}
+.adjust-control input.adjust-negative{{color:#ff6f70}}
+.adjust-control input.adjust-zero{{color:#ffffff}}
+.adjust-control input.adjust-positive{{color:#80f58b}}
+.adjust-negative-text{{color:#ff6f70 !important}}
+.adjust-zero-text{{color:#ffffff !important}}
+.adjust-positive-text{{color:#80f58b !important}}
+.adjust-control .pct{{
+  height:38px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid rgba(35,160,215,.52);
+  border-left:0;
+  color:#8ecbe5;
+}}
+.reference-pill{{
+  min-height:38px;
+  display:flex;
+  align-items:center;
+  padding:0 12px;
+  border:1px solid rgba(240,195,91,.42);
+  color:var(--gold);
+  background:rgba(240,195,91,.04);
+  font-size:12px;
+  font-weight:600;
+}}
+.lines{{
+  padding:0 12px 12px;
+}}
+.line-head,.market-row{{
+  display:grid;
+  grid-template-columns:32px minmax(210px,1fr) 132px 172px 172px 195px 38px;
+  gap:7px;
+  align-items:center;
+}}
+.line-head{{
+  min-height:28px;
+  color:#76a9c2;
+  font-size:10px;
+  letter-spacing:1px;
+  text-transform:uppercase;
+}}
+.market-row{{
+  min-height:54px;
+  padding:5px 0;
+  border-top:1px solid rgba(23,109,149,.2);
+  position:relative;
+}}
+.num{{
+  text-align:center;
+  color:#5bdcff;
+  font-weight:900;
+  font-size:17px;
+}}
+.search-wrap{{
+  position:relative;
+}}
+.item-input{{
+  width:100%;
+  min-height:42px;
+  padding:7px 9px 7px 48px;
+  border:1px solid rgba(30,137,185,.58);
+  background:#020a12;
+  color:#f2fbff;
+  outline:none;
+  font-size:13px;
+  font-weight:400;
+  letter-spacing:.1px;
+}}
+.item-input:focus{{
+  border-color:#4edbff;
+  box-shadow:0 0 0 1px rgba(78,219,255,.12);
+}}
+.item-icon{{
+  position:absolute;
+  left:5px;
+  top:4px;
+  width:34px;
+  height:34px;
+  object-fit:cover;
+  border:1px solid rgba(55,173,225,.4);
+  background:#06131e;
+  display:none;
+}}
+.results{{
+  display:none;
+  position:absolute;
+  z-index:30;
+  left:0;
+  right:0;
+  top:45px;
+  max-height:270px;
+  overflow:auto;
+  border:1px solid rgba(61,195,247,.66);
+  background:rgba(1,10,17,.99);
+  box-shadow:0 15px 35px rgba(0,0,0,.58);
+}}
+.result{{
+  width:100%;
+  display:grid;
+  grid-template-columns:38px 1fr auto;
+  gap:8px;
+  align-items:center;
+  min-height:46px;
+  padding:5px 8px;
+  border:0;
+  border-bottom:1px solid rgba(42,128,167,.22);
+  background:transparent;
+  color:#def5ff;
+  text-align:left;
+  cursor:pointer;
+}}
+.result:hover{{background:rgba(43,184,238,.11)}}
+.result img{{
+  width:34px;height:34px;object-fit:cover;
+}}
+.result small{{color:#678da2}}
+.qty{{
+  width:100%;
+  height:42px;
+  border:1px solid rgba(30,137,185,.48);
+  background:#020a12;
+  color:#fff;
+  text-align:right;
+  padding:0 8px;
+  font-family:"Roboto Mono","Consolas","Courier New",monospace;
+  font-size:13px;
+  font-weight:400;
+  font-variant-numeric:tabular-nums;
+}}
+.manual-price{{
+  width:100%;
+  height:42px;
+  border:1px solid rgba(240,195,91,.45);
+  background:#020a12;
+  color:#f5dc97;
+  text-align:right;
+  padding:0 8px;
+  outline:none;
+  font-family:"Roboto Mono","Consolas","Courier New",monospace;
+  font-size:12px;
+  font-weight:400;
+  font-variant-numeric:tabular-nums;
+}}
+.manual-price:focus{{
+  border-color:rgba(240,195,91,.85);
+  box-shadow:0 0 0 1px rgba(240,195,91,.10);
+}}
+.value-box{{
+  min-height:42px;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  align-items:flex-end;
+  padding:5px 9px;
+  border:1px solid rgba(30,137,185,.35);
+  background:rgba(4,17,28,.74);
+}}
+.value-box b{{
+  max-width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-family:"Roboto Mono","Consolas","Courier New",monospace;
+  font-size:12px;
+  font-weight:400;
+  color:#eaf8ff;
+  font-variant-numeric:tabular-nums;
+}}
+.value-box small{{
+  font-size:9px;
+  color:#6f9ab0;
+  letter-spacing:.5px;
+  font-weight:400;
+}}
+.price-box,.subtotal{{min-width:0}}
+.subtotal b{{color:var(--gold)}}
+.remove{{
+  height:42px;
+  border:1px solid rgba(255,89,91,.48);
+  background:rgba(255,70,70,.04);
+  color:#ff7375;
+  cursor:pointer;
+  font-size:17px;
+}}
+.action-row{{
+  display:flex;
+  gap:7px;
+  padding:0 12px 12px;
+}}
+.action{{
+  min-height:36px;
+  padding:6px 12px;
+  border:1px solid rgba(240,195,91,.62);
+  background:linear-gradient(180deg,rgba(240,195,91,.10),rgba(240,195,91,.02));
+  color:#f0d27e;
+  font-size:12px;
+  font-weight:600;
+  letter-spacing:.35px;
+  cursor:pointer;
+}}
+.action.primary{{
+  margin-left:auto;
+  border-color:rgba(84,217,255,.65);
+  color:#71ddff;
+  background:rgba(50,177,230,.07);
+}}
+.action:disabled{{opacity:.42;cursor:not-allowed}}
+.summary-stack{{display:grid;gap:8px;padding:10px}}
+.summary-card{{
+  border:1px solid rgba(36,144,190,.34);
+  background:#020b13;
+  padding:10px;
+}}
+.summary-card small{{
+  display:block;
+  color:#6f9ab0;
+  font-size:10px;
+  letter-spacing:.9px;
+  text-transform:uppercase;
+  margin-bottom:5px;
+}}
+.summary-card strong{{font-size:15px}}
+.summary-card.total strong{{
+  color:var(--gold);
+  font-size:21px;
+}}
+.notes-wrap{{padding:0 10px 10px}}
+.notes-wrap textarea{{
+  width:100%;
+  min-height:105px;
+  resize:vertical;
+  border:1px solid rgba(30,137,185,.4);
+  background:#020a12;
+  color:#eaf8ff;
+  padding:9px;
+  outline:none;
+}}
+.status-line{{
+  margin:0 12px 12px;
+  min-height:36px;
+  display:flex;
+  align-items:center;
+  padding:7px 10px;
+  border-left:2px solid #37cfff;
+  background:rgba(55,207,255,.06);
+  color:#80a8ba;
+  font-size:11px;
+}}
+.status-line.ok{{border-color:#77e984;color:#9bd9a2}}
+.status-line.err{{border-color:#ff6767;color:#eaa0a0}}
+.footer{{
+  min-height:30px;
+  display:grid;
+  grid-template-columns:1fr auto 1fr;
+  align-items:center;
+  gap:12px;
+  border-top:1px solid rgba(32,143,194,.4);
+  padding:6px 12px;
+  color:#63caee;
+  font-size:9px;
+  letter-spacing:1px;
+  text-transform:uppercase;
+}}
+.footer .center{{color:var(--gold)}}
+.footer .right{{text-align:right}}
+@media(max-width:1050px){{
+  .workspace{{grid-template-columns:1fr}}
+  .line-head,.market-row{{
+    grid-template-columns:28px minmax(170px,1fr) 116px 152px 152px 175px 36px;
+  }}
+}}
+@media(max-width:760px){{
+  .brand h1{{font-size:25px}}
+  .logo{{width:64px}}
+  .market-mode{{display:none}}
+  .line-head{{display:none}}
+  .market-row{{
+    grid-template-columns:30px 1fr 78px 38px;
+  }}
+  .market-row .price-box,
+  .market-row .manual-price,
+  .market-row .subtotal{{
+    grid-column:2 / 4;
+  }}
+}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="topbar">
+    <img class="logo" src="/assets/logo-freeborn-legacy.png" alt="Freeborn Legacy">
+    <div class="brand">
+      <h1>FREEBORN <span>MARKET</span></h1>
+      <p>Marché corporation • Par les Free • Pour les Free</p>
+    </div>
+    <div class="market-mode {'corp-mode' if is_corp else ''}">
+      {operation_label} // {scope_label}
+    </div>
+  </header>
+
+  <div class="subbar">
+    FREEBORN LEGACY // MARKET // {operation_label} {scope_label} // {reference_label}
+  </div>
+
+  <section class="workspace">
+    <div class="panel">
+      <div class="panel-title">
+        <span class="symbol">M</span>
+        Construction de l'annonce
+        <span class="code">MARKET ORDER</span>
+      </div>
+
+      <div class="controls">
+        <div class="adjust-wrap">
+          <label>Ajustement global</label>
+          <div class="adjust-control">
+            <button type="button" id="adjustMinus">−</button>
+            <input id="adjustment" type="text" inputmode="decimal" value="0,00"
+                   maxlength="7" aria-label="Ajustement global en pourcentage">
+            <button type="button" id="adjustPlus">+</button>
+            <div class="pct">%</div>
+          </div>
+        </div>
+        <div class="reference-pill">
+          Aperçu : {reference_label} • Jita 4-4
+        </div>
+      </div>
+
+      <div class="lines" id="lines">
+        <div class="line-head">
+          <div>#</div>
+          <div>Item EVE</div>
+          <div>Qté</div>
+          <div>Prix Jita</div>
+          <div>{custom_price_label}</div>
+          <div>Sous-total</div>
+          <div></div>
+        </div>
+      </div>
+
+      <div class="action-row">
+        <button class="action" type="button" id="addLine">＋ Ajouter un item</button>
+        <button class="action primary" type="button" id="validateOrder" disabled>
+          ✓ Valider l'annonce
+        </button>
+      </div>
+
+      <div class="status-line" id="marketStatus">
+        Recherche EVE active. Les prix Jita affichés ici sont un aperçu ; toutes les références seront actualisées ensemble au moment de la validation.
+      </div>
+    </div>
+
+    <aside class="panel">
+      <div class="panel-title">
+        <span class="symbol">Σ</span>
+        Récapitulatif
+        <span class="code">LIVE</span>
+      </div>
+      <div class="summary-stack">
+        <div class="summary-card">
+          <small>Type</small>
+          <strong>{operation_label} — {scope_label}</strong>
+        </div>
+        <div class="summary-card">
+          <small>Référence Jita</small>
+          <strong>{reference_label} • actualisée à la validation</strong>
+        </div>
+        <div class="summary-card">
+          <small>Ajustement global</small>
+          <strong id="adjustmentPreview">0,00 %</strong>
+        </div>
+        <div class="summary-card">
+          <small>Lignes utilisées</small>
+          <strong id="lineCount">1 / {FREEBORN_MARKET_MAX_LINES}</strong>
+        </div>
+        <div class="summary-card total">
+          <small>Total général</small>
+          <strong id="grandTotal">0,00 ISK</strong>
+        </div>
+        <div class="summary-card">
+          <small>Horodatage marché</small>
+          <strong>Unique • au clic sur Valider</strong>
+        </div>
+      </div>
+
+      <div class="notes-wrap">
+        <label>Notes de l'annonce (facultatif)</label>
+        <textarea id="marketNotes" maxlength="500"
+          placeholder="Ex. Disponible à Jita, livraison possible, lot indivisible..."></textarea>
+      </div>
+    </aside>
+  </section>
+
+  <footer class="footer">
+    <span>Libres par choix • Unis par volonté</span>
+    <span class="center">FREEBORN MARKET</span>
+    <span class="right">VALIDATION + DISCORD</span>
+  </footer>
+</main>
+
+<script>
+const token = {json.dumps(str(token))};
+const orderType = {json.dumps(order_type)};
+const referenceSide = {json.dumps(reference_side)};
+const maxLines = {FREEBORN_MARKET_MAX_LINES};
+
+const lines = document.getElementById('lines');
+const addLineButton = document.getElementById('addLine');
+const adjustmentInput = document.getElementById('adjustment');
+const adjustmentPreview = document.getElementById('adjustmentPreview');
+const lineCount = document.getElementById('lineCount');
+const grandTotal = document.getElementById('grandTotal');
+const marketStatus = document.getElementById('marketStatus');
+const validateOrderButton = document.getElementById('validateOrder');
+const marketNotes = document.getElementById('marketNotes');
+
+let rowSequence = 0;
+let marketSubmitting = false;
+
+function money(value) {{
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) {{
+    return '—';
+  }}
+  return Number(value).toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }}) + ' ISK';
+}}
+
+function parseIntegerInput(value) {{
+  const raw = String(value ?? '')
+    .replace(/\\s/g, '')
+    .replace(/[^0-9]/g, '');
+
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1
+    ? Math.floor(parsed)
+    : 1;
+}}
+
+function formatIntegerFR(value) {{
+  return Number(value).toLocaleString('fr-FR', {{
+    maximumFractionDigits: 0
+  }});
+}}
+
+function parseISKInput(value) {{
+  let raw = String(value ?? '')
+    .trim()
+    .replace(/\\s/g, '')
+    .replace(',', '.')
+    .replace(/[^0-9.-]/g, '');
+
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}}
+
+function plainISK(value) {{
+  if (!Number.isFinite(Number(value))) return '';
+  return Number(value).toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    useGrouping: false
+  }});
+}}
+
+function parseAdjustment() {{
+  let raw = String(adjustmentInput.value || '0')
+    .trim()
+    .replace(',', '.')
+    .replace(/[^0-9+.-]/g, '');
+
+  let value = Number(raw);
+  if (!Number.isFinite(value)) value = 0;
+  value = Math.max(-100, Math.min(100, value));
+  return Math.round(value * 100) / 100;
+}}
+
+function showAdjustment() {{
+  const value = parseAdjustment();
+  const stateClass =
+    value < 0
+      ? 'adjust-negative'
+      : value > 0
+        ? 'adjust-positive'
+        : 'adjust-zero';
+
+  adjustmentInput.classList.remove(
+    'adjust-negative',
+    'adjust-zero',
+    'adjust-positive'
+  );
+  adjustmentInput.classList.add(stateClass);
+
+  adjustmentPreview.classList.remove(
+    'adjust-negative-text',
+    'adjust-zero-text',
+    'adjust-positive-text'
+  );
+  adjustmentPreview.classList.add(stateClass + '-text');
+
+  adjustmentPreview.textContent =
+    (value > 0 ? '+' : '') +
+    value.toLocaleString('fr-FR', {{
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }}) +
+    ' %';
+}}
+
+function updateTotals() {{
+  const adjustment = parseAdjustment();
+  const multiplier = 1 + adjustment / 100;
+  let total = 0;
+
+  document.querySelectorAll('.market-row').forEach(row => {{
+    const qty = parseIntegerInput(row.querySelector('.qty').value);
+    const referencePrice = Number(row.dataset.referencePrice || 0);
+    const manualPriceInput = row.querySelector('.manual-price');
+    const chosenUnitPrice = parseISKInput(manualPriceInput.value);
+
+    const adjustedUnit = chosenUnitPrice > 0
+      ? chosenUnitPrice * multiplier
+      : 0;
+
+    const subtotal = adjustedUnit * qty;
+
+    row.dataset.chosenUnitPrice = chosenUnitPrice;
+    row.dataset.adjustedUnit = adjustedUnit;
+    row.dataset.subtotal = subtotal;
+
+    row.querySelector('.subtotal b').textContent =
+      subtotal > 0 ? money(subtotal) : '—';
+
+    row.querySelector('.subtotal small').textContent =
+      chosenUnitPrice > 0
+      ? (
+          (adjustment > 0 ? '+' : '') +
+          adjustment.toLocaleString('fr-FR', {{
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+          }}) +
+          ' % GLOBAL'
+        )
+      : 'AJUSTEMENT';
+
+    total += subtotal;
+  }});
+
+  grandTotal.textContent = money(total);
+  showAdjustment();
+
+  const rows = [...document.querySelectorAll('.market-row')];
+  const validRows = rows.length > 0 && rows.every(row => {{
+    const hasType = Number(row.dataset.typeId || 0) > 0;
+    const chosen = parseISKInput(row.querySelector('.manual-price').value);
+    const qty = parseIntegerInput(row.querySelector('.qty').value);
+    return hasType && chosen > 0 && qty > 0;
+  }});
+
+  validateOrderButton.disabled =
+    marketSubmitting || !validRows;
+}}
+
+function refreshRows() {{
+  const rows = [...document.querySelectorAll('.market-row')];
+  rows.forEach((row, index) => {{
+    row.querySelector('.num').textContent = index + 1;
+  }});
+  lineCount.textContent = `${{rows.length}} / ${{maxLines}}`;
+  addLineButton.disabled = rows.length >= maxLines;
+  updateTotals();
+}}
+
+function setStatus(message, mode='') {{
+  marketStatus.className = 'status-line' + (mode ? ' ' + mode : '');
+  marketStatus.textContent = message;
+}}
+
+async function searchEve(query) {{
+  const response = await fetch(
+    '/market/api/search?q=' +
+    encodeURIComponent(query) +
+    '&token=' +
+    encodeURIComponent(token),
+    {{credentials:'same-origin'}}
+  );
+
+  if (!response.ok) {{
+    throw new Error('Recherche EVE indisponible');
+  }}
+
+  return await response.json();
+}}
+
+async function fetchPrice(typeId) {{
+  const response = await fetch(
+    '/market/api/price/' +
+    encodeURIComponent(typeId) +
+    '?token=' +
+    encodeURIComponent(token),
+    {{credentials:'same-origin'}}
+  );
+
+  if (!response.ok) {{
+    throw new Error('Prix Jita indisponible');
+  }}
+
+  return await response.json();
+}}
+
+function makeRow() {{
+  rowSequence += 1;
+  const rowId = 'market-row-' + rowSequence;
+
+  const row = document.createElement('div');
+  row.className = 'market-row';
+  row.id = rowId;
+  row.dataset.typeId = '';
+  row.dataset.referencePrice = '0';
+  row.dataset.manualPriceOverride = '0';
+
+  row.innerHTML = `
+    <div class="num"></div>
+    <div class="search-wrap">
+      <img class="item-icon" alt="">
+      <input class="item-input" type="text" autocomplete="off"
+        placeholder="Ex. Endurance, Tritanium, Veldspar...">
+      <div class="results"></div>
+    </div>
+    <input class="qty" type="text" inputmode="numeric" value="1"
+      aria-label="Quantité">
+    <div class="value-box price-box">
+      <b>—</b>
+      <small>{reference_label}</small>
+    </div>
+    <input class="manual-price" type="text" inputmode="decimal"
+      placeholder="{custom_price_label}" aria-label="{custom_price_label}">
+    <div class="value-box subtotal">
+      <b>—</b>
+      <small>AJUSTEMENT</small>
+    </div>
+    <button type="button" class="remove" title="Retirer cette ligne">×</button>
+  `;
+
+  const input = row.querySelector('.item-input');
+  const results = row.querySelector('.results');
+  const icon = row.querySelector('.item-icon');
+  const qty = row.querySelector('.qty');
+  const manualPrice = row.querySelector('.manual-price');
+  const remove = row.querySelector('.remove');
+
+  let debounceTimer = null;
+  let searchSerial = 0;
+
+  input.addEventListener('input', () => {{
+    row.dataset.typeId = '';
+    row.dataset.referencePrice = '0';
+    row.dataset.priceFetchedAt = '';
+    row.dataset.manualPriceOverride = '0';
+    icon.style.display = 'none';
+    manualPrice.value = '';
+    row.querySelector('.price-box b').textContent = '—';
+    results.innerHTML = '';
+    results.style.display = 'none';
+    updateTotals();
+
+    const query = input.value.trim();
+    if (query.length < 2) return;
+
+    clearTimeout(debounceTimer);
+    const mySerial = ++searchSerial;
+
+    debounceTimer = setTimeout(async () => {{
+      try {{
+        const data = await searchEve(query);
+        if (mySerial !== searchSerial) return;
+
+        results.innerHTML = '';
+
+        (data.items || []).forEach(item => {{
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'result';
+          button.innerHTML = `
+            <img src="${{item.icon_url}}" alt="">
+            <span>${{item.name}}</span>
+            <small>#${{item.type_id}}</small>
+          `;
+
+          button.addEventListener('click', async () => {{
+            input.value = item.name;
+            row.dataset.typeId = item.type_id;
+            icon.src = item.icon_url;
+            icon.alt = item.name;
+            icon.style.display = 'block';
+            results.style.display = 'none';
+            setStatus('Récupération du prix Jita 4-4…');
+
+            try {{
+              const priceData = await fetchPrice(item.type_id);
+              const selectedPrice =
+                referenceSide === 'buy'
+                  ? priceData.jita_buy
+                  : priceData.jita_sell;
+
+              row.dataset.referencePrice =
+                selectedPrice == null ? '0' : String(selectedPrice);
+
+              row.dataset.priceFetchedAt =
+                String(priceData.fetched_at || '');
+
+              row.querySelector('.price-box b').textContent =
+                selectedPrice == null ? 'Aucun ordre' : money(selectedPrice);
+
+              manualPrice.value =
+                selectedPrice == null ? '' : plainISK(selectedPrice);
+
+              row.dataset.manualPriceOverride = '0';
+              updateTotals();
+
+              if (selectedPrice == null) {{
+                setStatus(
+                  'Aucun ordre ' +
+                  (referenceSide === 'buy' ? 'BUY' : 'SELL') +
+                  ' trouvé à Jita 4-4 pour ' + item.name + '.',
+                  'err'
+                );
+              }} else {{
+                setStatus(
+                  item.name + ' — aperçu Jita chargé. '
+                  + 'La référence finale sera reprise lors de la validation.',
+                  'ok'
+                );
+              }}
+            }} catch (error) {{
+              row.dataset.referencePrice = '0';
+              row.querySelector('.price-box b').textContent = 'Erreur';
+              updateTotals();
+              setStatus(String(error.message || error), 'err');
+            }}
+          }});
+
+          results.appendChild(button);
+        }});
+
+        results.style.display =
+          results.children.length ? 'block' : 'none';
+
+        if (!results.children.length) {{
+          setStatus('Aucun item commercialisable trouvé.', 'err');
+        }}
+      }} catch (error) {{
+        setStatus(String(error.message || error), 'err');
+      }}
+    }}, 280);
+  }});
+
+  input.addEventListener('focus', () => {{
+    if (results.children.length) {{
+      results.style.display = 'block';
+    }}
+  }});
+
+  qty.addEventListener('input', updateTotals);
+  qty.addEventListener('blur', () => {{
+    const value = parseIntegerInput(qty.value);
+    qty.value = formatIntegerFR(value);
+    updateTotals();
+  }});
+  qty.addEventListener('focus', () => {{
+    const value = parseIntegerInput(qty.value);
+    qty.value = String(value);
+  }});
+
+  manualPrice.addEventListener('input', () => {{
+    row.dataset.manualPriceOverride = '1';
+    updateTotals();
+  }});
+  manualPrice.addEventListener('blur', () => {{
+    const value = parseISKInput(manualPrice.value);
+    manualPrice.value = value > 0 ? plainISK(value) : '';
+    updateTotals();
+  }});
+
+  remove.addEventListener('click', () => {{
+    const allRows = document.querySelectorAll('.market-row');
+    if (allRows.length <= 1) return;
+    row.remove();
+    refreshRows();
+  }});
+
+  document.addEventListener('click', event => {{
+    if (!row.contains(event.target)) {{
+      results.style.display = 'none';
+    }}
+  }});
+
+  lines.appendChild(row);
+  refreshRows();
+}}
+
+async function validateMarketOrder() {{
+  if (marketSubmitting) return;
+
+  const rows = [...document.querySelectorAll('.market-row')];
+
+  const items = rows.map(row => ({{
+    type_id: Number(row.dataset.typeId || 0),
+    quantity: parseIntegerInput(row.querySelector('.qty').value),
+    chosen_unit_price: parseISKInput(row.querySelector('.manual-price').value),
+    manual_price_override: row.dataset.manualPriceOverride === '1'
+  }}));
+
+  if (!items.length || items.some(item => !item.type_id || item.quantity <= 0 || item.chosen_unit_price <= 0)) {{
+    setStatus('Complète toutes les lignes avant de valider.', 'err');
+    return;
+  }}
+
+  marketSubmitting = true;
+  updateTotals();
+  setStatus(
+    'Validation en cours : actualisation simultanée des prix Jita, enregistrement Neon et publication Discord…'
+  );
+
+  try {{
+    const response = await fetch(
+      '/market/api/validate?token=' + encodeURIComponent(token),
+      {{
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {{
+          'Content-Type': 'application/json'
+        }},
+        body: JSON.stringify({{
+          adjustment_percent: parseAdjustment(),
+          notes: String(marketNotes.value || '').trim(),
+          items
+        }})
+      }}
+    );
+
+    const data = await response.json().catch(() => ({{}}));
+
+    if (!response.ok || !data.ok) {{
+      throw new Error(
+        data.message
+        || data.error
+        || 'Validation Freeborn Market impossible'
+      );
+    }}
+
+    setStatus(
+      data.reference
+      + ' créé • prix Jita figés à la validation • publication Discord créée.',
+      'ok'
+    );
+
+    validateOrderButton.textContent =
+      '✓ ' + data.reference + ' CRÉÉ';
+
+    validateOrderButton.disabled = true;
+    addLineButton.disabled = true;
+    adjustmentInput.disabled = true;
+    marketNotes.disabled = true;
+
+    document.querySelectorAll(
+      '.market-row input, .market-row button'
+    ).forEach(element => {{
+      element.disabled = true;
+    }});
+
+    if (data.total_isk_display) {{
+      grandTotal.textContent =
+        data.total_isk_display;
+    }}
+  }} catch (error) {{
+    marketSubmitting = false;
+    updateTotals();
+    setStatus(
+      String(error.message || error),
+      'err'
+    );
+  }}
+}}
+
+validateOrderButton.addEventListener(
+  'click',
+  validateMarketOrder
+);
+
+document.getElementById('adjustMinus').addEventListener('click', () => {{
+  const value = parseAdjustment() - 0.25;
+  adjustmentInput.value = value.toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }});
+  updateTotals();
+}});
+
+document.getElementById('adjustPlus').addEventListener('click', () => {{
+  const value = parseAdjustment() + 0.25;
+  adjustmentInput.value = value.toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }});
+  updateTotals();
+}});
+
+adjustmentInput.addEventListener('input', updateTotals);
+adjustmentInput.addEventListener('blur', () => {{
+  const value = parseAdjustment();
+  adjustmentInput.value = value.toLocaleString('fr-FR', {{
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }});
+  updateTotals();
+}});
+
+addLineButton.addEventListener('click', makeRow);
+
+makeRow();
+</script>
+</body>
+</html>"""
+
+
+def create_fit_web_token(guild_id, fit_id):
+
+    return fit_web_serializer.dumps({
+        "guild_id": str(guild_id),
+        "fit_id": int(fit_id),
+    })
+
+
+def read_fit_web_token(token):
+    payload = fit_web_serializer.loads(str(token or ""))
+    return str(payload["guild_id"]), int(payload["fit_id"])
+
+
+def build_fit_web_url(guild_id, fit_id):
+    fit_ref = format_fit_reference(fit_id)
+    token = create_fit_web_token(guild_id, fit_id)
+    return f"{PUBLIC_BASE_URL}/fittings/{fit_ref}?token={token}"
+
+
+def build_fit_components(fit_id, guild_id=None):
+    components = [
+        {
+            "type": 2,
+            "style": 2,
+            "label": "Voir / copier l'EFT",
+            "emoji": {"name": "📋"},
+            "custom_id": f"fit_eft:{int(fit_id)}",
+        },
+    ]
+
+    if guild_id:
+        components.append({
+            "type": 2,
+            "style": 5,
+            "label": "Fiche Web Freeborn",
+            "emoji": {"name": "🌐"},
+            "url": build_fit_web_url(guild_id, fit_id),
+        })
+
+    return [
+        {
+            "type": 1,
+            "components": components,
+        },
+    ]
+
+
+
+def discord_bot_headers():
+    return {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+def discord_get_channel(channel_id):
+    response = requests.get(
+        f"{DISCORD_API}/channels/{str(channel_id)}",
+        headers=discord_bot_headers(),
+        timeout=8,
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            "Discord channel lookup failed "
+            f"({response.status_code}): "
+            f"{response.text[:300]}"
+        )
+
+    return response.json()
+
+
+def build_fit_publication_embed(fit):
+    """
+    Compact corporate Discord publication.
+    The Web sheet remains the technical source of truth.
+    """
+    fit = ensure_fit_ship_type_id(fit)
+
+    notes = str(
+        fit.get("notes")
+        or "Aucune note particulière."
+    )[:1024]
+
+    embed = {
+        "title": (
+            f"{format_fit_reference(fit['fit_id'])} — "
+            f"{fit['ship_name']} — {fit['name']}"
+        )[:256],
+        "description": notes,
+        "color": fit_embed_color(
+            fit.get("status")
+        ),
+        "fields": [
+            {
+                "name": "Usage",
+                "value": str(
+                    fit.get("usage")
+                    or "—"
+                )[:1024],
+                "inline": True,
+            },
+            {
+                "name": "Créé par",
+                "value": (
+                    f"<@{fit['created_by_discord_user_id']}>"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "Statut",
+                "value": fit_status_label(
+                    fit.get("status")
+                ),
+                "inline": False,
+            },
+        ],
+        "footer": {
+            "text":
+                "Freeborn Legacy • Discussion fitting corporation",
+        },
+    }
+
+    render_url = eve_type_render_url(
+        fit.get("ship_type_id"),
+        512,
+    )
+
+    if render_url:
+        embed["thumbnail"] = {
+            "url": render_url
+        }
+
+    return embed
+
+
+def build_fit_publication_components(
+    guild_id,
+    fit_id,
+):
+    return [
+        {
+            "type": 1,
+            "components": [
+                {
+                    "type": 2,
+                    "style": 5,
+                    "label": "Fiche Web Freeborn",
+                    "emoji": {
+                        "name": "🌐"
+                    },
+                    "url": build_fit_web_url(
+                        guild_id,
+                        fit_id,
+                    ),
+                },
+            ],
+        },
+    ]
+
+
+def save_fit_discord_publication(
+    guild_id,
+    fit_id,
+    channel_id,
+    message_id,
+    thread_id=None,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET
+                    discord_post_channel_id = %s,
+                    discord_post_message_id = %s,
+                    discord_thread_id = %s,
+                    discord_post_created_at =
+                        COALESCE(
+                            discord_post_created_at,
+                            NOW()
+                        ),
+                    discord_post_updated_at = NOW(),
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                AND fit_id = %s;
+                """,
+                (
+                    str(channel_id),
+                    str(message_id),
+                    (
+                        str(thread_id)
+                        if thread_id
+                        else None
+                    ),
+                    str(guild_id),
+                    int(fit_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def ensure_fit_discord_publication(
+    fit,
+):
+    """
+    Create the ONE corporate Discord publication for this fit.
+
+    Returns a diagnostic dict and NEVER creates a duplicate when the
+    database already contains a linked message/thread.
+    """
+    if not fit:
+        return {
+            "ok": False,
+            "reason": "fit_missing",
+        }
+
+    if (
+        fit.get("discord_post_message_id")
+        or
+        fit.get("discord_thread_id")
+    ):
+        return {
+            "ok": True,
+            "created": False,
+            "reason": "already_linked",
+            "channel_id":
+                fit.get("discord_post_channel_id"),
+            "message_id":
+                fit.get("discord_post_message_id"),
+            "thread_id":
+                fit.get("discord_thread_id"),
+        }
+
+    target_channel_id = str(
+        DISCORD_FITTINGS_CHANNEL_ID
+        or ""
+    ).strip()
+
+    if not target_channel_id:
+        print(
+            "Freeborn Fittings publication skipped: "
+            "DISCORD_FITTINGS_CHANNEL_ID is not configured."
+        )
+
+        return {
+            "ok": False,
+            "created": False,
+            "reason": "channel_not_configured",
+        }
+
+    channel = discord_get_channel(
+        target_channel_id
+    )
+
+    channel_type = int(
+        channel.get("type", -1)
+    )
+
+    ref = format_fit_reference(
+        fit["fit_id"]
+    )
+
+    thread_name = (
+        f"{ref} — {fit['ship_name']} — "
+        f"{fit['name']}"
+    )[:100]
+
+    message_payload = {
+        "content": (
+            f"🛡️ **{ref} — "
+            f"{fit['ship_name']} — {fit['name']}**"
+        ),
+        "embeds": [
+            build_fit_publication_embed(
+                fit
+            )
+        ],
+        "components":
+            build_fit_publication_components(
+                fit["guild_id"],
+                fit["fit_id"],
+            ),
+        "allowed_mentions": {
+            "parse": []
+        },
+    }
+
+    # Discord forum / media channel.
+    if channel_type in {15, 16}:
+        response = requests.post(
+            (
+                f"{DISCORD_API}/channels/"
+                f"{target_channel_id}/threads"
+            ),
+            headers=discord_bot_headers(),
+            json={
+                "name": thread_name,
+                "auto_archive_duration":
+                    10080,
+                "message":
+                    message_payload,
+            },
+            timeout=12,
+        )
+
+        if response.status_code not in {
+            200,
+            201,
+        }:
+            raise RuntimeError(
+                "Discord forum publication failed "
+                f"({response.status_code}): "
+                f"{response.text[:500]}"
+            )
+
+        created = response.json()
+
+        thread_id = str(
+            created["id"]
+        )
+
+        starter_message = (
+            created.get("message")
+            or {}
+        )
+
+        # Forum starter messages commonly map to the thread/post.
+        message_id = str(
+            starter_message.get("id")
+            or
+            thread_id
+        )
+
+        save_fit_discord_publication(
+            fit["guild_id"],
+            fit["fit_id"],
+            thread_id,
+            message_id,
+            thread_id,
+        )
+
+        return {
+            "ok": True,
+            "created": True,
+            "kind": "forum_post",
+            "channel_id": thread_id,
+            "message_id": message_id,
+            "thread_id": thread_id,
+        }
+
+    # Standard guild text / announcement channel.
+    if channel_type not in {
+        0,
+        5,
+    }:
+        raise RuntimeError(
+            "The configured Fittings channel "
+            f"has unsupported Discord type {channel_type}."
+        )
+
+    response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{target_channel_id}/messages"
+        ),
+        headers=discord_bot_headers(),
+        json=message_payload,
+        timeout=12,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Discord fitting message failed "
+            f"({response.status_code}): "
+            f"{response.text[:500]}"
+        )
+
+    message = response.json()
+    message_id = str(
+        message["id"]
+    )
+
+    # Create a discussion thread attached to that ONE publication.
+    thread_response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{target_channel_id}/messages/"
+            f"{message_id}/threads"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "name": thread_name,
+            "auto_archive_duration":
+                10080,
+        },
+        timeout=12,
+    )
+
+    thread_id = None
+
+    if thread_response.status_code in {
+        200,
+        201,
+    }:
+        thread_id = str(
+            thread_response.json()["id"]
+        )
+    else:
+        # Publication itself succeeded. We keep it and log the thread issue.
+        print(
+            "Freeborn Fittings thread creation failed:",
+            thread_response.status_code,
+            thread_response.text[:500],
+        )
+
+    save_fit_discord_publication(
+        fit["guild_id"],
+        fit["fit_id"],
+        target_channel_id,
+        message_id,
+        thread_id,
+    )
+
+    return {
+        "ok": True,
+        "created": True,
+        "kind": "text_message",
+        "channel_id":
+            target_channel_id,
+        "message_id":
+            message_id,
+        "thread_id":
+            thread_id,
+    }
+
+
+def build_fit_list_message(guild_id):
+    fits = list_fits(guild_id, limit=50)
+
+    if not fits:
+        return (
+            "🛡️ **FREEBORN FITTINGS**\n\n"
+            "Aucun fitting n'est encore enregistré.\n"
+            "Utilise **/fit-creer** pour proposer le premier fit."
+        )
+
+    lines = [
+        "🛡️ **FREEBORN FITTINGS — Bibliothèque corporation**",
+        "",
+        f"Fittings enregistrés : **{len(fits)}**",
+        "",
+    ]
+
+    for fit in fits:
+        lines.append(
+            f"**{format_fit_reference(fit['fit_id'])}** • **{fit['ship_name']}** "
+            f"— {fit['name']} • `{fit['usage']}` • "
+            f"{fit_status_label(fit['status'])}"
+        )
+
+    lines.extend([
+        "",
+        "Utilise **/fit-afficher ref:FREE-0001** pour ouvrir une fiche.",
+    ])
+
+    return "\n".join(lines)[:1900]
+
+
+def create_fit_delete_token(fit_id, requester_user_id):
+    payload = f"{int(fit_id)}:{requester_user_id}"
+    return fit_delete_signer.sign(payload.encode()).decode()
+
+
+def read_fit_delete_token(token):
+    payload = fit_delete_signer.unsign(token, max_age=300).decode()
+    fit_id, requester_user_id = payload.split(":", 1)
+    return int(fit_id), requester_user_id
+
+
+def create_fit_status_token(fit_id, requester_user_id, new_status):
+    """
+    Signed 5-minute confirmation token for CEO-only fitting validation.
+    The requested status is embedded in the token so the confirmation
+    cannot be reused for another action.
+    """
+    clean_status = str(new_status or "").lower()
+    if clean_status not in {"approved", "rejected"}:
+        raise ValueError("Statut de validation invalide.")
+
+    payload = f"{int(fit_id)}:{requester_user_id}:{clean_status}"
+    return fit_delete_signer.sign(payload.encode()).decode()
+
+
+def read_fit_status_token(token):
+    payload = fit_delete_signer.unsign(token, max_age=300).decode()
+    fit_id, requester_user_id, new_status = payload.split(":", 2)
+
+    if new_status not in {"approved", "rejected"}:
+        raise ValueError("Statut de validation invalide.")
+
+    return int(fit_id), requester_user_id, new_status
+
+
+def can_delete_fit(data, fit):
+    try:
+        actor_user_id = str(data["member"]["user"]["id"])
+    except (KeyError, TypeError):
+        return False
+
+    # Permanent deletion is a CEO-only action, including for the original creator.
+    return interaction_has_any_role(data, FITTING_MANAGER_ROLE_IDS)
+
+
+
+def can_edit_fit(data, fit):
+    """
+    Central 4T-B edit policy.
+
+    CEO:
+      - may edit any fit.
+
+    Fleet Commander / Direction / High Council:
+      - must still hold an editor role;
+      - may edit only a fit they originally created;
+      - fit must still be PROPOSED.
+    """
+    if not fit:
+        return False
+
+    try:
+        actor_user_id = str(
+            data["member"]["user"]["id"]
+        )
+    except (KeyError, TypeError):
+        return False
+
+    # CEO override.
+    if interaction_has_any_role(
+        data,
+        FITTING_MANAGER_ROLE_IDS,
+    ):
+        return True
+
+    # Other authorized proposers must still hold the relevant role.
+    if not interaction_has_any_role(
+        data,
+        FITTING_EDITOR_ROLE_IDS,
+    ):
+        return False
+
+    if str(
+        fit.get(
+            "created_by_discord_user_id"
+        )
+        or ""
+    ) != actor_user_id:
+        return False
+
+    return (
+        str(
+            fit.get("status")
+            or ""
+        ).lower()
+        == "proposed"
+    )
+
+
+def update_fit_existing(
+    guild_id,
+    fit_id,
+    fit_name,
+    usage,
+    eft_text,
+    notes=None,
+):
+    """
+    Update ONE existing fitting record.
+
+    The fit_id / FREE-xxxx is preserved.
+    Technical snapshot is cleared because EFT/ship/resources may have changed.
+    Any edited non-proposed fit is reopened as PROPOSED so corporate approval
+    always applies to the latest revision.
+    """
+    parsed = parse_eft_header(
+        eft_text
+    )
+
+    clean_name = (
+        str(fit_name or "").strip()
+        or parsed["eft_fit_name"]
+    )
+    clean_usage = str(
+        usage or ""
+    ).strip()
+    clean_notes = (
+        str(notes or "").strip()
+        or None
+    )
+
+    if not clean_name:
+        raise ValueError(
+            "Le nom du fit est obligatoire."
+        )
+
+    if not clean_usage:
+        raise ValueError(
+            "L'usage du fit est obligatoire."
+        )
+
+    ship_type_id = (
+        resolve_eve_inventory_type_id(
+            parsed["ship_name"]
+        )
+    )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET
+                    name = %s,
+                    ship_name = %s,
+                    ship_type_id = %s,
+                    usage = %s,
+                    eft_text = %s,
+                    notes = %s,
+                    status = 'proposed',
+                    updated_at = NOW(),
+                    technical_snapshot = NULL,
+                    technical_snapshot_version = NULL,
+                    technical_snapshot_updated_at = NULL
+                WHERE guild_id = %s
+                AND fit_id = %s
+                RETURNING
+                    fit_id,
+                    name,
+                    ship_name,
+                    ship_type_id,
+                    usage,
+                    notes,
+                    status,
+                    created_by_discord_user_id;
+                """,
+                (
+                    clean_name,
+                    parsed["ship_name"],
+                    ship_type_id,
+                    clean_usage,
+                    parsed["normalized_eft"],
+                    clean_notes,
+                    str(guild_id),
+                    int(fit_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    if not row:
+        return None
+
+    return {
+        "fit_id": int(row[0]),
+        "name": row[1],
+        "ship_name": row[2],
+        "ship_type_id": row[3],
+        "usage": row[4],
+        "notes": row[5],
+        "status": row[6],
+        "created_by_discord_user_id": row[7],
+    }
+
+
+def build_fit_edit_modal(fit):
+    """
+    Discord modal pre-filled with the current values of ONE existing fit.
+    """
+    fit_id = int(
+        fit["fit_id"]
+    )
+
+    return {
+        "type": 9,
+        "data": {
+            "custom_id":
+                f"freeborn_fit_edit_v1:{fit_id}",
+            "title":
+                f"Modifier {format_fit_reference(fit_id)}",
+            "components": [
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "fit_name",
+                            "label": "Nom du fit",
+                            "style": 1,
+                            "min_length": 1,
+                            "max_length": 80,
+                            "required": True,
+                            "value": str(
+                                fit.get("name")
+                                or ""
+                            )[:80],
+                        }
+                    ],
+                },
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "fit_usage",
+                            "label": "Usage",
+                            "style": 1,
+                            "min_length": 1,
+                            "max_length": 40,
+                            "required": True,
+                            "value": str(
+                                fit.get("usage")
+                                or ""
+                            )[:40],
+                        }
+                    ],
+                },
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "fit_eft",
+                            "label": "Copier-coller EFT",
+                            "style": 2,
+                            "min_length": 3,
+                            "max_length": 4000,
+                            "required": True,
+                            "value": str(
+                                fit.get("eft_text")
+                                or ""
+                            )[:4000],
+                        }
+                    ],
+                },
+                {
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 4,
+                            "custom_id": "fit_notes",
+                            "label":
+                                "Notes du créateur (facultatif)",
+                            "style": 2,
+                            "max_length": 1000,
+                            "required": False,
+                            "value": str(
+                                fit.get("notes")
+                                or ""
+                            )[:1000],
+                        }
+                    ],
+                },
+            ],
+        },
+    }
+
+
+def set_fit_status(guild_id, fit_id, status):
+    allowed_statuses = {"proposed", "approved", "rejected", "archived"}
+    clean_status = str(status or "").lower()
+
+    if clean_status not in allowed_statuses:
+        raise ValueError("Statut de fitting invalide.")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET status = %s,
+                    updated_at = NOW()
+                WHERE guild_id = %s
+                AND fit_id = %s
+                RETURNING fit_id, name, ship_name, status;
+                """,
+                (clean_status, str(guild_id), int(fit_id)),
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    if not row:
+        return None
+
+    return {
+        "fit_id": int(row[0]),
+        "name": row[1],
+        "ship_name": row[2],
+        "status": row[3],
+    }
+
+
+def find_fit_forum_thread_by_reference(fit):
+    """
+    Recovery path for an old/missing DB linkage.
+
+    Search the configured Fittings forum for a thread/post whose name begins
+    with the unique FREE-xxxx reference. Active threads are checked first,
+    then archived public threads.
+
+    Returns thread_id or None.
+    """
+    if not fit or not DISCORD_FITTINGS_CHANNEL_ID:
+        return None
+
+    ref = format_fit_reference(
+        fit.get("fit_id")
+    )
+
+    parent_id = str(
+        DISCORD_FITTINGS_CHANNEL_ID
+    )
+
+    headers = discord_bot_headers()
+
+    # Active threads in the guild.
+    try:
+        response = requests.get(
+            (
+                f"{DISCORD_API}/guilds/"
+                f"{fit['guild_id']}/threads/active"
+            ),
+            headers=headers,
+            timeout=12,
+        )
+
+        if response.status_code == 200:
+            payload = response.json() or {}
+
+            for thread in payload.get(
+                "threads",
+                [],
+            ) or []:
+                if (
+                    str(thread.get("parent_id") or "")
+                    == parent_id
+                    and
+                    str(thread.get("name") or "").startswith(
+                        ref
+                    )
+                ):
+                    return str(
+                        thread["id"]
+                    )
+
+        else:
+            print(
+                "Freeborn fit active-thread recovery lookup failed:",
+                response.status_code,
+                response.text[:500],
+            )
+
+    except Exception as error:
+        print(
+            "Freeborn fit active-thread recovery exception:",
+            repr(error),
+        )
+
+    # Archived public threads in the forum.
+    try:
+        response = requests.get(
+            (
+                f"{DISCORD_API}/channels/"
+                f"{parent_id}/threads/archived/public"
+            ),
+            headers=headers,
+            params={"limit": 100},
+            timeout=12,
+        )
+
+        if response.status_code == 200:
+            payload = response.json() or {}
+
+            for thread in payload.get(
+                "threads",
+                [],
+            ) or []:
+                if str(
+                    thread.get("name") or ""
+                ).startswith(ref):
+                    return str(
+                        thread["id"]
+                    )
+
+        else:
+            print(
+                "Freeborn fit archived-thread recovery lookup failed:",
+                response.status_code,
+                response.text[:500],
+            )
+
+    except Exception as error:
+        print(
+            "Freeborn fit archived-thread recovery exception:",
+            repr(error),
+        )
+
+    return None
+
+
+def delete_fit_discord_publication(fit):
+    """
+    Delete the Discord publication linked to one Freeborn fit.
+
+    For a Forum/Media post, the post is a Discord thread channel:
+        DELETE /channels/{thread_id}
+
+    The operation is fail-closed:
+    if Discord deletion fails, /fit-supprimer must NOT delete the Neon row.
+    """
+    if not fit:
+        return {
+            "ok": False,
+            "reason": "fit_missing",
+        }
+
+    publication_channel_id = str(
+        fit.get("discord_post_channel_id")
+        or ""
+    ).strip()
+
+    publication_message_id = str(
+        fit.get("discord_post_message_id")
+        or ""
+    ).strip()
+
+    thread_id = str(
+        fit.get("discord_thread_id")
+        or ""
+    ).strip()
+
+    print(
+        "Freeborn fit delete linkage:",
+        format_fit_reference(
+            fit.get("fit_id")
+        ),
+        "configured_forum=",
+        DISCORD_FITTINGS_CHANNEL_ID,
+        "stored_channel=",
+        publication_channel_id or None,
+        "stored_message=",
+        publication_message_id or None,
+        "stored_thread=",
+        thread_id or None,
+    )
+
+    # Recovery for an old/missing linkage.
+    if not thread_id:
+        recovered_thread_id = (
+            find_fit_forum_thread_by_reference(
+                fit
+            )
+        )
+
+        if recovered_thread_id:
+            thread_id = str(
+                recovered_thread_id
+            )
+
+            print(
+                "Freeborn fit delete recovered forum thread:",
+                format_fit_reference(
+                    fit.get("fit_id")
+                ),
+                thread_id,
+            )
+
+    # Forum posts created by Freeborn store channel == thread.
+    # If a recovered thread exists, it also takes this route.
+    forum_thread_id = None
+
+    if thread_id:
+        if (
+            not publication_channel_id
+            or
+            publication_channel_id == thread_id
+            or
+            str(DISCORD_FITTINGS_CHANNEL_ID or "")
+            != publication_channel_id
+        ):
+            forum_thread_id = thread_id
+
+    headers = discord_bot_headers()
+
+    if forum_thread_id:
+        response = requests.delete(
+            (
+                f"{DISCORD_API}/channels/"
+                f"{forum_thread_id}"
+            ),
+            headers=headers,
+            timeout=12,
+        )
+
+        print(
+            "Freeborn forum post DELETE:",
+            format_fit_reference(
+                fit.get("fit_id")
+            ),
+            forum_thread_id,
+            response.status_code,
+            response.text[:300],
+        )
+
+        if response.status_code in {
+            200,
+            204,
+            404,
+        }:
+            return {
+                "ok": True,
+                "deleted": True,
+                "kind": "forum_post",
+                "thread_id": forum_thread_id,
+            }
+
+        return {
+            "ok": False,
+            "reason": "forum_post_delete_failed",
+            "status_code": response.status_code,
+            "body": response.text[:500],
+        }
+
+    # Standard text/announcement publication fallback.
+    if thread_id:
+        response = requests.delete(
+            f"{DISCORD_API}/channels/{thread_id}",
+            headers=headers,
+            timeout=12,
+        )
+
+        print(
+            "Freeborn discussion thread DELETE:",
+            thread_id,
+            response.status_code,
+            response.text[:300],
+        )
+
+        if response.status_code not in {
+            200,
+            204,
+            404,
+        }:
+            return {
+                "ok": False,
+                "reason": "thread_delete_failed",
+                "status_code": response.status_code,
+                "body": response.text[:500],
+            }
+
+    if (
+        publication_channel_id
+        and
+        publication_message_id
+    ):
+        response = requests.delete(
+            (
+                f"{DISCORD_API}/channels/"
+                f"{publication_channel_id}/messages/"
+                f"{publication_message_id}"
+            ),
+            headers=headers,
+            timeout=12,
+        )
+
+        print(
+            "Freeborn publication message DELETE:",
+            publication_channel_id,
+            publication_message_id,
+            response.status_code,
+            response.text[:300],
+        )
+
+        if response.status_code not in {
+            200,
+            204,
+            404,
+        }:
+            return {
+                "ok": False,
+                "reason": "message_delete_failed",
+                "status_code": response.status_code,
+                "body": response.text[:500],
+            }
+
+        return {
+            "ok": True,
+            "deleted": True,
+            "kind": "text_publication",
+        }
+
+    # If nothing is linked and recovery found nothing, do not block deleting
+    # legacy fits that genuinely never had a Discord publication.
+    return {
+        "ok": True,
+        "deleted": False,
+        "reason": "no_publication_found",
+    }
+
+
+def delete_fit(guild_id, fit_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM fits
+                WHERE guild_id = %s
+                AND fit_id = %s
+                RETURNING fit_id, name, ship_name;
+                """,
+                (str(guild_id), int(fit_id)),
+            )
+            deleted = cur.fetchone()
+        conn.commit()
+
+    if not deleted:
+        return None
+
+    return {
+        "fit_id": int(deleted[0]),
+        "name": deleted[1],
+        "ship_name": deleted[2],
+    }
+
+
+def modal_values(data):
+    """Flatten Discord modal action rows into {custom_id: value}."""
+
+    values = {}
+
+    for row in (data.get("data") or {}).get("components", []):
+        for component in row.get("components", []):
+            custom_id = component.get("custom_id")
+
+            if custom_id:
+                values[str(custom_id)] = component.get("value", "")
+
+    return values
+
+
+def handle_srp_modal_submit(
+    data
+):
+    guild_id = str(
+        data.get(
+            "guild_id"
+        )
+        or ""
+    )
+
+    actor_user_id = str(
+        data[
+            "member"
+        ][
+            "user"
+        ][
+            "id"
+        ]
+    )
+
+    ship_fit = freeborn_op_modal_value(
+        data,
+        "srp_ship_fit",
+    )
+
+    zkill_url = freeborn_op_modal_value(
+        data,
+        "srp_zkill",
+    )
+
+    operation_fc = (
+        freeborn_op_modal_value(
+            data,
+            "srp_operation_fc",
+        )
+        or None
+    )
+
+    circumstances = freeborn_op_modal_value(
+        data,
+        "srp_circumstances",
+    )
+
+    extra_info = (
+        freeborn_op_modal_value(
+            data,
+            "srp_extra",
+        )
+        or None
+    )
+
+    if not (
+        zkill_url.startswith(
+            "https://zkillboard.com/"
+        )
+        or zkill_url.startswith(
+            "http://zkillboard.com/"
+        )
+    ):
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "❌ **Lien zKillboard invalide.**\n"
+                        "Utilise un lien `https://zkillboard.com/...`."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    pilot_name = freeborn_srp_get_main_name(
+        actor_user_id
+    )
+
+    srp_id = None
+
+    try:
+        srp_id = freeborn_srp_insert(
+            guild_id,
+            actor_user_id,
+            pilot_name,
+            ship_fit,
+            zkill_url,
+            operation_fc,
+            circumstances,
+            extra_info,
+        )
+
+        freeborn_srp_publish(
+            srp_id
+        )
+
+    except Exception as error:
+        print(
+            "Freeborn SRP creation failed:",
+            repr(
+                error
+            ),
+        )
+
+        if srp_id is not None:
+            try:
+                freeborn_srp_delete(
+                    srp_id
+                )
+            except Exception as rollback_error:
+                print(
+                    "Freeborn SRP rollback failed:",
+                    repr(
+                        rollback_error
+                    ),
+                )
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "⚠️ **La création de la demande SRP a échoué.**\n"
+                        "Aucune demande incomplète ne doit être conservée."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    return jsonify({
+        "type":
+            4,
+        "data": {
+            "content":
+                (
+                    f"✅ **{freeborn_srp_reference(srp_id)} créée.**\n"
+                    "La demande a été publiée automatiquement dans "
+                    f"<#{DISCORD_SRP_FORUM_ID}>."
+                ),
+            "flags":
+                64,
+        },
+    })
+
+
+def handle_op_corp_modal_submit(
+    data
+):
+    custom_id = str(
+        (
+            data.get(
+                "data"
+            )
+            or {}
+        ).get(
+            "custom_id"
+        )
+        or ""
+    )
+
+    guild_id = str(
+        data.get(
+            "guild_id"
+        )
+        or ""
+    )
+
+    actor_user_id = str(
+        data[
+            "member"
+        ][
+            "user"
+        ][
+            "id"
+        ]
+    )
+
+    title = freeborn_op_modal_value(
+        data,
+        "op_title",
+    )
+
+    date_text = freeborn_op_modal_value(
+        data,
+        "op_date",
+    )
+
+    start_text = freeborn_op_modal_value(
+        data,
+        "op_start",
+    )
+
+    end_text = freeborn_op_modal_value(
+        data,
+        "op_end",
+    )
+
+    details_text = freeborn_op_modal_value(
+        data,
+        "op_details",
+    )
+
+    try:
+        (
+            operation_date,
+            start_time,
+            end_time,
+        ) = freeborn_op_parse_date_time(
+            date_text,
+            start_text,
+            end_text,
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "❌ **Date ou horaires invalides.**\n\n"
+                        "Date : `JJ/MM/AAAA`\n"
+                        "Début : `HH:MM`\n"
+                        "Fin : `HH:MM`"
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    (
+        fleet_commander,
+        doctrine,
+        notes,
+    ) = freeborn_op_parse_details(
+        details_text
+    )
+
+    create_match = re.fullmatch(
+        r"freeborn_op_create:(mining|pve|pvp|other)",
+        custom_id,
+    )
+
+    if create_match:
+        operation_type = str(
+            create_match.group(
+                1
+            )
+        )
+
+        operation_id = None
+
+        try:
+            operation_id = freeborn_op_insert(
+                guild_id,
+                title,
+                operation_type,
+                operation_date,
+                start_time,
+                end_time,
+                fleet_commander,
+                doctrine,
+                notes,
+                actor_user_id,
+            )
+
+            freeborn_op_publish(
+                operation_id
+            )
+
+        except Exception as error:
+            print(
+                "Freeborn OP Corp creation failed:",
+                repr(
+                    error
+                ),
+            )
+
+            if operation_id is not None:
+                try:
+                    freeborn_op_delete(
+                        operation_id
+                    )
+                except Exception as rollback_error:
+                    print(
+                        "Freeborn OP Corp rollback failed:",
+                        repr(
+                            rollback_error
+                        ),
+                    )
+
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⚠️ **La création de l'OP Corp a échoué.**\n"
+                            "Aucune OP incomplète ne doit être conservée."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        f"✅ **{freeborn_op_reference(operation_id)} créée.**\n"
+                        "Le post a été publié automatiquement dans "
+                        f"<#{DISCORD_OP_CORP_FORUM_ID}>."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    edit_match = re.fullmatch(
+        r"freeborn_op_edit:(\d+)",
+        custom_id,
+    )
+
+    if edit_match:
+        operation_id = int(
+            edit_match.group(
+                1
+            )
+        )
+
+        operation = freeborn_op_get(
+            operation_id
+        )
+
+        if not operation:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette OP Corp n'existe plus.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_roles = interaction_member_role_ids(
+            data
+        )
+
+        if not (
+            actor_user_id
+            == str(
+                operation[
+                    "created_by_discord_user_id"
+                ]
+            )
+            or bool(
+                actor_roles
+                & OP_CORP_MANAGER_ROLE_IDS
+            )
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "⛔ Tu n'es pas autorisé à modifier cette OP Corp.",
+                    "flags":
+                        64,
+                },
+            })
+
+        if not freeborn_op_update(
+            operation_id,
+            title,
+            operation_date,
+            start_time,
+            end_time,
+            fleet_commander,
+            doctrine,
+            notes,
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette OP Corp n'est plus modifiable.",
+                    "flags":
+                        64,
+                },
+            })
+
+        freeborn_op_refresh_post(
+            operation_id
+        )
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        f"✏️ **{freeborn_op_reference(operation_id)} "
+                        "mise à jour.**"
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    return jsonify({
+        "type":
+            4,
+        "data": {
+            "content":
+                "❌ Formulaire OP Corp inconnu.",
+            "flags":
+                64,
+        },
+    })
+
+
+def handle_fit_modal_submit(data):
+    diplomacy_denial = ensure_fitting_channel_allowed(
+        data
+    )
+
+    if diplomacy_denial is not None:
+        return diplomacy_denial
+
+    custom_id = str(
+        (data.get("data") or {}).get(
+            "custom_id"
+        )
+        or ""
+    )
+
+    is_create = (
+        custom_id
+        == "freeborn_fit_create_v1"
+    )
+    is_edit = custom_id.startswith(
+        "freeborn_fit_edit_v1:"
+    )
+
+    if not (
+        is_create
+        or is_edit
+    ):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "❌ Formulaire Freeborn inconnu.",
+                "flags": 64,
+            },
+        })
+
+    try:
+        discord_user_id = str(
+            data["member"]["user"]["id"]
+        )
+        guild_id = str(
+            data["guild_id"]
+        )
+    except (KeyError, TypeError):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "❌ Impossible d'identifier le membre ou le serveur.",
+                "flags": 64,
+            },
+        })
+
+    if guild_id != str(
+        DISCORD_GUILD_ID
+    ):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "❌ Cette action est réservée à Freeborn Legacy.",
+                "flags": 64,
+            },
+        })
+
+    values = modal_values(
+        data
+    )
+
+    # --------------------------------------------------------
+    # CREATE
+    # --------------------------------------------------------
+    if is_create:
+        if not interaction_has_any_role(
+            data,
+            FITTING_CREATOR_ROLE_IDS,
+        ):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Accès refusé**\n\n"
+                        "La proposition de fittings est réservée aux "
+                        "Fleet Commanders, à la Direction, au Haut Conseil "
+                        "et au CEO."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        try:
+            saved = save_fit_phase1(
+                guild_id,
+                discord_user_id,
+                values.get("fit_name"),
+                values.get("fit_usage"),
+                values.get("fit_eft"),
+                values.get("fit_notes"),
+            )
+        except ValueError as error:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        f"❌ **Fit non enregistré**\n\n{error}",
+                    "flags": 64,
+                },
+            })
+        except Exception as error:
+            print(
+                "Freeborn Fittings save failed:",
+                repr(error),
+            )
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⚠️ **Erreur d'enregistrement**\n\n"
+                        "Le fit n'a pas pu être enregistré dans la base."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        fit = get_fit(
+            guild_id,
+            saved["fit_id"],
+        )
+
+        publication = None
+
+        try:
+            publication = (
+                ensure_fit_discord_publication(
+                    fit
+                )
+            )
+        except Exception as error:
+            # The fit remains safely stored even if Discord publication fails.
+            print(
+                "Freeborn Fittings publication failed:",
+                repr(error),
+            )
+
+            publication = {
+                "ok": False,
+                "reason": "discord_error",
+            }
+
+        publication_note = ""
+
+        if publication.get("ok"):
+            if publication.get("created"):
+                publication_note = (
+                    "\n📣 Le post de discussion corporation "
+                    "a été créé automatiquement."
+                )
+        elif (
+            publication.get("reason")
+            == "channel_not_configured"
+        ):
+            publication_note = (
+                "\n⚠️ Publication Discord en attente : "
+                "le salon Fittings n'est pas encore configuré."
+            )
+        else:
+            publication_note = (
+                "\n⚠️ Le fit est enregistré, mais la publication "
+                "dans le salon Fittings a échoué. "
+                "Consulte les logs Render."
+            )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"✅ **{format_fit_reference(saved['fit_id'])} "
+                    "enregistré dans Freeborn.**\n"
+                    "La fiche ci-dessous peut maintenant être partagée "
+                    "avec la corporation."
+                    f"{publication_note}"
+                ),
+                "embeds": [
+                    build_fit_embed(fit)
+                ],
+                "components":
+                    build_fit_components(
+                        saved["fit_id"],
+                        guild_id,
+                    ),
+                "flags": 64,
+            },
+        })
+
+    # --------------------------------------------------------
+    # EDIT EXISTING — SAME FREE-xxxx
+    # --------------------------------------------------------
+    try:
+        fit_id = int(
+            custom_id.split(
+                ":",
+                1,
+            )[1]
+        )
+    except (
+        ValueError,
+        IndexError,
+    ):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "❌ Référence de fitting invalide.",
+                "flags": 64,
+            },
+        })
+
+    fit = get_fit(
+        guild_id,
+        fit_id,
+    )
+
+    if not fit:
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"❌ {format_fit_reference(fit_id)} "
+                    "n'existe plus dans Freeborn."
+                ),
+                "flags": 64,
+            },
+        })
+
+    # Re-check permission on submit, not only when the modal was opened.
+    if not can_edit_fit(
+        data,
+        fit,
+    ):
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    "⛔ **Modification refusée**\n\n"
+                    "Un Fleet Commander, Directeur ou membre du Haut Conseil "
+                    "peut modifier uniquement sa propre proposition tant "
+                    "qu'elle est au statut PROPOSÉ. Le CEO peut modifier "
+                    "n'importe quel fitting."
+                ),
+                "flags": 64,
+            },
+        })
+
+    previous_status = str(
+        fit.get("status")
+        or "proposed"
+    ).lower()
+
+    try:
+        updated = update_fit_existing(
+            guild_id,
+            fit_id,
+            values.get("fit_name"),
+            values.get("fit_usage"),
+            values.get("fit_eft"),
+            values.get("fit_notes"),
+        )
+    except ValueError as error:
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    f"❌ **Fit non modifié**\n\n{error}",
+                "flags": 64,
+            },
+        })
+    except Exception as error:
+        print(
+            "Freeborn Fittings update failed:",
+            repr(error),
+        )
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    "⚠️ **Erreur de modification**\n\n"
+                    "Le fitting existant n'a pas pu être mis à jour."
+                ),
+                "flags": 64,
+            },
+        })
+
+    if not updated:
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "❌ Le fitting n'existe plus dans Freeborn.",
+                "flags": 64,
+            },
+        })
+
+    refreshed_fit = get_fit(
+        guild_id,
+        fit_id,
+    )
+
+    reopened_note = (
+        "\n\nℹ️ La modification a replacé le fit au statut **PROPOSÉ** "
+        "afin que l'approbation porte toujours sur la dernière version."
+        if previous_status
+        != "proposed"
+        else ""
+    )
+
+    return jsonify({
+        "type": 4,
+        "data": {
+            "content": (
+                f"✏️ **{format_fit_reference(fit_id)} mis à jour.**\n\n"
+                "Le même identifiant Freeborn est conservé : "
+                "aucune nouvelle fiche n'a été créée."
+                f"{reopened_note}"
+            ),
+            "embeds": [
+                build_fit_embed(
+                    refreshed_fit
+                )
+            ],
+            "components":
+                build_fit_components(
+                    fit_id,
+                    guild_id,
+                ),
+            "flags": 64,
+        },
+    })
+
+
+# ============================================================
 # DISCORD SIGNATURE
 # ============================================================
 
@@ -1628,6 +10427,286 @@ def verify_discord_signature(
 # STAFF ACCESS
 # ============================================================
 
+def interaction_has_any_role(
+    data,
+    allowed_role_ids,
+):
+
+    member_roles = interaction_member_role_ids(
+        data
+    )
+
+    return bool(
+        member_roles
+        &
+        set(
+            str(role_id)
+            for role_id
+            in allowed_role_ids
+            if role_id
+        )
+    )
+
+
+# ============================================================
+# FREEBORN FITTINGS — DIPLOMACY CATEGORY SECURITY
+# ============================================================
+
+_fit_channel_parent_cache = {}
+
+
+def discord_channel_parent_id(channel_id):
+    """
+    Resolve one Discord channel parent_id with a short in-memory cache.
+
+    This lets Freeborn detect:
+      text channel -> category
+      thread/forum post -> parent channel -> category
+
+    The REST lookup is only needed when Discord's interaction payload
+    does not already include enough channel hierarchy information.
+    """
+
+    channel_id = str(channel_id or "").strip()
+
+    if not channel_id:
+        return None
+
+    now = time.time()
+    cached = _fit_channel_parent_cache.get(channel_id)
+
+    if cached:
+        cached_at, parent_id = cached
+
+        if (now - cached_at) < 300:
+            return parent_id
+
+    try:
+        response = requests.get(
+            f"{DISCORD_API}/channels/{channel_id}",
+            headers={
+                "Authorization":
+                    f"Bot {DISCORD_BOT_TOKEN}",
+            },
+            timeout=5,
+        )
+
+        if response.status_code != 200:
+            print(
+                "Freeborn Fittings channel lookup failed:",
+                channel_id,
+                response.status_code,
+                response.text[:250],
+            )
+            return None
+
+        payload = response.json()
+
+        parent_id = (
+            str(payload.get("parent_id"))
+            if payload.get("parent_id")
+            else None
+        )
+
+        _fit_channel_parent_cache[channel_id] = (
+            now,
+            parent_id,
+        )
+
+        return parent_id
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings channel lookup exception:",
+            channel_id,
+            repr(error),
+        )
+        return None
+
+
+def fitting_interaction_channel_scope(data):
+    """
+    Return:
+      {
+        "blocked": bool,
+        "resolved": bool,
+        "channel_id": str | None,
+        "ancestor_ids": set[str],
+      }
+
+    Security rule:
+    Every /fit-* command, fitting modal and fitting component is blocked
+    when its channel belongs to the Diplomatie category.
+
+    Resolution walks up to 4 parent levels so threads/forum posts are also
+    protected when their parent channel is inside Diplomatie.
+    """
+
+    diplomacy_category_id = str(
+        DISCORD_DIPLOMACY_CATEGORY_ID
+        or ""
+    ).strip()
+
+    channel_id = str(
+        data.get("channel_id")
+        or ""
+    ).strip()
+
+    if not channel_id:
+        return {
+            "blocked": False,
+            "resolved": False,
+            "channel_id": None,
+            "ancestor_ids": set(),
+        }
+
+    ancestor_ids = {channel_id}
+
+    if (
+        diplomacy_category_id
+        and
+        channel_id == diplomacy_category_id
+    ):
+        return {
+            "blocked": True,
+            "resolved": True,
+            "channel_id": channel_id,
+            "ancestor_ids": ancestor_ids,
+        }
+
+    # Discord interactions may include a partial channel object.
+    channel_payload = data.get("channel") or {}
+
+    current_id = channel_id
+    first_parent = None
+
+    if (
+        str(channel_payload.get("id") or "")
+        == channel_id
+        and
+        channel_payload.get("parent_id")
+    ):
+        first_parent = str(
+            channel_payload.get("parent_id")
+        )
+
+    resolved_any_parent = bool(first_parent)
+
+    for depth in range(4):
+
+        parent_id = (
+            first_parent
+            if depth == 0 and first_parent
+            else discord_channel_parent_id(
+                current_id
+            )
+        )
+
+        if not parent_id:
+            break
+
+        resolved_any_parent = True
+        parent_id = str(parent_id)
+        ancestor_ids.add(parent_id)
+
+        if (
+            diplomacy_category_id
+            and
+            parent_id == diplomacy_category_id
+        ):
+            return {
+                "blocked": True,
+                "resolved": True,
+                "channel_id": channel_id,
+                "ancestor_ids": ancestor_ids,
+            }
+
+        current_id = parent_id
+
+    return {
+        "blocked": False,
+        "resolved": resolved_any_parent,
+        "channel_id": channel_id,
+        "ancestor_ids": ancestor_ids,
+    }
+
+
+def fitting_diplomacy_access_denied():
+    return jsonify({
+        "type": 4,
+        "data": {
+            "content": (
+                "⛔ **Freeborn Fittings indisponible ici**\n\n"
+                "Les commandes, fiches et actions **/fit-*** sont "
+                "désactivées dans la catégorie **Diplomatie** afin de "
+                "protéger les fittings internes de la corporation."
+            ),
+            "flags": 64,
+        },
+    })
+
+
+def ensure_fitting_channel_allowed(data):
+    scope = fitting_interaction_channel_scope(
+        data
+    )
+
+    if scope["blocked"]:
+        return fitting_diplomacy_access_denied()
+
+    return None
+
+
+def interaction_is_recruitment_manager(
+    data
+):
+
+    return interaction_has_any_role(
+        data,
+        RECRUITMENT_MANAGER_ROLE_IDS,
+    )
+
+
+
+def interaction_is_recruitment_reviewer(
+    data
+):
+
+    return interaction_has_any_role(
+        data,
+        RECRUITMENT_REVIEWER_ROLE_IDS,
+    )
+
+
+def interaction_is_audit_viewer(
+    data
+):
+
+    return interaction_has_any_role(
+        data,
+        AUDIT_VIEWER_ROLE_IDS,
+    )
+
+
+def recruitment_access_denied():
+
+    return jsonify({
+        "type":
+            4,
+
+        "data": {
+            "content":
+                "⛔ **Accès refusé**\n\n"
+                "Cette action est réservée aux rôles "
+                "**CEO**, **Haut Conseil**, **Direction** "
+                "et **Ressources Humaines**.",
+
+            "flags":
+                64,
+        },
+    })
+
+
 def interaction_is_staff(
     data
 ):
@@ -1654,7 +10733,89 @@ def interaction_is_staff(
     )
 
 
+def guild_dedicated_channel_id(
+    guild_config,
+    channel_type,
+):
+
+    if not guild_config:
+
+        return None
+
+    indexes = {
+        "orientation":
+            7,
+
+        "corp_rules":
+            8,
+
+        "charter":
+            9,
+    }
+
+    index = indexes.get(
+        str(channel_type)
+    )
+
+    if index is None:
+
+        return None
+
+    try:
+
+        channel_id = guild_config[index]
+
+    except IndexError:
+
+        return None
+
+    return (
+        str(channel_id)
+        if channel_id
+        else None
+    )
+
+
+def dedicated_channel_error(
+    expected_channel_id,
+    label,
+):
+
+    channel_text = (
+        f"<#{expected_channel_id}>"
+        if expected_channel_id
+        else
+        f"le salon **{label}** configuré"
+    )
+
+    return jsonify({
+        "type":
+            4,
+
+        "data": {
+            "content":
+                "📍 **Mauvais salon**\n\n"
+                f"Cette action doit être utilisée dans "
+                f"{channel_text}.",
+
+            "flags":
+                64,
+        },
+    })
+
+
 def interaction_response_flags(data):
+
+    command_name = str(
+        ((data.get("data") or {}).get("name") or "")
+    ).lower()
+
+    # /freeborn contains the personal EVE SSO link and must always
+    # remain private to the member who launched the command, even
+    # when it is used in the public recruitment channel.
+    if command_name == "freeborn":
+
+        return 64
 
     channel_id = str(
         data.get("channel_id", "")
@@ -1702,8 +10863,8 @@ def staff_access_denied(
             "content":
                 "⛔ **Accès refusé**\n\n"
                 "Cette action est réservée "
-                "aux rôles **Fondateur**, "
-                "**CEO** et **Directeur**.",
+                "aux rôles **CEO**, "
+                "**Haut Conseil** et **Direction**.",
 
             "flags":
                 flags,
@@ -1761,6 +10922,59 @@ def read_member_remove_token(
         target_user_id,
         requester_user_id,
     )
+
+
+# ============================================================
+# MEMBER SELF-SERVICE CONFIRMATION TOKENS
+# ============================================================
+
+def create_alt_remove_token(character_id, requester_user_id):
+
+    payload = f"{character_id}:{requester_user_id}"
+    return alt_remove_signer.sign(payload.encode()).decode()
+
+
+def read_alt_remove_token(token):
+
+    payload = alt_remove_signer.unsign(
+        token,
+        max_age=300,
+    ).decode()
+
+    character_id, requester_user_id = payload.split(":", 1)
+    return character_id, requester_user_id
+
+
+def create_main_change_token(character_id, requester_user_id):
+
+    payload = f"{character_id}:{requester_user_id}"
+    return main_change_signer.sign(payload.encode()).decode()
+
+
+def read_main_change_token(token):
+
+    payload = main_change_signer.unsign(
+        token,
+        max_age=300,
+    ).decode()
+
+    character_id, requester_user_id = payload.split(":", 1)
+    return character_id, requester_user_id
+
+
+
+def create_sync_apply_token(requester_user_id):
+
+    payload = str(requester_user_id)
+    return sync_apply_signer.sign(payload.encode()).decode()
+
+
+def read_sync_apply_token(token):
+
+    return sync_apply_signer.unsign(
+        token,
+        max_age=300,
+    ).decode()
 
 
 # ============================================================
@@ -1924,10 +11138,99 @@ def get_eve_identity(
         "Unknown",
     )
 
+    granted_scopes = payload.get(
+        "scp",
+        [],
+    )
+
+    if isinstance(granted_scopes, str):
+        granted_scopes = [
+            granted_scopes
+        ]
+
+    granted_scopes = {
+        str(scope)
+        for scope in granted_scopes
+    }
+
     return (
         character_id,
         character_name,
+        granted_scopes,
     )
+
+
+def get_eve_character_skills(
+    character_id,
+    access_token,
+):
+    """Read the authenticated character skill summary from ESI."""
+
+    response = requests.get(
+        (
+            f"{ESI_BASE_URL}/characters/"
+            f"{int(character_id)}/skills/"
+        ),
+        headers={
+            "Authorization":
+                f"Bearer {access_token}",
+        },
+        timeout=15,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if "total_sp" not in data:
+        raise ValueError(
+            "ESI skills response does not contain total_sp"
+        )
+
+    normalized_skills = []
+
+    for skill in data.get("skills", []) or []:
+
+        try:
+
+            normalized_skills.append({
+                "skill_id":
+                    int(skill["skill_id"]),
+
+                "active_skill_level":
+                    int(skill.get("active_skill_level", 0) or 0),
+
+                "trained_skill_level":
+                    int(skill.get("trained_skill_level", 0) or 0),
+
+                "skillpoints_in_skill":
+                    int(skill.get("skillpoints_in_skill", 0) or 0),
+            })
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+
+            continue
+
+    return {
+        "total_sp":
+            int(data["total_sp"]),
+
+        "unallocated_sp":
+            int(data.get("unallocated_sp", 0) or 0),
+
+        "trained_skills":
+            len(normalized_skills),
+
+        # Fitting telemetry foundation:
+        # keep the individual skill levels so Freeborn Fittings can later
+        # compare the corporate ALL-V reference with the real pilot.
+        "skills":
+            normalized_skills,
+    }
 
 
 # ============================================================
@@ -1986,6 +11289,95 @@ def get_current_eve_character(
     return data
 
 
+def get_eve_character_affiliation(
+    character_id
+):
+    """Return ESI affiliation data for one character, or None on failure.
+
+    The dedicated affiliation route is preferred for corporation membership
+    checks because it is specifically intended to expose corporation/alliance
+    affiliation. The caller keeps the regular character endpoint as fallback.
+    """
+
+    try:
+
+        response = requests.post(
+            f"{ESI_BASE_URL}/characters/affiliation/",
+            json=[
+                int(character_id),
+            ],
+            timeout=15,
+        )
+
+    except Exception as error:
+
+        print(
+            "ESI affiliation lookup error:",
+            character_id,
+            repr(error),
+        )
+
+        return None
+
+    if (
+        response.status_code
+        !=
+        200
+    ):
+
+        print(
+            "ESI affiliation lookup failed:",
+            character_id,
+            response.status_code,
+            response.text[:500],
+        )
+
+        return None
+
+    try:
+
+        data = response.json()
+
+    except Exception as error:
+
+        print(
+            "ESI affiliation JSON decode failed:",
+            character_id,
+            repr(error),
+        )
+
+        return None
+
+    if (
+        not isinstance(data, list)
+        or
+        not data
+    ):
+
+        return None
+
+    affiliation = data[0]
+
+    if (
+        str(affiliation.get("character_id"))
+        !=
+        str(int(character_id))
+        or
+        "corporation_id"
+        not in affiliation
+    ):
+
+        return None
+
+    return {
+        "data":
+            affiliation,
+
+        "response":
+            response,
+    }
+
+
 # ============================================================
 # DISCORD HELPERS
 # ============================================================
@@ -2038,6 +11430,113 @@ def remove_discord_role(
 
         timeout=15,
     )
+
+
+_discord_member_read_cache = {}
+DISCORD_MEMBER_CACHE_TTL_SECONDS = 300
+
+
+def get_discord_member(
+    guild_id,
+    user_id,
+):
+    """
+    Read one Discord member with a short in-process cache.
+
+    Fitting pages only need the creator display name. Re-querying Discord on
+    every page refresh adds avoidable latency and does not need real-time
+    precision.
+    """
+    guild_id = str(guild_id or "")
+    user_id = str(user_id or "")
+
+    if not guild_id or not user_id:
+        return None
+
+    key = (guild_id, user_id)
+    now = time.monotonic()
+
+    cached = _discord_member_read_cache.get(key)
+
+    if cached:
+        cached_at, payload = cached
+
+        if (
+            now - cached_at
+            <= DISCORD_MEMBER_CACHE_TTL_SECONDS
+        ):
+            return payload
+
+    response = requests.get(
+        f"{DISCORD_API}/guilds/{guild_id}/members/{user_id}",
+        headers={
+            "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        },
+        timeout=15,
+    )
+
+    if response.status_code != 200:
+        return None
+
+    payload = response.json()
+
+    _discord_member_read_cache[key] = (
+        now,
+        payload,
+    )
+
+    return payload
+
+
+def send_discord_channel_message(
+    channel_id,
+    content,
+):
+
+    if not channel_id:
+        return None
+
+    return requests.post(
+        f"{DISCORD_API}/channels/{channel_id}/messages",
+        headers={
+            "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={"content": content},
+        timeout=15,
+    )
+
+
+def log_v3_event_to_discord(
+    guild_config,
+    content,
+):
+    """Best-effort visible audit log. Database audit remains authoritative."""
+
+    try:
+        logs_channel_id = (
+            str(guild_config[5])
+            if guild_config and guild_config[5]
+            else None
+        )
+
+        if not logs_channel_id:
+            return
+
+        response = send_discord_channel_message(
+            logs_channel_id,
+            content,
+        )
+
+        if response is not None and response.status_code not in (200, 201):
+            print(
+                "Discord V3 log failed:",
+                response.status_code,
+                response.text[:300],
+            )
+
+    except Exception as error:
+        print("Discord V3 log error:", repr(error))
 
 
 def sync_discord_nickname(
@@ -2562,7 +12061,7 @@ def build_sync_message(
     if applied:
 
         title = (
-            "⚙️ **Freeborn Sync APPLY**"
+            "⚙️ **Application de la synchronisation Freeborn**"
         )
 
         footer = (
@@ -2575,7 +12074,7 @@ def build_sync_message(
     else:
 
         title = (
-            "🔎 **Freeborn Sync Check**"
+            "🔎 **Contrôle de synchronisation Freeborn**"
         )
 
         footer = (
@@ -2748,15 +12247,15 @@ def build_sync_status_message():
         )
 
     lines = [
-        "📡 **Freeborn Sync Status**",
+        "📡 **État de la synchronisation Freeborn**",
         "",
         f"État général : {overall_status}",
         "",
         "### 🗄️ Base Freeborn",
         f"👥 Comptes suivis : **{stats['members']}**",
         f"🎮 Personnages : **{stats['characters']}**",
-        f"🔗 Main Characters : **{stats['mains']}**",
-        f"🔹 Alt Characters : **{stats['alts']}**",
+        f"🔗 Personnages principaux : **{stats['mains']}**",
+        f"🔹 Personnages secondaires : **{stats['alts']}**",
         (
             "🕒 Dernière synchro enregistrée : "
             f"**{format_datetime(stats['latest_check'])}**"
@@ -2825,8 +12324,11 @@ def handle_autocomplete(
     if (
         command_name
         not in {
-            "main-change",
-            "alt-remove",
+            "main-changer",
+            "alt-supprimer",
+            "verification",
+            "candidat-accepter",
+            "membre-supprimer",
         }
     ):
 
@@ -2837,6 +12339,262 @@ def handle_autocomplete(
             "data": {
                 "choices":
                     []
+            },
+        })
+
+    # /membre-supprimer lists only human Discord accounts that actually
+    # own at least one EVE profile in Freeborn.
+    if command_name == "membre-supprimer":
+
+        guild_id = str(data.get("guild_id", ""))
+        search_text = ""
+
+        for option in data["data"].get("options", []):
+            if option.get("name") == "membre":
+                search_text = str(option.get("value", "")).lower()
+                break
+
+        try:
+            with psycopg.connect(DATABASE_URL) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT discord_user_id
+                        FROM eve_characters
+                        ORDER BY discord_user_id;
+                        """
+                    )
+                    profile_rows = cur.fetchall()
+        except Exception as error:
+            print("Member remove autocomplete database error:", repr(error))
+            profile_rows = []
+
+        choices = []
+
+        for (target_user_id,) in profile_rows:
+            target_user_id = str(target_user_id)
+            member_payload = get_discord_member(guild_id, target_user_id)
+
+            if not member_payload:
+                continue
+
+            user_payload = member_payload.get("user", {})
+
+            if user_payload.get("bot", False):
+                continue
+
+            display_name = (
+                member_payload.get("nick")
+                or user_payload.get("global_name")
+                or user_payload.get("username")
+                or target_user_id
+            )
+
+            if search_text and search_text not in display_name.lower():
+                continue
+
+            choices.append({
+                "name": display_name,
+                "value": target_user_id,
+            })
+
+            if len(choices) >= 25:
+                break
+
+        return jsonify({
+            "type": 8,
+            "data": {"choices": choices},
+        })
+
+    # Staff recruitment commands use a controlled autocomplete list
+    # sourced from the V3 member_statuses table. This avoids Discord's
+    # generic USER picker proposing bots while hiding valid candidates.
+    if (
+        command_name
+        in {
+            "verification",
+            "candidat-accepter",
+        }
+    ):
+
+        guild_id = str(
+            data.get(
+                "guild_id",
+                "",
+            )
+        )
+
+        search_text = ""
+
+        for option in (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        ):
+
+            if (
+                option.get("name")
+                ==
+                "membre"
+            ):
+
+                search_text = str(
+                    option.get(
+                        "value",
+                        "",
+                    )
+                ).lower()
+
+                break
+
+        try:
+
+            with psycopg.connect(
+                DATABASE_URL
+            ) as conn:
+
+                with conn.cursor() as cur:
+
+                    cur.execute(
+                        """
+                        SELECT
+                            discord_user_id,
+                            status
+                        FROM member_statuses
+                        WHERE guild_id = %s
+                        AND status = %s
+                        ORDER BY updated_at DESC;
+                        """,
+                        (
+                            guild_id,
+                            "candidate",
+                        ),
+                    )
+
+                    candidate_rows = (
+                        cur.fetchall()
+                    )
+
+        except Exception as error:
+
+            print(
+                "Recruitment autocomplete "
+                "database error:",
+                repr(error),
+            )
+
+            candidate_rows = []
+
+        choices = []
+
+        for (
+            candidate_user_id,
+            candidate_status,
+        ) in candidate_rows:
+
+            candidate_user_id = str(
+                candidate_user_id
+            )
+
+            try:
+
+                member_response = (
+                    requests.get(
+                        f"{DISCORD_API}/guilds/"
+                        f"{guild_id}/members/"
+                        f"{candidate_user_id}",
+                        headers={
+                            "Authorization":
+                                f"Bot {DISCORD_BOT_TOKEN}",
+                        },
+                        timeout=10,
+                    )
+                )
+
+                if (
+                    member_response.status_code
+                    !=
+                    200
+                ):
+
+                    continue
+
+                member_payload = (
+                    member_response.json()
+                )
+
+                user_payload = (
+                    member_payload.get(
+                        "user",
+                        {},
+                    )
+                )
+
+                if user_payload.get(
+                    "bot",
+                    False,
+                ):
+
+                    continue
+
+                display_name = (
+                    member_payload.get(
+                        "nick"
+                    )
+                    or
+                    user_payload.get(
+                        "global_name"
+                    )
+                    or
+                    user_payload.get(
+                        "username"
+                    )
+                    or
+                    candidate_user_id
+                )
+
+            except Exception as error:
+
+                print(
+                    "Recruitment autocomplete "
+                    "Discord error:",
+                    repr(error),
+                )
+
+                continue
+
+            if (
+                search_text
+                and
+                search_text
+                not in
+                display_name.lower()
+            ):
+
+                continue
+
+            choices.append({
+                "name":
+                    display_name,
+
+                "value":
+                    candidate_user_id,
+            })
+
+            if len(choices) >= 25:
+
+                break
+
+        return jsonify({
+            "type":
+                8,
+
+            "data": {
+                "choices":
+                    choices,
             },
         })
 
@@ -2933,7 +12691,7 @@ def handle_autocomplete(
         if (
             command_name
             ==
-            "main-change"
+            "main-changer"
         ):
 
             status_text = (
@@ -2984,6 +12742,2230 @@ def handle_autocomplete(
 
 
 # ============================================================
+# FREEBORN SRP
+# ============================================================
+
+def freeborn_srp_reference(
+    srp_id
+):
+    return (
+        f"SRP-{int(srp_id):04d}"
+    )
+
+
+def freeborn_srp_get_main_name(
+    discord_user_id
+):
+    """
+    Best-effort lookup of the verified Main EVE character.
+    Falls back to the Discord mention if no Main is found.
+    """
+    try:
+        with psycopg.connect(
+            DATABASE_URL
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT character_name
+                    FROM eve_characters
+                    WHERE discord_user_id = %s
+                      AND is_main = TRUE
+                    ORDER BY updated_at DESC NULLS LAST,
+                             created_at DESC NULLS LAST
+                    LIMIT 1;
+                    """,
+                    (
+                        str(discord_user_id),
+                    ),
+                )
+
+                row = cur.fetchone()
+
+        if row and row[0]:
+            return str(
+                row[0]
+            )
+
+    except Exception as error:
+        print(
+            "Freeborn SRP pilot lookup warning:",
+            repr(
+                error
+            ),
+        )
+
+    return None
+
+
+def freeborn_srp_get(
+    srp_id
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    srp_id,
+                    guild_id,
+                    created_by_discord_user_id,
+                    pilot_name,
+                    ship_fit,
+                    zkill_url,
+                    operation_fc,
+                    circumstances,
+                    extra_info,
+                    status,
+                    decided_by_discord_user_id,
+                    decided_at,
+                    closed_by_discord_user_id,
+                    closed_at,
+                    discord_thread_id,
+                    discord_post_message_id,
+                    created_at,
+                    updated_at
+                FROM srp_requests
+                WHERE srp_id = %s
+                LIMIT 1;
+                """,
+                (
+                    int(srp_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "srp_id":
+            int(row[0]),
+        "guild_id":
+            str(row[1]),
+        "created_by_discord_user_id":
+            str(row[2]),
+        "pilot_name":
+            row[3],
+        "ship_fit":
+            row[4],
+        "zkill_url":
+            row[5],
+        "operation_fc":
+            row[6],
+        "circumstances":
+            row[7],
+        "extra_info":
+            row[8],
+        "status":
+            row[9],
+        "decided_by_discord_user_id":
+            row[10],
+        "decided_at":
+            row[11],
+        "closed_by_discord_user_id":
+            row[12],
+        "closed_at":
+            row[13],
+        "discord_thread_id":
+            row[14],
+        "discord_post_message_id":
+            row[15],
+        "created_at":
+            row[16],
+        "updated_at":
+            row[17],
+    }
+
+
+def freeborn_srp_insert(
+    guild_id,
+    creator_user_id,
+    pilot_name,
+    ship_fit,
+    zkill_url,
+    operation_fc,
+    circumstances,
+    extra_info,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO srp_requests (
+                    guild_id,
+                    created_by_discord_user_id,
+                    pilot_name,
+                    ship_fit,
+                    zkill_url,
+                    operation_fc,
+                    circumstances,
+                    extra_info,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s,
+                    'pending',
+                    NOW(),
+                    NOW()
+                )
+                RETURNING srp_id;
+                """,
+                (
+                    str(guild_id),
+                    str(creator_user_id),
+                    pilot_name,
+                    str(ship_fit),
+                    str(zkill_url),
+                    operation_fc,
+                    str(circumstances),
+                    extra_info,
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    if not row:
+        raise RuntimeError(
+            "SRP insert failed"
+        )
+
+    return int(
+        row[0]
+    )
+
+
+def freeborn_srp_delete(
+    srp_id
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM srp_requests
+                WHERE srp_id = %s;
+                """,
+                (
+                    int(srp_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_srp_save_discord_link(
+    srp_id,
+    thread_id,
+    message_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE srp_requests
+                SET
+                    discord_thread_id = %s,
+                    discord_post_message_id = %s,
+                    updated_at = NOW()
+                WHERE srp_id = %s;
+                """,
+                (
+                    str(thread_id),
+                    str(message_id),
+                    int(srp_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_srp_status_label(
+    status
+):
+    return {
+        "pending":
+            "🟡 EN ATTENTE",
+        "accepted":
+            "🟢 ACCEPTÉ",
+        "refused":
+            "🔴 REFUSÉ",
+        "closed":
+            "⚫ CLÔTURÉ",
+    }.get(
+        str(status),
+        "🟡 EN ATTENTE",
+    )
+
+
+def freeborn_srp_build_embed(
+    request_row
+):
+    srp_id = int(
+        request_row[
+            "srp_id"
+        ]
+    )
+
+    creator_id = str(
+        request_row[
+            "created_by_discord_user_id"
+        ]
+    )
+
+    pilot_name = (
+        request_row.get(
+            "pilot_name"
+        )
+        or f"<@{creator_id}>"
+    )
+
+    fields = [
+        {
+            "name":
+                "Statut",
+            "value":
+                freeborn_srp_status_label(
+                    request_row[
+                        "status"
+                    ]
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Pilote",
+            "value":
+                (
+                    f"**{pilot_name}**\n"
+                    f"Créé par <@{creator_id}>"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Vaisseau perdu / Fit Corpo",
+            "value":
+                str(
+                    request_row[
+                        "ship_fit"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Lien zKillboard",
+            "value":
+                str(
+                    request_row[
+                        "zkill_url"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Opération / Fleet Commander",
+            "value":
+                (
+                    request_row.get(
+                        "operation_fc"
+                    )
+                    or "Non précisé"
+                ),
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Circonstances",
+            "value":
+                str(
+                    request_row[
+                        "circumstances"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        },
+    ]
+
+    if request_row.get(
+        "extra_info"
+    ):
+        fields.append({
+            "name":
+                "Informations complémentaires",
+            "value":
+                str(
+                    request_row[
+                        "extra_info"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        })
+
+    if request_row.get(
+        "decided_by_discord_user_id"
+    ):
+        fields.append({
+            "name":
+                "Décision",
+            "value":
+                (
+                    f"{freeborn_srp_status_label(request_row['status'])}\n"
+                    f"Par <@{request_row['decided_by_discord_user_id']}>"
+                ),
+            "inline":
+                True,
+        })
+
+    return {
+        "title":
+            (
+                f"💰 {freeborn_srp_reference(srp_id)} "
+                "— Demande de remboursement SRP"
+            ),
+        "description":
+            (
+                "💳 **Ship Replacement Program — Freeborn Legacy**\n"
+                "Demande de remboursement liée à une perte de vaisseau.\n"
+                "Décision réservée à la Direction et au CEO."
+            ),
+        "color":
+            (
+                0xD9A21B
+                if request_row[
+                    "status"
+                ] == "pending"
+                else (
+                    0x2ECC71
+                    if request_row[
+                        "status"
+                    ] == "accepted"
+                    else (
+                        0xE74C3C
+                        if request_row[
+                            "status"
+                        ] == "refused"
+                        else 0x7F8C8D
+                    )
+                )
+            ),
+        "thumbnail": {
+            "url":
+                (
+                    f"{PUBLIC_BASE_URL}"
+                    "/assets/logo-freeborn-legacy.png"
+                )
+        },
+        "fields":
+            fields,
+        "footer": {
+            "text":
+                "Freeborn Legacy • SRP • Direction / CEO"
+        },
+    }
+
+
+def freeborn_srp_components(
+    srp_id,
+    status,
+):
+    if status == "closed":
+        return []
+
+    return [
+        {
+            "type":
+                1,
+            "components": [
+                {
+                    "type":
+                        2,
+                    "style":
+                        3,
+                    "label":
+                        "Accepter",
+                    "emoji": {
+                        "name":
+                            "✅",
+                    },
+                    "custom_id":
+                        f"srp_accept:{int(srp_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        4,
+                    "label":
+                        "Refuser",
+                    "emoji": {
+                        "name":
+                            "❌",
+                    },
+                    "custom_id":
+                        f"srp_refuse:{int(srp_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        2,
+                    "label":
+                        "Clôturer",
+                    "emoji": {
+                        "name":
+                            "🏁",
+                    },
+                    "custom_id":
+                        f"srp_close:{int(srp_id)}",
+                },
+            ],
+        }
+    ]
+
+
+def freeborn_srp_select_forum_tags(
+    forum,
+    status
+):
+    available_tags = (
+        forum.get(
+            "available_tags"
+        )
+        or []
+    )
+
+    aliases = {
+        "pending": {
+            "en attente",
+            "attente",
+            "pending",
+            "ouvert",
+        },
+        "accepted": {
+            "accepté",
+            "accepte",
+            "accepted",
+            "validé",
+            "valide",
+        },
+        "refused": {
+            "refusé",
+            "refuse",
+            "refused",
+        },
+        "closed": {
+            "clôturé",
+            "cloture",
+            "closed",
+            "terminé",
+            "termine",
+        },
+    }.get(
+        str(status),
+        set(),
+    )
+
+    for tag in available_tags:
+        tag_name = str(
+            tag.get(
+                "name"
+            )
+            or ""
+        ).strip().casefold()
+
+        if tag_name in aliases:
+            tag_id = str(
+                tag.get(
+                    "id"
+                )
+                or ""
+            ).strip()
+
+            if tag_id:
+                return [
+                    tag_id
+                ]
+
+    if available_tags:
+        first_id = str(
+            available_tags[0].get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        if first_id:
+            return [
+                first_id
+            ]
+
+    return []
+
+
+def freeborn_srp_publish(
+    srp_id
+):
+    request_row = freeborn_srp_get(
+        srp_id
+    )
+
+    if not request_row:
+        raise RuntimeError(
+            "SRP request not found"
+        )
+
+    forum_id = str(
+        DISCORD_SRP_FORUM_ID
+        or ""
+    ).strip()
+
+    if not forum_id:
+        raise RuntimeError(
+            "DISCORD_SRP_FORUM_ID missing"
+        )
+
+    forum = discord_get_channel(
+        forum_id
+    )
+
+    if int(
+        forum.get(
+            "type",
+            -1,
+        )
+    ) not in {
+        15,
+        16,
+    }:
+        raise RuntimeError(
+            "SRP destination is not a Forum/Media channel"
+        )
+
+    payload = {
+        "name":
+            (
+                f"{freeborn_srp_reference(srp_id)}"
+                " — Demande SRP"
+            )[:100],
+        "auto_archive_duration":
+            10080,
+        "message": {
+            "embeds": [
+                freeborn_srp_build_embed(
+                    request_row
+                )
+            ],
+            "components":
+                freeborn_srp_components(
+                    srp_id,
+                    request_row[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+    }
+
+    tags = freeborn_srp_select_forum_tags(
+        forum,
+        request_row[
+            "status"
+        ],
+    )
+
+    if tags:
+        payload[
+            "applied_tags"
+        ] = tags
+
+    response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{forum_id}/threads"
+        ),
+        headers=discord_bot_headers(),
+        json=payload,
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn SRP forum publication failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    body = (
+        response.json()
+        or {}
+    )
+
+    thread_id = str(
+        body[
+            "id"
+        ]
+    )
+
+    starter = (
+        body.get(
+            "message"
+        )
+        or {}
+    )
+
+    message_id = str(
+        starter.get(
+            "id"
+        )
+        or thread_id
+    )
+
+    freeborn_srp_save_discord_link(
+        srp_id,
+        thread_id,
+        message_id,
+    )
+
+
+def freeborn_srp_refresh(
+    srp_id
+):
+    request_row = freeborn_srp_get(
+        srp_id
+    )
+
+    if not request_row:
+        raise RuntimeError(
+            "SRP request not found"
+        )
+
+    thread_id = str(
+        request_row.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    message_id = str(
+        request_row.get(
+            "discord_post_message_id"
+        )
+        or ""
+    ).strip()
+
+    if (
+        not thread_id
+        or not message_id
+    ):
+        raise RuntimeError(
+            "SRP Discord linkage missing"
+        )
+
+    response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}/messages/"
+            f"{message_id}"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "embeds": [
+                freeborn_srp_build_embed(
+                    request_row
+                )
+            ],
+            "components":
+                freeborn_srp_components(
+                    srp_id,
+                    request_row[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn SRP post update failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    forum_id = str(
+        DISCORD_SRP_FORUM_ID
+        or ""
+    ).strip()
+
+    if forum_id:
+        try:
+            forum = discord_get_channel(
+                forum_id
+            )
+
+            tags = freeborn_srp_select_forum_tags(
+                forum,
+                request_row[
+                    "status"
+                ],
+            )
+
+            if tags:
+                requests.patch(
+                    (
+                        f"{DISCORD_API}/channels/"
+                        f"{thread_id}"
+                    ),
+                    headers=discord_bot_headers(),
+                    json={
+                        "applied_tags":
+                            tags,
+                    },
+                    timeout=12,
+                )
+
+        except Exception as error:
+            print(
+                "Freeborn SRP tag update warning:",
+                repr(
+                    error
+                ),
+            )
+
+
+def freeborn_srp_set_status(
+    srp_id,
+    status,
+    actor_user_id,
+):
+    if status not in {
+        "accepted",
+        "refused",
+        "closed",
+    }:
+        raise ValueError(
+            "Invalid SRP status"
+        )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            if status == "closed":
+                cur.execute(
+                    """
+                    UPDATE srp_requests
+                    SET
+                        status = 'closed',
+                        closed_by_discord_user_id = %s,
+                        closed_at = NOW(),
+                        updated_at = NOW()
+                    WHERE srp_id = %s
+                      AND status <> 'closed'
+                    RETURNING srp_id;
+                    """,
+                    (
+                        str(actor_user_id),
+                        int(srp_id),
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE srp_requests
+                    SET
+                        status = %s,
+                        decided_by_discord_user_id = %s,
+                        decided_at = NOW(),
+                        updated_at = NOW()
+                    WHERE srp_id = %s
+                      AND status <> 'closed'
+                    RETURNING srp_id;
+                    """,
+                    (
+                        str(status),
+                        str(actor_user_id),
+                        int(srp_id),
+                    ),
+                )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_srp_archive_thread(
+    srp_id
+):
+    request_row = freeborn_srp_get(
+        srp_id
+    )
+
+    if not request_row:
+        return
+
+    thread_id = str(
+        request_row.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    if not thread_id:
+        return
+
+    response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "archived":
+                True,
+        },
+        timeout=12,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        print(
+            "Freeborn SRP archive warning:",
+            response.status_code,
+            response.text[:500],
+        )
+
+
+# ============================================================
+# FREEBORN OP CORP
+# ============================================================
+
+FREEBORN_OP_TYPE_META = {
+    "mining": {
+        "label": "Minage",
+        "emoji": "⛏️",
+        "type_id": 28606,  # Orca
+    },
+    "pve": {
+        "label": "PvE",
+        "emoji": "🛡️",
+        "type_id": 28710,  # Golem
+    },
+    "pvp": {
+        "label": "PvP",
+        "emoji": "⚔️",
+        "type_id": 24702,  # Hurricane
+    },
+    "other": {
+        "label": "Autre",
+        "emoji": "✨",
+        "type_id": None,
+    },
+}
+
+
+def freeborn_op_reference(operation_id):
+    return (
+        f"OP-{int(operation_id):04d}"
+    )
+
+
+def freeborn_op_type_meta(operation_type):
+    return FREEBORN_OP_TYPE_META.get(
+        str(operation_type),
+        FREEBORN_OP_TYPE_META["other"],
+    )
+
+
+def freeborn_op_image_url(operation_type):
+    meta = freeborn_op_type_meta(
+        operation_type
+    )
+
+    type_id = meta.get(
+        "type_id"
+    )
+
+    if type_id:
+        return (
+            "https://images.evetech.net/types/"
+            f"{int(type_id)}/render?size=512"
+        )
+
+    return (
+        f"{PUBLIC_BASE_URL}"
+        "/assets/logo-freeborn-legacy.png"
+    )
+
+
+def freeborn_op_get(operation_id):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    operation_id,
+                    guild_id,
+                    title,
+                    operation_type,
+                    operation_date,
+                    start_time,
+                    end_time,
+                    fleet_commander,
+                    doctrine,
+                    notes,
+                    created_by_discord_user_id,
+                    discord_thread_id,
+                    discord_post_message_id,
+                    status,
+                    created_at,
+                    updated_at,
+                    closed_at
+                FROM corp_operations
+                WHERE operation_id = %s
+                LIMIT 1;
+                """,
+                (
+                    int(operation_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "operation_id":
+            int(row[0]),
+        "guild_id":
+            str(row[1]),
+        "title":
+            row[2],
+        "operation_type":
+            row[3],
+        "operation_date":
+            row[4],
+        "start_time":
+            row[5],
+        "end_time":
+            row[6],
+        "fleet_commander":
+            row[7],
+        "doctrine":
+            row[8],
+        "notes":
+            row[9],
+        "created_by_discord_user_id":
+            str(row[10]),
+        "discord_thread_id":
+            row[11],
+        "discord_post_message_id":
+            row[12],
+        "status":
+            row[13],
+        "created_at":
+            row[14],
+        "updated_at":
+            row[15],
+        "closed_at":
+            row[16],
+    }
+
+
+def freeborn_op_delete(operation_id):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM corp_operations
+                WHERE operation_id = %s;
+                """,
+                (
+                    int(operation_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_op_insert(
+    guild_id,
+    title,
+    operation_type,
+    operation_date,
+    start_time,
+    end_time,
+    fleet_commander,
+    doctrine,
+    notes,
+    creator_user_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO corp_operations (
+                    guild_id,
+                    title,
+                    operation_type,
+                    operation_date,
+                    start_time,
+                    end_time,
+                    fleet_commander,
+                    doctrine,
+                    notes,
+                    created_by_discord_user_id,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    'open', NOW(), NOW()
+                )
+                RETURNING operation_id;
+                """,
+                (
+                    str(guild_id),
+                    str(title),
+                    str(operation_type),
+                    operation_date,
+                    start_time,
+                    end_time,
+                    fleet_commander,
+                    doctrine,
+                    notes,
+                    str(creator_user_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    if not row:
+        raise RuntimeError(
+            "OP Corp insert failed"
+        )
+
+    return int(
+        row[0]
+    )
+
+
+def freeborn_op_save_discord_link(
+    operation_id,
+    thread_id,
+    message_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE corp_operations
+                SET
+                    discord_thread_id = %s,
+                    discord_post_message_id = %s,
+                    updated_at = NOW()
+                WHERE operation_id = %s;
+                """,
+                (
+                    str(thread_id),
+                    str(message_id),
+                    int(operation_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_op_attendance(operation_id):
+    result = {
+        "present":
+            [],
+        "absent":
+            [],
+        "maybe":
+            [],
+    }
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    discord_user_id,
+                    attendance_status
+                FROM corp_operation_attendance
+                WHERE operation_id = %s
+                ORDER BY updated_at ASC;
+                """,
+                (
+                    int(operation_id),
+                ),
+            )
+
+            rows = cur.fetchall()
+
+    for user_id, status in rows:
+        status = str(
+            status
+        )
+
+        if status in result:
+            result[
+                status
+            ].append(
+                str(user_id)
+            )
+
+    return result
+
+
+def freeborn_op_set_attendance(
+    operation_id,
+    discord_user_id,
+    attendance_status,
+):
+    if attendance_status not in {
+        "present",
+        "absent",
+        "maybe",
+    }:
+        raise ValueError(
+            "Invalid OP Corp attendance status"
+        )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO corp_operation_attendance (
+                    operation_id,
+                    discord_user_id,
+                    attendance_status,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (
+                    operation_id,
+                    discord_user_id
+                )
+                DO UPDATE SET
+                    attendance_status =
+                        EXCLUDED.attendance_status,
+                    updated_at = NOW();
+                """,
+                (
+                    int(operation_id),
+                    str(discord_user_id),
+                    str(attendance_status),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_op_format_attendance(
+    attendance
+):
+    def render(
+        status,
+        label,
+        emoji,
+    ):
+        users = attendance.get(
+            status,
+            [],
+        )
+
+        if not users:
+            return (
+                f"{emoji} **{label} (0)**\n"
+                "—"
+            )
+
+        mentions = " • ".join(
+            f"<@{user_id}>"
+            for user_id in users
+        )
+
+        return (
+            f"{emoji} **{label} ({len(users)})**\n"
+            f"{mentions}"
+        )
+
+    return "\n\n".join([
+        render(
+            "present",
+            "Présents",
+            "✅",
+        ),
+        render(
+            "absent",
+            "Absents",
+            "❌",
+        ),
+        render(
+            "maybe",
+            "Indécis",
+            "❔",
+        ),
+    ])
+
+
+def freeborn_op_build_embed(
+    operation
+):
+    meta = freeborn_op_type_meta(
+        operation[
+            "operation_type"
+        ]
+    )
+
+    attendance = freeborn_op_attendance(
+        operation[
+            "operation_id"
+        ]
+    )
+
+    status_label = (
+        "🟢 OUVERTE"
+        if operation[
+            "status"
+        ] == "open"
+        else "🏁 CLÔTURÉE"
+    )
+
+    fields = [
+        {
+            "name":
+                "Statut",
+            "value":
+                status_label,
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Type d'OP",
+            "value":
+                (
+                    f"{meta['emoji']} "
+                    f"**{meta['label']}**"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Créée par",
+            "value":
+                (
+                    f"<@{operation['created_by_discord_user_id']}>"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Date",
+            "value":
+                (
+                    f"**{operation['operation_date'].strftime('%d/%m/%Y')}**"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Horaire",
+            "value":
+                (
+                    f"**{operation['start_time'].strftime('%H:%M')} "
+                    f"→ {operation['end_time'].strftime('%H:%M')}**"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Fleet Commander",
+            "value":
+                (
+                    operation.get(
+                        "fleet_commander"
+                    )
+                    or "Non précisé"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Doctrine",
+            "value":
+                (
+                    operation.get(
+                        "doctrine"
+                    )
+                    or "Libre / non précisée"
+                ),
+            "inline":
+                False,
+        },
+        {
+            "name":
+                "Participations",
+            "value":
+                freeborn_op_format_attendance(
+                    attendance
+                )[:1024],
+            "inline":
+                False,
+        },
+    ]
+
+    if operation.get(
+        "notes"
+    ):
+        fields.append({
+            "name":
+                "Informations / consignes",
+            "value":
+                str(
+                    operation[
+                        "notes"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        })
+
+    return {
+        "title":
+            (
+                f"{freeborn_op_reference(operation['operation_id'])}"
+                f" — {operation['title']}"
+            )[:256],
+        "description":
+            (
+                "Opération corporation Freeborn Legacy.\n"
+                "Indique ta disponibilité avec les boutons ci-dessous."
+            ),
+        "color":
+            0x2F81F7,
+        "thumbnail": {
+            "url":
+                freeborn_op_image_url(
+                    operation[
+                        "operation_type"
+                    ]
+                )
+        },
+        "fields":
+            fields,
+        "footer": {
+            "text":
+                (
+                    "Freeborn Legacy • OP Corp • "
+                    "Présent / Absent / Indécis"
+                )
+        },
+    }
+
+
+def freeborn_op_components(
+    operation_id,
+    status,
+):
+    if status != "open":
+        return []
+
+    return [
+        {
+            "type":
+                1,
+            "components": [
+                {
+                    "type":
+                        2,
+                    "style":
+                        3,
+                    "label":
+                        "Présent",
+                    "emoji": {
+                        "name":
+                            "✅",
+                    },
+                    "custom_id":
+                        f"op_attend_present:{int(operation_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        4,
+                    "label":
+                        "Absent",
+                    "emoji": {
+                        "name":
+                            "❌",
+                    },
+                    "custom_id":
+                        f"op_attend_absent:{int(operation_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        2,
+                    "label":
+                        "Indécis",
+                    "emoji": {
+                        "name":
+                            "❔",
+                    },
+                    "custom_id":
+                        f"op_attend_maybe:{int(operation_id)}",
+                },
+            ],
+        },
+        {
+            "type":
+                1,
+            "components": [
+                {
+                    "type":
+                        2,
+                    "style":
+                        1,
+                    "label":
+                        "Modifier l'OP",
+                    "emoji": {
+                        "name":
+                            "✏️",
+                    },
+                    "custom_id":
+                        f"op_edit:{int(operation_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        4,
+                    "label":
+                        "Clôturer l'OP",
+                    "emoji": {
+                        "name":
+                            "🏁",
+                    },
+                    "custom_id":
+                        f"op_close:{int(operation_id)}",
+                },
+            ],
+        },
+    ]
+
+
+def freeborn_op_parse_details(
+    details_text
+):
+    """
+    Parse optional OP details.
+
+    Accepted forms are intentionally tolerant:
+      FC: Le Gardien
+      FC : Le Gardien
+      Fleet Commander: Le Gardien
+      Doctrine: Miner1.0
+      Doctrine : Miner1.0
+      Consignes: Rendez-vous 20:20
+    """
+    fleet_commander = None
+    doctrine = None
+    notes_lines = []
+
+    for raw_line in str(
+        details_text
+        or ""
+    ).splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        fc_match = re.match(
+            r"^(?:fc|fleet\s+commander)\s*:\s*(.*)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+
+        if fc_match:
+            fleet_commander = (
+                fc_match.group(
+                    1
+                ).strip()
+                or None
+            )
+
+            continue
+
+        doctrine_match = re.match(
+            r"^doctrine\s*:\s*(.*)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+
+        if doctrine_match:
+            doctrine = (
+                doctrine_match.group(
+                    1
+                ).strip()
+                or None
+            )
+
+            continue
+
+        notes_match = re.match(
+            r"^(?:consignes?|infos?|informations?)\s*:\s*(.*)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+
+        if notes_match:
+            value = notes_match.group(
+                1
+            ).strip()
+
+            if value:
+                notes_lines.append(
+                    value
+                )
+
+            continue
+
+        notes_lines.append(
+            line
+        )
+
+    notes = (
+        "\n".join(
+            notes_lines
+        ).strip()
+        or None
+    )
+
+    return (
+        fleet_commander,
+        doctrine,
+        notes,
+    )
+
+
+def freeborn_op_modal_value(
+    data,
+    custom_id,
+):
+    """
+    Read a modal field from both legacy ActionRow/TextInput structures
+    and Discord's current Label-wrapped modal components.
+    """
+    def walk(
+        component
+    ):
+        if not isinstance(
+            component,
+            dict,
+        ):
+            return None
+
+        if str(
+            component.get(
+                "custom_id"
+            )
+            or ""
+        ) == str(
+            custom_id
+        ):
+            if "values" in component:
+                values = (
+                    component.get(
+                        "values"
+                    )
+                    or []
+                )
+
+                return (
+                    str(
+                        values[0]
+                    )
+                    if values
+                    else ""
+                )
+
+            return str(
+                component.get(
+                    "value",
+                    ""
+                )
+                or ""
+            )
+
+        child = component.get(
+            "component"
+        )
+
+        if child:
+            result = walk(
+                child
+            )
+
+            if result is not None:
+                return result
+
+        for nested in (
+            component.get(
+                "components"
+            )
+            or []
+        ):
+            result = walk(
+                nested
+            )
+
+            if result is not None:
+                return result
+
+        return None
+
+    for top in (
+        (
+            data.get(
+                "data"
+            )
+            or {}
+        ).get(
+            "components",
+            [],
+        )
+        or []
+    ):
+        result = walk(
+            top
+        )
+
+        if result is not None:
+            return result.strip()
+
+    return ""
+
+
+def freeborn_op_parse_date_time(
+    date_text,
+    start_text,
+    end_text,
+):
+    operation_date = datetime.strptime(
+        str(date_text).strip(),
+        "%d/%m/%Y",
+    ).date()
+
+    start_time = datetime.strptime(
+        str(start_text).strip(),
+        "%H:%M",
+    ).time()
+
+    end_time = datetime.strptime(
+        str(end_text).strip(),
+        "%H:%M",
+    ).time()
+
+    return (
+        operation_date,
+        start_time,
+        end_time,
+    )
+
+
+def freeborn_op_select_forum_tags(
+    forum,
+    operation_type,
+):
+    available_tags = (
+        forum.get(
+            "available_tags"
+        )
+        or []
+    )
+
+    aliases = {
+        "mining": {
+            "minage",
+            "mining",
+        },
+        "pve": {
+            "pve",
+            "pve corp",
+        },
+        "pvp": {
+            "pvp",
+            "pvp corp",
+        },
+        "other": {
+            "autre",
+            "other",
+        },
+    }.get(
+        operation_type,
+        set(),
+    )
+
+    for tag in available_tags:
+        tag_name = str(
+            tag.get(
+                "name"
+            )
+            or ""
+        ).strip().casefold()
+
+        if tag_name in aliases:
+            tag_id = str(
+                tag.get(
+                    "id"
+                )
+                or ""
+            ).strip()
+
+            if tag_id:
+                return [
+                    tag_id
+                ]
+
+    # Required-tag forum fallback: use the first configured tag.
+    if available_tags:
+        fallback_id = str(
+            available_tags[0].get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        if fallback_id:
+            return [
+                fallback_id
+            ]
+
+    return []
+
+
+def freeborn_op_publish(
+    operation_id
+):
+    operation = freeborn_op_get(
+        operation_id
+    )
+
+    if not operation:
+        raise RuntimeError(
+            "OP Corp not found"
+        )
+
+    forum_id = str(
+        DISCORD_OP_CORP_FORUM_ID
+        or ""
+    ).strip()
+
+    if not forum_id:
+        raise RuntimeError(
+            "DISCORD_OP_CORP_FORUM_ID missing"
+        )
+
+    forum = discord_get_channel(
+        forum_id
+    )
+
+    if int(
+        forum.get(
+            "type",
+            -1,
+        )
+    ) not in {
+        15,
+        16,
+    }:
+        raise RuntimeError(
+            "OP Corp destination is not a Forum/Media channel"
+        )
+
+    payload = {
+        "name":
+            (
+                f"{freeborn_op_reference(operation_id)}"
+                f" — {operation['title']}"
+            )[:100],
+        "auto_archive_duration":
+            10080,
+        "message": {
+            "embeds": [
+                freeborn_op_build_embed(
+                    operation
+                )
+            ],
+            "components":
+                freeborn_op_components(
+                    operation_id,
+                    operation[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+    }
+
+    applied_tags = freeborn_op_select_forum_tags(
+        forum,
+        operation[
+            "operation_type"
+        ],
+    )
+
+    if applied_tags:
+        payload[
+            "applied_tags"
+        ] = applied_tags
+
+    response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{forum_id}/threads"
+        ),
+        headers=discord_bot_headers(),
+        json=payload,
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        if (
+            response.status_code == 403
+            and '"code": 50013' in response.text
+        ):
+            raise RuntimeError(
+                "Freeborn OP Corp forum publication failed (403 / 50013): "
+                "Missing Permissions. Vérifier dans le forum OP Corp les droits "
+                "du rôle Freeborn : Voir le salon, Envoyer des messages, "
+                "Créer des fils publics / créer des publications, "
+                "Envoyer des messages dans les fils, Intégrer des liens "
+                "et Joindre des fichiers si utilisés."
+            )
+
+        raise RuntimeError(
+            "Freeborn OP Corp forum publication failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    body = (
+        response.json()
+        or {}
+    )
+
+    thread_id = str(
+        body[
+            "id"
+        ]
+    )
+
+    starter = (
+        body.get(
+            "message"
+        )
+        or {}
+    )
+
+    message_id = str(
+        starter.get(
+            "id"
+        )
+        or thread_id
+    )
+
+    freeborn_op_save_discord_link(
+        operation_id,
+        thread_id,
+        message_id,
+    )
+
+    return {
+        "thread_id":
+            thread_id,
+        "message_id":
+            message_id,
+    }
+
+
+def freeborn_op_refresh_post(
+    operation_id
+):
+    operation = freeborn_op_get(
+        operation_id
+    )
+
+    if not operation:
+        raise RuntimeError(
+            "OP Corp not found"
+        )
+
+    thread_id = str(
+        operation.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    message_id = str(
+        operation.get(
+            "discord_post_message_id"
+        )
+        or ""
+    ).strip()
+
+    if (
+        not thread_id
+        or not message_id
+    ):
+        raise RuntimeError(
+            "OP Corp Discord linkage missing"
+        )
+
+    response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}/messages/"
+            f"{message_id}"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "embeds": [
+                freeborn_op_build_embed(
+                    operation
+                )
+            ],
+            "components":
+                freeborn_op_components(
+                    operation_id,
+                    operation[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn OP Corp post update failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+
+def freeborn_op_update(
+    operation_id,
+    title,
+    operation_date,
+    start_time,
+    end_time,
+    fleet_commander,
+    doctrine,
+    notes,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE corp_operations
+                SET
+                    title = %s,
+                    operation_date = %s,
+                    start_time = %s,
+                    end_time = %s,
+                    fleet_commander = %s,
+                    doctrine = %s,
+                    notes = %s,
+                    updated_at = NOW()
+                WHERE operation_id = %s
+                  AND status = 'open'
+                RETURNING operation_id;
+                """,
+                (
+                    str(title),
+                    operation_date,
+                    start_time,
+                    end_time,
+                    fleet_commander,
+                    doctrine,
+                    notes,
+                    int(operation_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_op_close(
+    operation_id
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE corp_operations
+                SET
+                    status = 'closed',
+                    closed_at = NOW(),
+                    updated_at = NOW()
+                WHERE operation_id = %s
+                  AND status = 'open'
+                RETURNING operation_id;
+                """,
+                (
+                    int(operation_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_op_archive_thread(
+    operation_id
+):
+    operation = freeborn_op_get(
+        operation_id
+    )
+
+    if not operation:
+        return
+
+    thread_id = str(
+        operation.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    if not thread_id:
+        return
+
+    response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "archived":
+                True,
+        },
+        timeout=12,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        print(
+            "Freeborn OP Corp archive warning:",
+            response.status_code,
+            response.text[:500],
+        )
+
+
+# ============================================================
 # MESSAGE COMPONENT HANDLER
 # ============================================================
 
@@ -3000,6 +14982,1944 @@ def handle_message_component(
         )
     )
 
+    # ========================================================
+    # FREEBORN SRP — DECISION / CLOSURE
+    # ========================================================
+
+    srp_action_match = re.fullmatch(
+        r"srp_(accept|refuse|close):(\d+)",
+        str(
+            custom_id
+        ),
+    )
+
+    if srp_action_match:
+        action = str(
+            srp_action_match.group(
+                1
+            )
+        )
+
+        srp_id = int(
+            srp_action_match.group(
+                2
+            )
+        )
+
+        request_row = freeborn_srp_get(
+            srp_id
+        )
+
+        if not request_row:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette demande SRP n'existe plus.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_roles = interaction_member_role_ids(
+            data
+        )
+
+        if not (
+            actor_roles
+            & SRP_MANAGER_ROLE_IDS
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **Action refusée.**\n"
+                            "Seuls les rôles **Direction** et **CEO** "
+                            "peuvent accepter, refuser ou clôturer un SRP."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+        status_map = {
+            "accept":
+                "accepted",
+            "refuse":
+                "refused",
+            "close":
+                "closed",
+        }
+
+        new_status = status_map[
+            action
+        ]
+
+        if not freeborn_srp_set_status(
+            srp_id,
+            new_status,
+            actor_user_id,
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette demande SRP est déjà clôturée.",
+                    "flags":
+                        64,
+                },
+            })
+
+        freeborn_srp_refresh(
+            srp_id
+        )
+
+        if action == "close":
+            freeborn_srp_archive_thread(
+                srp_id
+            )
+
+        response_text = {
+            "accept":
+                "✅ Demande SRP **acceptée**.",
+            "refuse":
+                "❌ Demande SRP **refusée**.",
+            "close":
+                "🏁 Demande SRP **clôturée et archivée**.",
+        }[
+            action
+        ]
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        f"{response_text}\n"
+                        f"Référence : **{freeborn_srp_reference(srp_id)}**"
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # FREEBORN OP CORP — PARTICIPATION / MANAGEMENT
+    # ========================================================
+
+    attendance_match = re.fullmatch(
+        r"op_attend_(present|absent|maybe):(\d+)",
+        str(
+            custom_id
+        ),
+    )
+
+    if attendance_match:
+        attendance_status = (
+            attendance_match.group(
+                1
+            )
+        )
+
+        operation_id = int(
+            attendance_match.group(
+                2
+            )
+        )
+
+        operation = freeborn_op_get(
+            operation_id
+        )
+
+        if (
+            not operation
+            or operation[
+                "status"
+            ] != "open"
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette OP Corp n'est plus ouverte.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+        freeborn_op_set_attendance(
+            operation_id,
+            actor_user_id,
+            attendance_status,
+        )
+
+        freeborn_op_refresh_post(
+            operation_id
+        )
+
+        labels = {
+            "present":
+                "Présent",
+            "absent":
+                "Absent",
+            "maybe":
+                "Indécis",
+        }
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "✅ Ton statut pour "
+                        f"**{freeborn_op_reference(operation_id)}** "
+                        f"est maintenant **{labels[attendance_status]}**."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    op_action_match = re.fullmatch(
+        r"op_(edit|close):(\d+)",
+        str(
+            custom_id
+        ),
+    )
+
+    if op_action_match:
+        action = (
+            op_action_match.group(
+                1
+            )
+        )
+
+        operation_id = int(
+            op_action_match.group(
+                2
+            )
+        )
+
+        operation = freeborn_op_get(
+            operation_id
+        )
+
+        if not operation:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette OP Corp n'existe plus.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+        can_manage = (
+            actor_user_id
+            == str(
+                operation[
+                    "created_by_discord_user_id"
+                ]
+            )
+            or bool(
+                interaction_member_role_ids(
+                    data
+                )
+                & OP_CORP_MANAGER_ROLE_IDS
+            )
+        )
+
+        if not can_manage:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "⛔ Tu n'es pas autorisé à gérer cette OP Corp.",
+                    "flags":
+                        64,
+                },
+            })
+
+        if action == "close":
+            if not freeborn_op_close(
+                operation_id
+            ):
+                return jsonify({
+                    "type":
+                        4,
+                    "data": {
+                        "content":
+                            "ℹ️ Cette OP Corp est déjà clôturée.",
+                        "flags":
+                            64,
+                    },
+                })
+
+            freeborn_op_refresh_post(
+                operation_id
+            )
+
+            freeborn_op_archive_thread(
+                operation_id
+            )
+
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            f"🏁 **{freeborn_op_reference(operation_id)} "
+                            "clôturée.**\n"
+                            "Le post a été archivé dans le forum OP Corp."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        details_value = "\n".join(
+            value
+            for value in [
+                (
+                    "FC: "
+                    + str(
+                        operation.get(
+                            "fleet_commander"
+                        )
+                    )
+                    if operation.get(
+                        "fleet_commander"
+                    )
+                    else ""
+                ),
+                (
+                    "Doctrine: "
+                    + str(
+                        operation.get(
+                            "doctrine"
+                        )
+                    )
+                    if operation.get(
+                        "doctrine"
+                    )
+                    else ""
+                ),
+                (
+                    "Consignes: "
+                    + str(
+                        operation.get(
+                            "notes"
+                        )
+                    )
+                    if operation.get(
+                        "notes"
+                    )
+                    else ""
+                ),
+            ]
+            if value
+        )
+
+        return jsonify({
+            "type":
+                9,
+            "data": {
+                "custom_id":
+                    f"freeborn_op_edit:{operation_id}",
+                "title":
+                    (
+                        f"Modifier "
+                        f"{freeborn_op_reference(operation_id)}"
+                    )[:45],
+                "components": [
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Nom de l'OP",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_title",
+                            "style":
+                                1,
+                            "min_length":
+                                2,
+                            "max_length":
+                                80,
+                            "required":
+                                True,
+                            "value":
+                                str(
+                                    operation[
+                                        "title"
+                                    ]
+                                )[:80],
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Date",
+                        "description":
+                            "Format JJ/MM/AAAA",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_date",
+                            "style":
+                                1,
+                            "required":
+                                True,
+                            "value":
+                                operation[
+                                    "operation_date"
+                                ].strftime(
+                                    "%d/%m/%Y"
+                                ),
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Début de l'OP",
+                        "description":
+                            "Format HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_start",
+                            "style":
+                                1,
+                            "required":
+                                True,
+                            "value":
+                                operation[
+                                    "start_time"
+                                ].strftime(
+                                    "%H:%M"
+                                ),
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Fin de l'OP",
+                        "description":
+                            "Format HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_end",
+                            "style":
+                                1,
+                            "required":
+                                True,
+                            "value":
+                                operation[
+                                    "end_time"
+                                ].strftime(
+                                    "%H:%M"
+                                ),
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "FC / Doctrine / Consignes",
+                        "description":
+                            "Une ligne par information : FC:, Doctrine: ou Consignes:",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_details",
+                            "style":
+                                2,
+                            "required":
+                                False,
+                            "max_length":
+                                1000,
+                            "value":
+                                details_value[:1000],
+                        },
+                    },
+                ],
+            },
+        })
+
+    # ========================================================
+    # FREEBORN MARKET — LIFECYCLE COMPONENTS
+    # IMPORTANT: market buttons must be routed here, before the
+    # legacy signed-token confirmation router below.
+    # ========================================================
+
+    lifecycle_match = re.fullmatch(
+        r"market_(take|withdraw|complete|cancel):(\d+)",
+        str(custom_id),
+    )
+
+    if lifecycle_match:
+        guild_id = str(data.get("guild_id") or "")
+
+        try:
+            discord_user_id = str(
+                data["member"]["user"]["id"]
+            )
+        except (KeyError, TypeError):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": "⚠️ Impossible d'identifier l'utilisateur Discord.",
+                    "flags": 64,
+                },
+            })
+
+        action = lifecycle_match.group(1)
+        market_id = int(lifecycle_match.group(2))
+
+        order = freeborn_market_get_order(
+            guild_id,
+            market_id,
+        )
+
+        if not order:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": "ℹ️ Cette annonce Freeborn Market n'existe plus.",
+                    "flags": 64,
+                },
+            })
+
+        if action == "take":
+            if order["status"] != "open":
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Cette annonce n'est plus disponible au statut **OUVERT**.",
+                        "flags": 64,
+                    },
+                })
+
+            creator_is_taker = (
+                str(order["created_by_discord_user_id"])
+                == discord_user_id
+            )
+
+            if creator_is_taker:
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": (
+                            "ℹ️ Tu es déjà le créateur de cette annonce. "
+                            "Un autre membre doit la prendre."
+                        ),
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_take_order(
+                guild_id,
+                market_id,
+                discord_user_id,
+            ):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ L'annonce vient d'être prise par quelqu'un d'autre.",
+                        "flags": 64,
+                    },
+                })
+
+            order = freeborn_market_get_order(guild_id, market_id)
+            freeborn_market_update_forum_post(order)
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"🤝 **{format_market_reference(market_id)} "
+                        "est maintenant EN COURS.**\n"
+                        "Tu es enregistré comme membre ayant pris l'annonce."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        if action == "withdraw":
+            if order["status"] != "in_progress":
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Seule une annonce **EN COURS** peut faire l'objet d'un désistement.",
+                        "flags": 64,
+                    },
+                })
+
+            if str(order.get("accepted_by_discord_user_id") or "") != str(discord_user_id):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "⛔ Seul le membre ayant pris cette annonce peut se désister.",
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_withdraw_order(
+                guild_id,
+                market_id,
+                discord_user_id,
+            ):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Le statut de cette annonce a déjà changé.",
+                        "flags": 64,
+                    },
+                })
+
+            order = freeborn_market_get_order(guild_id, market_id)
+            freeborn_market_update_forum_post(order)
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"↩️ **{format_market_reference(market_id)} est de nouveau OUVERT.**\n"
+                        "Ton attribution a été retirée et l'annonce peut être prise par un autre membre."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        if action == "complete":
+            if order["status"] != "in_progress":
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Seule une annonce **EN COURS** peut être terminée.",
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_user_can_complete(
+                data, order, discord_user_id
+            ):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "⛔ Tu n'es pas autorisé à terminer cette annonce.",
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_complete_order(guild_id, market_id):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Le statut de cette annonce a déjà changé.",
+                        "flags": 64,
+                    },
+                })
+
+            order = freeborn_market_get_order(guild_id, market_id)
+            freeborn_market_update_forum_post(order)
+            freeborn_market_delete_forum_thread(order)
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"✅ **{format_market_reference(market_id)} terminé.**\n"
+                        "L'annonce est conservée dans Neon et le post Discord a été supprimé."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        if action == "cancel":
+            if order["status"] not in {"open", "in_progress"}:
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Cette annonce est déjà clôturée.",
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_user_can_cancel(
+                data, order, discord_user_id
+            ):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": (
+                            "⛔ Seul le créateur de l'annonce, la Direction, "
+                            "le Haut Conseil ou le CEO peut l'annuler."
+                        ),
+                        "flags": 64,
+                    },
+                })
+
+            if not freeborn_market_cancel_order(guild_id, market_id):
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": "ℹ️ Le statut de cette annonce a déjà changé.",
+                        "flags": 64,
+                    },
+                })
+
+            order = freeborn_market_get_order(guild_id, market_id)
+            freeborn_market_update_forum_post(order)
+            freeborn_market_delete_forum_thread(order)
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"🔴 **{format_market_reference(market_id)} annulé.**\n"
+                        "L'annonce est conservée dans Neon et le post Discord a été supprimé."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+    # ========================================================
+    # V3 ORIENTATION
+    # ========================================================
+
+    if custom_id in {
+        "v3_orientation_guest",
+        "v3_orientation_candidate",
+    }:
+
+        try:
+
+            actor_user_id = str(
+                data[
+                    "member"
+                ][
+                    "user"
+                ][
+                    "id"
+                ]
+            )
+
+            guild_id = str(
+                data[
+                    "guild_id"
+                ]
+            )
+
+        except Exception:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Impossible d'identifier "
+                        "ton compte ou le serveur Discord.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        guild_config = get_guild_config(
+            guild_id
+        )
+
+        if (
+            not guild_config
+            or
+            not guild_config[6]
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ Ce serveur n'est pas "
+                        "configuré pour Freeborn.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        orientation_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                "orientation",
+            )
+        )
+
+        if (
+            not orientation_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            orientation_channel_id
+        ):
+
+            return dedicated_channel_error(
+                orientation_channel_id,
+                "orientation",
+            )
+
+        member_roles = (
+            interaction_member_role_ids(
+                data
+            )
+        )
+
+        protected_role_ids = {
+            role_id
+            for role_id
+            in {
+                resolve_guild_role_id(
+                    guild_id,
+                    "candidate_accepted",
+                ),
+                resolve_guild_role_id(
+                    guild_id,
+                    "member",
+                ),
+            }
+            if role_id
+        }
+
+        if (
+            member_roles
+            &
+            protected_role_ids
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "ℹ️ Ton statut est déjà "
+                        "plus avancé que l'Orientation. "
+                        "Aucune modification effectuée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        new_status = (
+            "guest"
+
+            if custom_id
+            ==
+            "v3_orientation_guest"
+
+            else
+
+            "candidate"
+        )
+
+        try:
+
+            role_result = (
+                apply_recruitment_status_role(
+                    guild_id,
+                    actor_user_id,
+                    new_status,
+                )
+            )
+
+            if (
+                role_result[
+                    "add_status_code"
+                ]
+                not in
+                (200, 204)
+            ):
+
+                raise RuntimeError(
+                    "Discord role assignment failed: "
+                    f"{role_result['add_status_code']}"
+                )
+
+            set_member_status_v3(
+                guild_id,
+                actor_user_id,
+                new_status,
+                actor_user_id,
+            )
+
+            add_audit_event_v3(
+                guild_id,
+                (
+                    "orientation_guest"
+                    if new_status == "guest"
+                    else
+                    "orientation_candidate"
+                ),
+                target_discord_user_id=
+                    actor_user_id,
+                actor_discord_user_id=
+                    actor_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "V3 orientation failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ L'Orientation n'a pas pu "
+                        "être enregistrée. "
+                        "Un administrateur peut vérifier "
+                        "la configuration du bot.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if new_status == "guest":
+
+            confirmation = (
+                "✅ **Orientation enregistrée : Invité**\n\n"
+                "Le rôle **Invité** t'a été attribué."
+            )
+
+        else:
+
+            confirmation = (
+                "✅ **Orientation enregistrée : Candidat**\n\n"
+                "Le rôle **Candidat** t'a été attribué. "
+                "Tu peux maintenant poursuivre le recrutement."
+            )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    confirmation,
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # V3 POLICY ACCEPTANCE
+    # ========================================================
+
+    if custom_id in {
+        "v3_accept_corp_rules",
+        "v3_accept_charter",
+    }:
+
+        try:
+
+            actor_user_id = str(
+                data["member"]["user"]["id"]
+            )
+
+            guild_id = str(
+                data["guild_id"]
+            )
+
+            channel_id = str(
+                data.get("channel_id", "")
+            )
+
+            message_id = str(
+                data.get("message", {}).get(
+                    "id",
+                    "",
+                )
+            )
+
+        except Exception:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Impossible d'identifier "
+                        "ton compte ou ce message.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        guild_config = get_guild_config(
+            guild_id
+        )
+
+        if (
+            not guild_config
+            or
+            not guild_config[6]
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ Ce serveur n'est pas "
+                        "configuré pour Freeborn.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        current_status = get_member_status_v3(
+            guild_id,
+            actor_user_id,
+        )
+
+        allowed_statuses = {
+            "candidate",
+            "candidate_accepted",
+            "member",
+        }
+
+        current_status_name = (
+            str(current_status[0])
+            if current_status
+            else None
+        )
+
+        if current_status_name not in allowed_statuses:
+
+            live_status = (
+                infer_recruitment_status_from_interaction_roles(
+                    data,
+                    guild_id,
+                )
+            )
+
+            if live_status in allowed_statuses:
+
+                try:
+
+                    set_member_status_v3(
+                        guild_id,
+                        actor_user_id,
+                        live_status,
+                        changed_by_discord_user_id=
+                            actor_user_id,
+                    )
+
+                    current_status_name = live_status
+
+                    add_audit_event_v3(
+                        guild_id,
+                        "member_status_reconciled_from_discord_roles",
+                        target_discord_user_id=
+                            actor_user_id,
+                        actor_discord_user_id=
+                            actor_user_id,
+                    )
+
+                except Exception as error:
+
+                    print(
+                        "Policy role/status reconciliation error:",
+                        repr(error),
+                    )
+
+        if current_status_name not in allowed_statuses:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "ℹ️ Cette acceptation est réservée "
+                        "aux **Candidats**, **Candidats Acceptés** "
+                        "et **Membres** du parcours Freeborn.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if custom_id == "v3_accept_corp_rules":
+
+            document_type = "corp_rules"
+            document_version = CORP_RULES_VERSION
+            document_label = "Règlement Corp"
+            audit_event = "policy_accept_corp_rules"
+            dedicated_channel_type = "corp_rules"
+            dedicated_channel_label = "règlement-corp"
+
+        else:
+
+            document_type = "freeborn_charter"
+            document_version = FREEBORN_CHARTER_VERSION
+            document_label = "Charte Freeborn Legacy"
+            audit_event = "policy_accept_charter"
+            dedicated_channel_type = "charter"
+            dedicated_channel_label = "charte-freeborn"
+
+        expected_policy_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                dedicated_channel_type,
+            )
+        )
+
+        if (
+            not expected_policy_channel_id
+            or
+            channel_id
+            !=
+            expected_policy_channel_id
+        ):
+
+            return dedicated_channel_error(
+                expected_policy_channel_id,
+                dedicated_channel_label,
+            )
+
+        existing_acceptance = (
+            has_policy_acceptance_v3(
+                guild_id,
+                actor_user_id,
+                document_type,
+                document_version,
+            )
+        )
+
+        if existing_acceptance:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        f"✅ Tu as déjà accepté "
+                        f"**{document_label}** "
+                        f"(version `{document_version}`).\n"
+                        f"Acceptation enregistrée le "
+                        f"**{format_datetime(existing_acceptance[0])}**.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        try:
+
+            save_policy_acceptance_v3(
+                guild_id,
+                actor_user_id,
+                document_type,
+                document_version,
+                message_id=message_id,
+                channel_id=channel_id,
+            )
+
+            add_audit_event_v3(
+                guild_id,
+                audit_event,
+                target_discord_user_id=
+                    actor_user_id,
+                actor_discord_user_id=
+                    actor_user_id,
+            )
+
+            recorded_acceptance = (
+                has_policy_acceptance_v3(
+                    guild_id,
+                    actor_user_id,
+                    document_type,
+                    document_version,
+                )
+            )
+
+            main_row = get_guild_main_character_v3(
+                guild_id,
+                actor_user_id,
+            )
+
+            accepted_at_text = (
+                format_datetime(recorded_acceptance[0])
+                if recorded_acceptance
+                else "Horodatage indisponible"
+            )
+
+            eve_identity_text = (
+                (
+                    f"**{main_row[1]}** "
+                    f"(`{main_row[0]}`)"
+                )
+                if main_row
+                else
+                "Non encore liée — validation EVE à venir"
+            )
+
+            log_title = (
+                "📕 **RÈGLEMENT CORPORATION ACCEPTÉ**"
+                if document_type == "corp_rules"
+                else
+                "📜 **CHARTE FREEBORN LEGACY ACCEPTÉE**"
+            )
+
+            policy_progress = (
+                has_required_policy_acceptances_v3(
+                    guild_id,
+                    actor_user_id,
+                )
+            )
+
+            documentation_complete = bool(
+                policy_progress["complete"]
+            )
+
+            documentation_status_text = (
+                "✅ **COMPLET — Règlement + Charte acceptés**"
+                if documentation_complete
+                else
+                "⏳ **EN COURS — un document reste à accepter**"
+            )
+
+            log_v3_event_to_discord(
+                guild_config,
+                f"{log_title}\n"
+                f"Discord : <@{actor_user_id}> (`{actor_user_id}`)\n"
+                f"Main EVE : {eve_identity_text}\n"
+                f"Document : **{document_label}**\n"
+                f"Version : `{document_version}`\n"
+                f"Accepté le : **{accepted_at_text}**\n"
+                f"Canal : <#{channel_id}>\n"
+                f"Parcours documentaire : {documentation_status_text}",
+            )
+
+            if documentation_complete:
+                add_audit_event_v3(
+                    guild_id,
+                    "policy_documents_complete",
+                    target_discord_user_id=
+                        actor_user_id,
+                    actor_discord_user_id=
+                        actor_user_id,
+                )
+
+        except Exception as error:
+
+            print(
+                "V3 policy acceptance failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ L'acceptation n'a pas pu "
+                        "être enregistrée. "
+                        "Aucune validation n'a été confirmée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    f"✅ **{document_label} accepté**\n\n"
+                    f"Version : `{document_version}`\n"
+                    "Ta preuve d'acceptation horodatée "
+                    "a été enregistrée par Freeborn.\n\n"
+                    + (
+                        (
+                            "✅ **Parcours documentaire terminé.**\n"
+                            "Le Règlement Corporation et la Charte "
+                            "Freeborn Legacy sont maintenant validés."
+                        )
+                        if documentation_complete
+                        else
+                        (
+                            "➡️ Tu peux maintenant poursuivre avec "
+                            "la **Charte Freeborn Legacy**."
+                            if document_type == "corp_rules"
+                            else
+                            "➡️ Le **Règlement Corporation** doit encore "
+                            "être accepté pour terminer cette étape."
+                        )
+                    ),
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # ALT REMOVE CONFIRMATION
+    # ========================================================
+
+    if custom_id.startswith("ar_yes:") or custom_id.startswith("ar_no:"):
+
+        try:
+            actor_user_id = str(data["member"]["user"]["id"])
+            token = custom_id.split(":", 1)[1]
+            character_id, requester_user_id = read_alt_remove_token(token)
+        except SignatureExpired:
+            return jsonify({"type": 7, "data": {"content": "⌛ **Confirmation expirée**\n\nAucune suppression effectuée.", "components": []}})
+        except (BadSignature, ValueError, KeyError):
+            return jsonify({"type": 7, "data": {"content": "⛔ **Confirmation invalide**\n\nAucune modification effectuée.", "components": []}})
+
+        if actor_user_id != requester_user_id:
+            return jsonify({"type": 4, "data": {"content": "⛔ Cette confirmation ne t'appartient pas.", "flags": 64}})
+
+        if custom_id.startswith("ar_no:"):
+            return jsonify({"type": 7, "data": {"content": "🛡️ **Suppression annulée**\n\nTon profil Freeborn reste inchangé.", "components": []}})
+
+        try:
+            result = remove_alt_character(actor_user_id, character_id)
+        except ValueError as error:
+            return jsonify({"type": 7, "data": {"content": f"❌ **Suppression refusée**\n\n{str(error)}", "components": []}})
+        except Exception as error:
+            print("Alt remove confirmation failed:", repr(error))
+            return jsonify({"type": 7, "data": {"content": "⚠️ **Erreur base de données**\n\nL'Alt n'a pas été supprimé.", "components": []}})
+
+        if result["remaining_alts"] == 0:
+            role_response = remove_discord_role(
+                str(data.get("guild_id", DISCORD_GUILD_ID)),
+                actor_user_id,
+                DISCORD_ALT_CHARACTER_ROLE_ID,
+            )
+            role_text = (
+                "🔹 Aucun Alt restant : rôle **Alt Character** retiré."
+                if role_response.status_code in (200, 204)
+                else
+                "⚠️ Aucun Alt restant, mais le rôle **Alt Character** n'a pas pu être retiré."
+            )
+        else:
+            role_text = f"🔹 Alts restants : **{result['remaining_alts']}** — rôle **Alt Character** conservé."
+
+        current_main = get_main_character(actor_user_id)
+        current_main_name = current_main[1] if current_main else "Inconnu"
+
+        return jsonify({"type": 7, "data": {
+            "content":
+                "🗑️ **Suppression du personnage secondaire**\n\n"
+                f"Alt supprimé : **{result['character_name']}**\n\n"
+                "✅ Le personnage a été retiré de ton profil Freeborn.\n"
+                f"✅ Ton Main **{current_main_name}** reste inchangé.\n"
+                f"{role_text}",
+            "components": [],
+        }})
+
+    # ========================================================
+    # MAIN CHANGE CONFIRMATION
+    # ========================================================
+
+    if custom_id.startswith("mc_yes:") or custom_id.startswith("mc_no:"):
+
+        try:
+            actor_user_id = str(data["member"]["user"]["id"])
+            guild_id = str(data["guild_id"])
+            token = custom_id.split(":", 1)[1]
+            character_id, requester_user_id = read_main_change_token(token)
+        except SignatureExpired:
+            return jsonify({"type": 7, "data": {"content": "⌛ **Confirmation expirée**\n\nAucun changement effectué.", "components": []}})
+        except (BadSignature, ValueError, KeyError):
+            return jsonify({"type": 7, "data": {"content": "⛔ **Confirmation invalide**\n\nAucune modification effectuée.", "components": []}})
+
+        if actor_user_id != requester_user_id:
+            return jsonify({"type": 4, "data": {"content": "⛔ Cette confirmation ne t'appartient pas.", "flags": 64}})
+
+        if custom_id.startswith("mc_no:"):
+            return jsonify({"type": 7, "data": {"content": "🛡️ **Changement annulé**\n\nTon Main reste inchangé.", "components": []}})
+
+        alts = get_member_alts(actor_user_id)
+        selected_alt = next((alt for alt in alts if str(alt[0]) == str(character_id)), None)
+
+        if not selected_alt:
+            return jsonify({"type": 7, "data": {"content": "❌ Ce personnage n'est plus un Alt Character enregistré sur ton compte.", "components": []}})
+
+        new_main_id, new_main_name, _, _ = selected_alt
+        eve_data = get_current_eve_character(new_main_id)
+
+        if eve_data is None:
+            return jsonify({"type": 7, "data": {"content": "⚠️ **Changement annulé**\n\nEVE ESI n'a pas pu confirmer l'état actuel du personnage.", "components": []}})
+
+        current_corporation_id = int(eve_data["corporation_id"])
+
+        if current_corporation_id != FREEBORN_CORPORATION_ID:
+            return jsonify({"type": 7, "data": {"content": f"❌ **Changement refusé**\n\n**{new_main_name}** n'appartient actuellement pas à **Freeborn Legacy**.", "components": []}})
+
+        try:
+            result = change_main_character(
+                actor_user_id,
+                new_main_id,
+                current_corporation_id,
+            )
+        except Exception as error:
+            print("Main change confirmation failed:", repr(error))
+            return jsonify({"type": 7, "data": {"content": "⚠️ **Changement impossible**\n\nAucune donnée n'a été modifiée.", "components": []}})
+
+        for role_id in (
+            DISCORD_MEMBER_ROLE_ID,
+            DISCORD_EVE_VERIFIED_ROLE_ID,
+            DISCORD_MAIN_CHARACTER_ROLE_ID,
+            DISCORD_ALT_CHARACTER_ROLE_ID,
+        ):
+            add_discord_role(guild_id, actor_user_id, role_id)
+
+        nickname_response = sync_discord_nickname(
+            guild_id,
+            actor_user_id,
+            result["new_main_name"],
+        )
+
+        nickname_text = (
+            f"✅ Pseudo Discord synchronisé sur **{result['new_main_name']}**."
+            if nickname_response.status_code in (200, 204)
+            else
+            "⚠️ Le changement de Main est validé, mais le pseudo Discord n'a pas pu être modifié (propriétaire du serveur ou hiérarchie Discord)."
+        )
+
+        return jsonify({"type": 7, "data": {
+            "content":
+                "🔄 **Changement de personnage principal**\n\n"
+                f"Ancien Main : **{result['old_main_name']}** → Personnage secondaire\n"
+                f"Nouveau personnage principal : **{result['new_main_name']}** → Personnage principal\n\n"
+                "✅ Changement enregistré dans Freeborn.\n"
+                f"{nickname_text}\n\n"
+                "Aucun personnage EVE n'a été supprimé.",
+            "components": [],
+        }})
+
+    # ========================================================
+    # SYNC APPLY CONFIRMATION
+    # ========================================================
+
+    if custom_id.startswith("sa_yes:") or custom_id.startswith("sa_no:"):
+
+        try:
+
+            actor_user_id = str(
+                data["member"]["user"]["id"]
+            )
+
+            guild_id = str(
+                data["guild_id"]
+            )
+
+            token = custom_id.split(
+                ":",
+                1,
+            )[1]
+
+            requester_user_id = (
+                read_sync_apply_token(
+                    token
+                )
+            )
+
+        except SignatureExpired:
+
+            return jsonify({
+                "type":
+                    7,
+
+                "data": {
+                    "content":
+                        "⌛ **Confirmation expirée**\n\n"
+                        "Aucune synchronisation n'a été appliquée.\n\n"
+                        "Relance **/synchro-appliquer** si nécessaire.",
+
+                    "components":
+                        [],
+                },
+            })
+
+        except (
+            BadSignature,
+            ValueError,
+            KeyError,
+        ):
+
+            return jsonify({
+                "type":
+                    7,
+
+                "data": {
+                    "content":
+                        "⛔ **Confirmation invalide**\n\n"
+                        "Aucune synchronisation n'a été appliquée.",
+
+                    "components":
+                        [],
+                },
+            })
+
+        if actor_user_id != requester_user_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ Cette confirmation ne t'appartient pas.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if not interaction_is_staff(
+            data
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ Tu n'as plus les permissions nécessaires "
+                        "pour appliquer cette synchronisation.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        guild_config = get_guild_config(
+            guild_id
+        )
+
+        expected_channel_id = (
+            str(guild_config[4])
+            if guild_config
+            and guild_config[4]
+            else None
+        )
+
+        if (
+            not expected_channel_id
+            or
+            str(data.get("channel_id", ""))
+            != expected_channel_id
+        ):
+
+            return dedicated_channel_error(
+                expected_channel_id,
+                "commandes-bot",
+            )
+
+        if custom_id.startswith("sa_no:"):
+
+            return jsonify({
+                "type":
+                    7,
+
+                "data": {
+                    "content":
+                        "🛡️ **Synchronisation annulée**\n\n"
+                        "Aucune donnée Neon et aucun rôle Discord "
+                        "n'ont été modifiés.",
+
+                    "components":
+                        [],
+                },
+            })
+
+        try:
+
+            (
+                sync_results,
+                actions,
+            ) = run_sync(
+                apply_changes=True
+            )
+
+        except Exception as error:
+
+            print(
+                "Sync apply confirmation failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    7,
+
+                "data": {
+                    "content":
+                        "⚠️ **Synchronisation impossible**\n\n"
+                        "La vérification ESI ou l'application des "
+                        "changements a rencontré une erreur.",
+
+                    "components":
+                        [],
+                },
+            })
+
+        return jsonify({
+            "type":
+                7,
+
+            "data": {
+                "content":
+                    build_sync_message(
+                        sync_results,
+                        actions=actions,
+                        applied=True,
+                    ),
+
+                "components":
+                    [],
+            },
+        })
+
+    # ========================================================
+    # FREEBORN FITTINGS — COMPONENTS
+    # ========================================================
+
+    if (
+        custom_id.startswith("fit_")
+        or
+        custom_id.startswith("freeborn_fit_")
+    ):
+        diplomacy_denial = ensure_fitting_channel_allowed(
+            data
+        )
+
+        if diplomacy_denial is not None:
+            return diplomacy_denial
+
+    if custom_id.startswith("fit_eft:"):
+        try:
+            fit_id = int(custom_id.split(":", 1)[1])
+            guild_id = str(data["guild_id"])
+        except (ValueError, KeyError, TypeError):
+            return jsonify({"type": 4, "data": {"content": "❌ Fit invalide.", "flags": 64}})
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({"type": 4, "data": {"content": "❌ Ce fit n'existe plus dans Freeborn.", "flags": 64}})
+
+        if not interaction_has_any_role(data, FITTING_VIEWER_ROLE_IDS):
+            return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
+
+        eft_text = str(fit.get("eft_text") or "")
+        safe_eft = eft_text[:1800]
+        suffix = "\n… *(EFT tronqué pour Discord)*" if len(eft_text) > 1800 else ""
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"📋 **EFT — {format_fit_reference(fit_id)} • {fit['ship_name']}**\n"
+                    f"```\n{safe_eft}\n```{suffix}"
+                ),
+                "flags": 64,
+            },
+        })
+
+    if custom_id.startswith("fit_status_yes:") or custom_id.startswith("fit_status_no:"):
+        try:
+            actor_user_id = str(data["member"]["user"]["id"])
+            guild_id = str(data["guild_id"])
+            token = custom_id.split(":", 1)[1]
+            fit_id, requester_user_id, new_status = read_fit_status_token(token)
+        except SignatureExpired:
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "⌛ **Confirmation expirée**\n\nLe statut du fit n'a pas été modifié.",
+                    "components": [],
+                },
+            })
+        except (BadSignature, ValueError, KeyError, TypeError):
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "⛔ **Confirmation invalide**\n\nLe statut du fit n'a pas été modifié.",
+                    "components": [],
+                },
+            })
+
+        if actor_user_id != requester_user_id:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": "⛔ Cette confirmation ne t'appartient pas.",
+                    "flags": 64,
+                },
+            })
+
+        # Re-check CEO permission at confirmation time.
+        if not interaction_has_any_role(data, FITTING_MANAGER_ROLE_IDS):
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "⛔ **Validation refusée**\n\nApprouver ou refuser un fitting est réservé au CEO.",
+                    "components": [],
+                },
+            })
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "❌ Ce fit n'existe plus dans Freeborn.",
+                    "components": [],
+                },
+            })
+
+        if custom_id.startswith("fit_status_no:"):
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "🛡️ **Validation annulée**\n\nLe statut du fit reste inchangé.",
+                    "components": [],
+                },
+            })
+
+        current_status = str(fit.get("status") or "").lower()
+        if current_status != "proposed":
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": (
+                        f"ℹ️ **Aucune modification**\n\n"
+                        f"{format_fit_reference(fit_id)} est déjà au statut "
+                        f"{fit_status_label(current_status)}.\n"
+                        "Seul un fit PROPOSÉ peut être approuvé ou refusé."
+                    ),
+                    "components": [],
+                },
+            })
+
+        updated = set_fit_status(guild_id, fit_id, new_status)
+        if not updated:
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": "❌ Mise à jour impossible.",
+                    "components": [],
+                },
+            })
+
+        action_text = (
+            "🟢 **FREEBORN APPROVED**"
+            if new_status == "approved"
+            else "🔴 **FIT REFUSÉ**"
+        )
+
+        return jsonify({
+            "type": 7,
+            "data": {
+                "content": (
+                    f"{action_text} — **{format_fit_reference(fit_id)}**\n\n"
+                    f"**{updated['ship_name']} — {updated['name']}**\n"
+                    f"Statut : {fit_status_label(updated['status'])}\n\n"
+                    "L'identifiant Freeborn est conservé : aucune nouvelle fiche n'a été créée."
+                ),
+                "components": [],
+            },
+        })
+
+    if custom_id.startswith("fit_del_yes:") or custom_id.startswith("fit_del_no:"):
+        try:
+            actor_user_id = str(data["member"]["user"]["id"])
+            guild_id = str(data["guild_id"])
+            token = custom_id.split(":", 1)[1]
+            fit_id, requester_user_id = read_fit_delete_token(token)
+        except SignatureExpired:
+            return jsonify({"type": 7, "data": {"content": "⌛ **Confirmation expirée**\n\nAucun fit n'a été supprimé.", "components": []}})
+        except (BadSignature, ValueError, KeyError, TypeError):
+            return jsonify({"type": 7, "data": {"content": "⛔ **Confirmation invalide**\n\nAucun fit n'a été supprimé.", "components": []}})
+
+        if actor_user_id != requester_user_id:
+            return jsonify({"type": 4, "data": {"content": "⛔ Cette confirmation ne t'appartient pas.", "flags": 64}})
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({"type": 7, "data": {"content": "ℹ️ Ce fit n'existe déjà plus dans Freeborn.", "components": []}})
+
+        if not can_delete_fit(data, fit):
+            return jsonify({"type": 4, "data": {"content": "⛔ Tu n'as plus la permission de supprimer ce fit.", "flags": 64}})
+
+        if custom_id.startswith("fit_del_no:"):
+            return jsonify({"type": 7, "data": {"content": "🛡️ **Suppression annulée**\n\nLe fit reste enregistré dans Freeborn.", "components": []}})
+
+        try:
+            discord_delete = (
+                delete_fit_discord_publication(
+                    fit
+                )
+            )
+        except Exception as error:
+            print(
+                "Freeborn fit Discord delete exception:",
+                format_fit_reference(
+                    fit_id
+                ),
+                repr(error),
+            )
+
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": (
+                        "⚠️ **Suppression interrompue**\n\n"
+                        f"{format_fit_reference(fit_id)} reste dans Neon : "
+                        "Freeborn n'a pas pu supprimer sa publication Discord.\n"
+                        "Aucune donnée n'a été supprimée."
+                    ),
+                    "components": [],
+                },
+            })
+
+        if not discord_delete.get("ok"):
+            status_code = (
+                discord_delete.get(
+                    "status_code"
+                )
+            )
+
+            suffix = (
+                f" — Discord HTTP {status_code}"
+                if status_code
+                else ""
+            )
+
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": (
+                        "⚠️ **Suppression interrompue**\n\n"
+                        f"Impossible de supprimer le post Discord de "
+                        f"{format_fit_reference(fit_id)}{suffix}.\n"
+                        "Le fitting reste volontairement dans Neon pour éviter "
+                        "un post orphelin."
+                    ),
+                    "components": [],
+                },
+            })
+
+        deleted = delete_fit(
+            guild_id,
+            fit_id,
+        )
+
+        if not deleted:
+            return jsonify({
+                "type": 7,
+                "data": {
+                    "content": (
+                        "ℹ️ La publication Discord a été traitée, "
+                        "mais ce fit n'existe déjà plus dans Freeborn."
+                    ),
+                    "components": [],
+                },
+            })
+
+        discord_note = (
+            "✅ Publication Discord supprimée."
+            if discord_delete.get("deleted")
+            else "ℹ️ Aucune publication Discord liée n'a été trouvée."
+        )
+
+        return jsonify({
+            "type": 7,
+            "data": {
+                "content": (
+                    f"🗑️ **{format_fit_reference(fit_id)} supprimé définitivement**\n\n"
+                    f"**{deleted['ship_name']} — {deleted['name']}** a été retiré de Neon.\n"
+                    f"{discord_note}"
+                ),
+                "components": [],
+            },
+        })
+
     # --------------------------------------------------------
     # Ignore unknown components
     # --------------------------------------------------------
@@ -3012,6 +16932,16 @@ def handle_message_component(
         custom_id.startswith(
             "mr_no:"
         )
+        or custom_id.startswith("ar_yes:")
+        or custom_id.startswith("ar_no:")
+        or custom_id.startswith("mc_yes:")
+        or custom_id.startswith("mc_no:")
+        or custom_id.startswith("sa_yes:")
+        or custom_id.startswith("sa_no:")
+        or custom_id.startswith("market_take:")
+        or custom_id.startswith("market_complete:")
+        or custom_id.startswith("market_withdraw:")
+        or custom_id.startswith("market_cancel:")
     ):
 
         return jsonify({
@@ -3081,7 +17011,7 @@ def handle_message_component(
                 "content":
                     "⌛ **Confirmation expirée**\n\n"
                     "La suppression n'a pas été effectuée.\n\n"
-                    "Relance **/member-remove** "
+                    "Relance **/membre-supprimer** "
                     "si nécessaire.",
 
                 "components":
@@ -3198,7 +17128,7 @@ def handle_message_component(
                     "⛔ **Suppression refusée**\n\n"
                     "Un membre du staff ne peut pas "
                     "supprimer son propre profil avec "
-                    "**/member-remove**.",
+                    "**/membre-supprimer**.",
 
                 "components":
                     [],
@@ -3321,7 +17251,7 @@ def handle_message_component(
     ]
 
     lines = [
-        "🗑️ **Freeborn Member Remove**",
+        "🗑️ **Suppression du profil membre Freeborn**",
         "",
         f"Compte Discord : `{target_user_id}`",
         "",
@@ -3383,24 +17313,11492 @@ def handle_message_component(
 
 
 # ============================================================
+# FREEBORN FITTINGS — WEB CARD
+# ============================================================
+
+def parse_eft_web_sections(eft_text):
+    """Parse standard EFT block order for the corporate Web card."""
+    text = str(eft_text or "").replace("\r\n", "\n").strip()
+    if not text:
+        return {"low": [], "mid": [], "high": [], "rigs": [], "extras": []}
+    lines = text.split("\n")
+    if lines and lines[0].strip().startswith("["):
+        lines = lines[1:]
+    blocks, current = [], []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        current.append(line)
+    if current:
+        blocks.append(current)
+    sections = {"low": [], "mid": [], "high": [], "rigs": [], "extras": []}
+    ordered = ["low", "mid", "high", "rigs"]
+    for index, block in enumerate(blocks):
+        if index < len(ordered):
+            sections[ordered[index]] = block
+        else:
+            sections["extras"].extend(block)
+    return sections
+
+
+def parse_eft_display_quantity(line):
+    """
+    Split the standard EFT trailing quantity suffix.
+
+    Example:
+        "Legion Mjolnir Auto-Targeting Cruise Missile x2000"
+        -> ("Legion Mjolnir Auto-Targeting Cruise Missile", 2000)
+    """
+    clean = str(line or "").strip()
+
+    if not clean:
+        return "", 0
+
+    match = re.match(
+        r"^(.*?)\s+x(\d+)\s*$",
+        clean,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return clean, 1
+
+    return match.group(1).strip(), int(match.group(2))
+
+
+def normalize_eft_item_name(line):
+    """Return the inventory type name represented by one EFT line."""
+    clean = str(line or "").strip()
+    if not clean:
+        return ""
+
+    # Fitted charges/scripts follow the module after a comma. The icon we
+    # want for the slot row is the fitted module itself.
+    clean = clean.split(",", 1)[0].strip()
+
+    # Cargo/drone EFT exports may append quantities as `x1234`.
+    clean = re.sub(r"\s+x\d+$", "", clean, flags=re.IGNORECASE).strip()
+    return clean
+
+
+_eve_inventory_batch_id_cache = {}
+_eve_inventory_name_id_cache = {}
+
+
+def resolve_eve_inventory_type_ids(type_names):
+    """
+    Resolve exact EVE inventory names, requesting only names not cached yet.
+    """
+    names = []
+    seen = set()
+
+    for value in type_names:
+        clean = normalize_eft_item_name(value)
+        key = clean.casefold()
+
+        if clean and key not in seen:
+            names.append(clean)
+            seen.add(key)
+
+    if not names:
+        return {}
+
+    result = {}
+    unresolved = []
+
+    for name in names:
+        key = name.casefold()
+
+        if key in _eve_inventory_name_id_cache:
+            cached = _eve_inventory_name_id_cache[key]
+            if cached is not None:
+                result[key] = int(cached)
+        else:
+            unresolved.append(name)
+
+    if not unresolved:
+        return result
+
+    cache_key = tuple(
+        sorted(
+            value.casefold()
+            for value in unresolved
+        )
+    )
+
+    cached_batch = _eve_inventory_batch_id_cache.get(
+        cache_key
+    )
+
+    if cached_batch is not None:
+        result.update(cached_batch)
+        return dict(result)
+
+    try:
+        response = requests.post(
+            f"{ESI_BASE_URL}/universe/ids/",
+            json=unresolved,
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        resolved = {
+            str(item.get("name", "")).casefold(): int(item["id"])
+            for item in payload.get("inventory_types", [])
+            if item.get("name") and item.get("id")
+        }
+
+        for name in unresolved:
+            key = name.casefold()
+            value = resolved.get(key)
+            _eve_inventory_name_id_cache[key] = value
+
+        _eve_inventory_batch_id_cache[
+            cache_key
+        ] = dict(resolved)
+
+        result.update(resolved)
+        return dict(result)
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI batch type resolution failed:",
+            repr(error),
+        )
+        return dict(result)
+
+
+def eve_type_icon_url(type_id, size=64):
+    if not type_id:
+        return None
+    return (
+        f"https://images.evetech.net/types/{int(type_id)}/icon"
+        f"?size={int(size)}&tenant=tranquility"
+    )
+
+
+# ============================================================
+# FREEBORN FITTINGS — DOGMA TELEMETRY
+# ============================================================
+
+# Core Dogma attribute IDs used by EVE fitting calculations.
+# These four values are stable legacy Dogma identifiers:
+#   11 = powerOutput
+#   30 = power (module powergrid requirement)
+#   48 = cpuOutput
+#   50 = cpu (module CPU requirement)
+DOGMA_POWER_OUTPUT = 11
+DOGMA_POWER_NEED = 30
+DOGMA_CPU_OUTPUT = 48
+DOGMA_CPU_NEED = 50
+# Ship capacitor telemetry (Dogma): 482 = capacitorCapacity, 55 = rechargeRate (ms).
+DOGMA_CAPACITOR_CAPACITY = 482
+DOGMA_CAPACITOR_RECHARGE_TIME = 55
+# Active module capacitor telemetry.
+# 6 = capacitorNeed (GJ per activation)
+# 73 = duration (milliseconds per activation cycle)
+DOGMA_CAPACITOR_NEED = 6
+DOGMA_DURATION = 73
+
+_eve_type_dogma_cache = {}
+_eve_dogma_attribute_metadata_cache = {}
+_eve_dogma_named_lookup_cache = {}
+
+_eve_type_category_cache = {}
+_eve_group_category_cache = {}
+_eve_type_metadata_cache = {}
+_eve_group_metadata_cache = {}
+
+# EVE inventory categories used by the 4S-N-A bay router.
+# 18 = Drone, 87 = Fighter.
+EVE_CATEGORY_DRONE = 18
+EVE_CATEGORY_FIGHTER = 87
+
+
+FREEBORN_SPECIALIZED_HOLD_SPECS = (
+    {
+        "key": "fighter_hangar",
+        "label": "Fighter Hangar",
+        "code": "FIGHTERS",
+        "icon": "✦",
+        "exact_names": (
+            "fighterCapacity",
+            "Fighter Capacity",
+            "Fighter Hangar Capacity",
+            "Fighter Bay Capacity",
+        ),
+        "contains_names": (
+            "fighter capacity",
+            "fighter hangar capacity",
+            "fighter bay capacity",
+        ),
+        "router": "fighter",
+    },
+    {
+        "key": "fuel_bay",
+        "label": "Fuel Bay",
+        "code": "FUEL",
+        "icon": "◉",
+        "exact_names": (
+            "fuelBayCapacity",
+            "Fuel Bay Capacity",
+            "Fuel Capacity",
+        ),
+        "contains_names": (
+            "fuel bay capacity",
+            "fuel capacity",
+        ),
+        "router": "fuel",
+    },
+    {
+        "key": "fleet_hangar",
+        "label": "Fleet Hangar",
+        "code": "FLEET",
+        "icon": "▣",
+        "exact_names": (
+            "fleetHangarCapacity",
+            "Fleet Hangar Capacity",
+        ),
+        "contains_names": (
+            "fleet hangar capacity",
+            "fleet hangar",
+        ),
+        "router": None,
+    },
+    {
+        "key": "mining_hold",
+        "label": "Mining Hold",
+        "code": "MINING",
+        "icon": "⛏",
+        "exact_names": (
+            "specialOreHoldCapacity",
+            "miningHoldCapacity",
+            "Mining Hold Capacity",
+            "Extraction Hold Capacity",
+        ),
+        "contains_names": (
+            "specialoreholdcapacity",
+            "mining hold capacity",
+            "mining hold",
+            "extraction hold capacity",
+            "extraction hold",
+        ),
+        "router": "mining",
+    },
+    {
+        "key": "ore_hold",
+        "label": "Ore Hold",
+        "code": "ORE",
+        "icon": "◆",
+        "exact_names": (
+            "oreHoldCapacity",
+            "Ore Hold Capacity",
+        ),
+        "contains_names": (
+            "ore hold capacity",
+            "ore hold",
+        ),
+        "router": "ore",
+    },
+    {
+        "key": "gas_hold",
+        "label": "Gas Hold",
+        "code": "GAS",
+        "icon": "◇",
+        "exact_names": (
+            "gasHoldCapacity",
+            "Gas Hold Capacity",
+        ),
+        "contains_names": (
+            "gas hold capacity",
+            "gas hold",
+        ),
+        "router": "gas",
+    },
+    {
+        "key": "ice_hold",
+        "label": "Ice Hold",
+        "code": "ICE",
+        "icon": "❄",
+        "exact_names": (
+            "iceHoldCapacity",
+            "Ice Hold Capacity",
+        ),
+        "contains_names": (
+            "ice hold capacity",
+            "ice hold",
+        ),
+        "router": "ice",
+    },
+    {
+        "key": "mineral_hold",
+        "label": "Mineral Hold",
+        "code": "MINERALS",
+        "icon": "⬡",
+        "exact_names": (
+            "mineralHoldCapacity",
+            "Mineral Hold Capacity",
+        ),
+        "contains_names": (
+            "mineral hold capacity",
+            "mineral hold",
+        ),
+        "router": "mineral",
+    },
+    {
+        "key": "planetary_hold",
+        "label": "Planetary Commodities Hold",
+        "code": "PI",
+        "icon": "◈",
+        "exact_names": (
+            "planetaryCommoditiesHoldCapacity",
+            "Planetary Commodities Hold Capacity",
+            "Planetary Hold Capacity",
+        ),
+        "contains_names": (
+            "planetary commodities hold capacity",
+            "planetary hold capacity",
+            "planetary commodities hold",
+        ),
+        "router": "planetary",
+    },
+)
+
+
+def get_eve_type_metadata(type_id):
+    """
+    Return the public ESI metadata for one inventory type.
+
+    Cached in-process because the same type is commonly used several times
+    while one fitting page is rendered.
+    """
+    if not type_id:
+        return {}
+
+    type_id = int(type_id)
+
+    if type_id in _eve_type_metadata_cache:
+        return _eve_type_metadata_cache[type_id]
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/types/{type_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+        _eve_type_metadata_cache[type_id] = payload
+
+        dogma = {}
+        for row in payload.get(
+            "dogma_attributes",
+            [],
+        ) or []:
+            attribute_id = row.get(
+                "attribute_id"
+            )
+            value = row.get(
+                "value"
+            )
+
+            if (
+                attribute_id is None
+                or value is None
+            ):
+                continue
+
+            try:
+                dogma[
+                    int(attribute_id)
+                ] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+        if dogma:
+            _eve_type_dogma_cache[
+                type_id
+            ] = dogma
+
+        return payload
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI type metadata lookup failed:",
+            type_id,
+            repr(error),
+        )
+        return {}
+
+
+def get_eve_group_metadata(group_id):
+    """Return one EVE inventory group metadata payload with process caching."""
+    if not group_id:
+        return {}
+
+    group_id = int(group_id)
+
+    if group_id in _eve_group_metadata_cache:
+        return _eve_group_metadata_cache[group_id]
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/groups/{group_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+        _eve_group_metadata_cache[group_id] = payload
+        return payload
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI group metadata lookup failed:",
+            group_id,
+            repr(error),
+        )
+        return {}
+
+
+def prefetch_eve_static_type_data(
+    type_ids,
+    *,
+    max_workers=8,
+):
+    """
+    Warm EVE static type/group payloads concurrently.
+
+    This converts the old sequential cold-load pattern into two parallel waves:
+    inventory types first, referenced groups second.
+    """
+    type_ids = sorted({
+        int(type_id)
+        for type_id in type_ids
+        if type_id
+    })
+
+    missing_types = [
+        type_id
+        for type_id in type_ids
+        if type_id not in _eve_type_metadata_cache
+    ]
+
+    if missing_types:
+        workers = min(
+            max(1, int(max_workers)),
+            len(missing_types),
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=workers
+        ) as executor:
+            futures = [
+                executor.submit(
+                    get_eve_type_metadata,
+                    type_id,
+                )
+                for type_id in missing_types
+            ]
+
+            for future in as_completed(
+                futures
+            ):
+                try:
+                    future.result()
+                except Exception:
+                    pass
+
+    group_ids = set()
+
+    for type_id in type_ids:
+        payload = _eve_type_metadata_cache.get(
+            type_id,
+            {},
+        )
+        group_id = payload.get(
+            "group_id"
+        )
+
+        if group_id:
+            try:
+                group_ids.add(int(group_id))
+            except (TypeError, ValueError):
+                pass
+
+    missing_groups = [
+        group_id
+        for group_id in sorted(group_ids)
+        if group_id not in _eve_group_metadata_cache
+    ]
+
+    if missing_groups:
+        workers = min(
+            max(1, int(max_workers)),
+            len(missing_groups),
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=workers
+        ) as executor:
+            futures = [
+                executor.submit(
+                    get_eve_group_metadata,
+                    group_id,
+                )
+                for group_id in missing_groups
+            ]
+
+            for future in as_completed(
+                futures
+            ):
+                try:
+                    future.result()
+                except Exception:
+                    pass
+
+
+def get_eve_type_group_name(type_id):
+    """
+    Resolve one inventory type's public group name.
+
+    This uses a conservative classifier for the two
+    universal weapon fitting skills. The future SDE Dogma layer will replace
+    this classifier with modifierInfo-driven rules.
+    """
+    type_payload = get_eve_type_metadata(type_id)
+    group_id = type_payload.get("group_id")
+
+    if not group_id:
+        return ""
+
+    group_payload = get_eve_group_metadata(group_id)
+
+    return str(
+        group_payload.get("name")
+        or ""
+    ).strip()
+
+
+def freeborn_is_weapon_fitting_group(type_id):
+    """
+    Conservative launcher/turret/smartbomb classifier for 4O-B.
+
+    Weapon Upgrades affects CPU use of weapon turrets, launchers and
+    smartbombs; Advanced Weapon Upgrades affects PG use of turrets/launchers.
+    Group-name matching is intentionally narrow: unknown
+    modules are left untouched rather than receiving a guessed modifier.
+    """
+    name = get_eve_type_group_name(type_id).casefold()
+
+    if not name:
+        return False
+
+    keywords = (
+        "launcher",
+        "turret",
+        "smartbomb",
+    )
+
+    return any(
+        keyword in name
+        for keyword in keywords
+    )
+
+
+def get_eve_group_category_id(group_id):
+    """Resolve category_id from the shared cached group metadata payload."""
+    if not group_id:
+        return None
+
+    group_id = int(group_id)
+
+    if group_id in _eve_group_category_cache:
+        return _eve_group_category_cache[group_id]
+
+    payload = get_eve_group_metadata(
+        group_id
+    )
+    category_id = payload.get(
+        "category_id"
+    )
+
+    if category_id is not None:
+        try:
+            category_id = int(category_id)
+        except (TypeError, ValueError):
+            category_id = None
+
+    _eve_group_category_cache[
+        group_id
+    ] = category_id
+
+    return category_id
+
+
+def get_eve_type_category_id(type_id):
+    """Resolve an inventory type's category_id through public ESI."""
+    if not type_id:
+        return None
+
+    type_id = int(type_id)
+
+    if type_id in _eve_type_category_cache:
+        return _eve_type_category_cache[type_id]
+
+    try:
+        payload = get_eve_type_metadata(type_id)
+        group_id = payload.get("group_id")
+        category_id = get_eve_group_category_id(group_id)
+
+        _eve_type_category_cache[type_id] = category_id
+        return category_id
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI type category lookup failed:",
+            type_id,
+            repr(error),
+        )
+        return None
+
+
+def freeborn_inventory_type_context(type_id):
+    if not type_id:
+        return {"category_id": None, "type_name": "", "group_name": ""}
+
+    try:
+        metadata = get_eve_type_metadata(type_id)
+        group_id = metadata.get("group_id")
+        group = get_eve_group_metadata(group_id) if group_id else {}
+
+        return {
+            "category_id": get_eve_type_category_id(type_id),
+            "type_name": str(metadata.get("name") or "").casefold(),
+            "group_name": str(group.get("name") or "").casefold(),
+        }
+    except Exception as error:
+        print(
+            "Freeborn specialized bay metadata lookup failed:",
+            type_id,
+            repr(error),
+        )
+        return {"category_id": None, "type_name": "", "group_name": ""}
+
+
+def freeborn_hold_key_from_attribute_name(attribute_name):
+    """
+    Stable internal key derived from a Dogma attribute name.
+    """
+    raw = str(attribute_name or "").strip()
+
+    if not raw:
+        return "specialized_hold"
+
+    # CamelCase -> snake_case, then normalize.
+    snake = re.sub(
+        r"(?<!^)(?=[A-Z])",
+        "_",
+        raw,
+    ).casefold()
+
+    snake = re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        snake,
+    ).strip("_")
+
+    for prefix in (
+        "special_",
+        "general_",
+    ):
+        if snake.startswith(prefix):
+            snake = snake[len(prefix):]
+
+    for suffix in (
+        "_capacity",
+        "capacity",
+    ):
+        if snake.endswith(suffix):
+            snake = snake[:-len(suffix)].rstrip("_")
+
+    return snake or "specialized_hold"
+
+
+def freeborn_hold_label_from_metadata(metadata):
+    """
+    Produce a clean EVE-style English label for an automatically discovered
+    inventory hold.
+
+    Prefer CCP's display_name. If unavailable, derive a readable label from
+    the Dogma attribute name.
+    """
+    display_name = str(
+        metadata.get("display_name")
+        or ""
+    ).strip()
+
+    if display_name:
+        # Most CCP labels end in "Capacity"; the panel already shows capacity.
+        cleaned = re.sub(
+            r"\s+Capacity\s*$",
+            "",
+            display_name,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        if cleaned:
+            return cleaned
+
+    name = str(
+        metadata.get("name")
+        or ""
+    ).strip()
+
+    if not name:
+        return "Specialized Hold"
+
+    # Remove common technical wrappers.
+    cleaned = re.sub(
+        r"^(special|general)",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"Capacity$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # CamelCase -> words.
+    cleaned = re.sub(
+        r"(?<!^)(?=[A-Z])",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\s+",
+        " ",
+        cleaned,
+    ).strip()
+
+    return cleaned or "Specialized Hold"
+
+
+def freeborn_hold_router_from_metadata(metadata):
+    """
+    Infer only SAFE routing families from the Dogma attribute metadata.
+
+    Discovery is fully automatic, but EFT item assignment stays conservative:
+    if a new/unknown hold exists, it is displayed with capacity while items
+    remain in Cargo Bay until a safe generic rule exists.
+    """
+    haystack = " ".join(
+        str(metadata.get(field) or "")
+        for field in (
+            "name",
+            "display_name",
+            "description",
+        )
+    ).casefold()
+
+    if "fighter" in haystack:
+        return "fighter"
+
+    if "fuel" in haystack:
+        return "fuel"
+
+    # Expedition/mining/general mining holds accept mined resources.
+    if (
+        "mining" in haystack
+        or "expedition" in haystack
+        or "ore hold" in haystack
+    ):
+        return "mining"
+
+    if "gas" in haystack:
+        return "gas"
+
+    if "ice" in haystack:
+        return "ice"
+
+    if "mineral" in haystack:
+        return "mineral"
+
+    if (
+        "planetary" in haystack
+        or "colony resource" in haystack
+    ):
+        return "planetary"
+
+    # Fleet/ship/command-center/mobile-depot/etc. holds are intentionally
+    # display-only because EFT does not say which generic cargo line was put
+    # in them.
+    return None
+
+
+def freeborn_hold_icon_from_router(router):
+    return {
+        "fighter": "✦",
+        "fuel": "◉",
+        "mining": "⛏",
+        "ore": "◆",
+        "gas": "◇",
+        "ice": "❄",
+        "mineral": "⬡",
+        "planetary": "◈",
+    }.get(
+        router,
+        "▣",
+    )
+
+
+def freeborn_is_inventory_capacity_attribute(metadata):
+    """
+    Generic detector for ship inventory-capacity Dogma attributes.
+
+    Current EVE hold-capacity attributes are published as Volume values and
+    commonly use names such as:
+      specialGasHoldCapacity
+      specialMineralHoldCapacity
+      specialShipHoldCapacity
+      specialIndustrialShipHoldCapacity
+      specialCommandCenterHoldCapacity
+      specialPlanetaryCommoditiesHoldCapacity
+      specialMobileDepotHoldCapacity
+      specialColonyResourcesHoldCapacity
+      specialExpeditionHoldCapacity
+
+    We deliberately do not rely on a finite list of attribute IDs/names.
+    """
+    if not metadata:
+        return False
+
+    name = str(
+        metadata.get("name")
+        or ""
+    ).strip()
+
+    display_name = str(
+        metadata.get("display_name")
+        or ""
+    ).strip()
+
+    description = str(
+        metadata.get("description")
+        or ""
+    ).strip()
+
+    haystack = " ".join(
+        (name, display_name, description)
+    ).casefold()
+
+    if "capacity" not in haystack:
+        return False
+
+    # Volume unit (m³) is the strongest discriminator for inventory capacity.
+    unit_id = metadata.get("unit_id")
+
+    try:
+        unit_id = (
+            int(unit_id)
+            if unit_id is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        unit_id = None
+
+    if unit_id not in {
+        None,
+        9,  # Volume / m³
+    }:
+        return False
+
+    normalized_name = name.casefold()
+
+    # Generic hull Cargo Bay is already rendered separately from type.capacity.
+    if normalized_name in {
+        "capacity",
+    }:
+        return False
+
+    # Drone Bay is already rendered separately and must not be duplicated.
+    if (
+        "dronecapacity" in normalized_name
+        or "drone capacity" in haystack
+        or "drone bay capacity" in haystack
+    ):
+        return False
+
+    inventory_terms = (
+        "hold",
+        "hangar",
+        "bay",
+        "fleet",
+        "fighter",
+        "fuel",
+        "ore",
+        "gas",
+        "ice",
+        "mineral",
+        "planetary",
+        "colony",
+        "command center",
+        "ship maintenance",
+        "maintenance bay",
+    )
+
+    # Most modern specialized holds are special*HoldCapacity. The broader
+    # vocabulary also catches legacy Fleet/Fighter/Fuel/Maintenance attributes.
+    if (
+        normalized_name.startswith("special")
+        and normalized_name.endswith("holdcapacity")
+    ):
+        return True
+
+    return any(
+        term in haystack
+        for term in inventory_terms
+    )
+
+
+def freeborn_known_hold_override(metadata):
+    """
+    Reuse the legacy registry only as presentation/routing overrides.
+    Discovery itself does NOT depend on this table anymore.
+    """
+    metadata_text = " ".join(
+        str(metadata.get(field) or "")
+        for field in (
+            "name",
+            "display_name",
+            "description",
+        )
+    ).casefold()
+
+    for spec in FREEBORN_SPECIALIZED_HOLD_SPECS:
+        probes = (
+            tuple(spec.get("exact_names") or ())
+            + tuple(spec.get("contains_names") or ())
+        )
+
+        if any(
+            str(probe).casefold() in metadata_text
+            for probe in probes
+            if str(probe).strip()
+        ):
+            return spec
+
+    return None
+
+
+def freeborn_detect_specialized_holds(ship_type_id):
+    """
+    FREEBORN FITTINGS — Automatic Inventory Holds Engine.
+
+    Inspect EVERY Dogma attribute actually present on the hull and discover
+    inventory-capacity attributes dynamically.
+
+    Result:
+      - a new CCP hold can appear automatically without a Freeborn code patch;
+      - empty holds remain visible with their capacity;
+      - known holds keep friendly labels/icons/routing;
+      - unknown holds remain display-only instead of inventing EFT placement.
+    """
+    if not ship_type_id:
+        return []
+
+    dogma = get_eve_type_dogma(
+        ship_type_id
+    )
+
+    if not dogma:
+        return []
+
+    holds = []
+    seen_keys = set()
+
+    for attribute_id, raw_value in dogma.items():
+        try:
+            capacity = float(
+                raw_value
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if capacity <= 0:
+            continue
+
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        if not freeborn_is_inventory_capacity_attribute(
+            metadata
+        ):
+            continue
+
+        override = freeborn_known_hold_override(
+            metadata
+        )
+
+        attribute_name = str(
+            metadata.get("name")
+            or f"attribute_{attribute_id}"
+        )
+
+        key = (
+            str(override.get("key"))
+            if override
+            else freeborn_hold_key_from_attribute_name(
+                attribute_name
+            )
+        )
+
+        # Avoid duplicate aliases resolving to the same conceptual hold.
+        if key in seen_keys:
+            continue
+
+        seen_keys.add(
+            key
+        )
+
+        router = (
+            override.get("router")
+            if override
+            else freeborn_hold_router_from_metadata(
+                metadata
+            )
+        )
+
+        label = (
+            override.get("label")
+            if override
+            else freeborn_hold_label_from_metadata(
+                metadata
+            )
+        )
+
+        icon = (
+            override.get("icon")
+            if override
+            else freeborn_hold_icon_from_router(
+                router
+            )
+        )
+
+        code = (
+            override.get("code")
+            if override
+            else re.sub(
+                r"[^A-Z0-9]+",
+                " ",
+                str(label).upper(),
+            ).strip()[:18]
+        )
+
+        holds.append({
+            "key": key,
+            "label": label,
+            "code": code or "HOLD",
+            "icon": icon,
+            "capacity_m3": capacity,
+            "router": router,
+            "attribute_id": int(attribute_id),
+            "attribute_name": attribute_name,
+            "automatic": True,
+        })
+
+    # Stable display order: routed operational holds first, then other holds.
+    priority = {
+        "fighter": 10,
+        "fuel": 20,
+        "mining": 30,
+        "ore": 31,
+        "gas": 32,
+        "ice": 33,
+        "mineral": 34,
+        "planetary": 35,
+        None: 90,
+    }
+
+    holds.sort(
+        key=lambda hold: (
+            priority.get(
+                hold.get("router"),
+                80,
+            ),
+            str(
+                hold.get("label")
+                or ""
+            ).casefold(),
+        )
+    )
+
+    if holds:
+        print(
+            "Freeborn automatic inventory holds:",
+            int(ship_type_id),
+            [
+                (
+                    hold["label"],
+                    hold["capacity_m3"],
+                    hold["attribute_id"],
+                )
+                for hold in holds
+            ],
+        )
+
+    return holds
+
+
+def freeborn_specialized_hold_route(type_id, active_holds):
+    """
+    Conservative EFT routing.
+    Unknown/ambiguous content stays in Cargo Bay.
+    Fleet Hangar content is never guessed because EFT does not encode it.
+    """
+    routes = {
+        hold.get("router")
+        for hold in active_holds
+        if hold.get("router")
+    }
+
+    if not routes:
+        return None
+
+    ctx = freeborn_inventory_type_context(type_id)
+    category_id = ctx["category_id"]
+    type_name = ctx["type_name"]
+    group_name = ctx["group_name"]
+    combined = f"{type_name} {group_name}"
+
+    if "fighter" in routes and category_id == EVE_CATEGORY_FIGHTER:
+        return "fighter_hangar"
+
+    if "fuel" in routes and any(
+        token in combined
+        for token in (
+            "isotope",
+            "liquid ozone",
+            "strontium clathrates",
+            "heavy water",
+        )
+    ):
+        return "fuel_bay"
+
+    # Generic Mining Hold (EVE "Mining Hold", FR "soute d'extraction")
+    # accepts mined resources. This check comes before the narrower specialized
+    # Ore/Gas/Ice holds and only activates on hulls that actually expose it.
+    if "mining" in routes:
+        is_mining_ore = (
+            "ore" in group_name
+            or "asteroid" in group_name
+            or ("compressed" in type_name and "ore" in combined)
+        )
+        is_mining_gas = (
+            "gas" in group_name
+            or "harvestable cloud" in group_name
+            or "fullerite" in combined
+            or "cytoserocin" in combined
+            or "mykoserocin" in combined
+        )
+        is_mining_ice = (
+            "ice" in group_name
+            or "ice product" in group_name
+        )
+
+        if (
+            is_mining_ore
+            or is_mining_gas
+            or is_mining_ice
+        ):
+            return "mining_hold"
+
+    if "ore" in routes and (
+        "ore" in group_name
+        or "asteroid" in group_name
+        or ("compressed" in type_name and "ore" in combined)
+    ):
+        return "ore_hold"
+
+    if "gas" in routes and (
+        "gas" in group_name
+        or "harvestable cloud" in group_name
+        or "fullerite" in combined
+        or "cytoserocin" in combined
+        or "mykoserocin" in combined
+    ):
+        return "gas_hold"
+
+    if "ice" in routes and (
+        "ice" in group_name
+        or "ice product" in group_name
+    ):
+        return "ice_hold"
+
+    if "mineral" in routes and "mineral" in group_name:
+        return "mineral_hold"
+
+    if "planetary" in routes and "planetary" in group_name:
+        return "planetary_hold"
+
+    return None
+
+
+def split_eft_dynamic_bays(extras, type_ids, ship_type_id):
+    active_holds = freeborn_detect_specialized_holds(ship_type_id)
+
+    buckets = {
+        hold["key"]: []
+        for hold in active_holds
+    }
+
+    drones = []
+    cargo = []
+
+    for line in extras or []:
+        item_name = normalize_eft_item_name(line)
+        type_id = type_ids.get(item_name.casefold())
+        category_id = get_eve_type_category_id(type_id)
+
+        if category_id == EVE_CATEGORY_DRONE:
+            drones.append(line)
+            continue
+
+        routed_key = freeborn_specialized_hold_route(
+            type_id,
+            active_holds,
+        )
+
+        if routed_key and routed_key in buckets:
+            buckets[routed_key].append(line)
+        else:
+            cargo.append(line)
+
+    return drones, buckets, cargo, active_holds
+
+
+def split_eft_drone_and_cargo(extras, type_ids):
+    """Compatibility wrapper retained for older callers."""
+    drones = []
+    cargo = []
+
+    for line in extras or []:
+        item_name = normalize_eft_item_name(line)
+        type_id = type_ids.get(item_name.casefold())
+
+        if get_eve_type_category_id(type_id) == EVE_CATEGORY_DRONE:
+            drones.append(line)
+        else:
+            cargo.append(line)
+
+    return drones, cargo
+
+
+
+def get_eve_dogma_attribute_metadata(attribute_id):
+    """
+    Return public metadata for one Dogma attribute.
+
+    ESI source:
+        /dogma/attributes/{attribute_id}/
+
+    Cached in-process because one fitting can expose many repeated attributes.
+    """
+    if attribute_id is None:
+        return {}
+
+    attribute_id = int(attribute_id)
+
+    if attribute_id in _eve_dogma_attribute_metadata_cache:
+        return _eve_dogma_attribute_metadata_cache[attribute_id]
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/dogma/attributes/{attribute_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+
+        _eve_dogma_attribute_metadata_cache[attribute_id] = payload
+        return payload
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI Dogma attribute lookup failed:",
+            attribute_id,
+            repr(error),
+        )
+        return {}
+
+
+def freeborn_dogma_attribute_label(attribute_id):
+    """Human-readable normalized Dogma attribute label."""
+    metadata = get_eve_dogma_attribute_metadata(attribute_id)
+
+    parts = [
+        metadata.get("name"),
+        metadata.get("display_name"),
+        metadata.get("description"),
+    ]
+
+    return " ".join(
+        str(part)
+        for part in parts
+        if part
+    ).casefold()
+
+
+def find_capacitor_transfer_amount_attribute(type_id):
+    """
+    Find a likely capacitor/energy transfer amount on one module by inspecting
+    the *actual* Dogma attribute metadata rather than hard-coding a module ID.
+
+    Returns:
+        {
+            "attribute_id": ...,
+            "value": ...,
+            "name": ...,
+            "display_name": ...,
+            "score": ...
+        }
+        or None.
+
+    The scoring is deliberately conservative. An uncertain match is rejected.
+    """
+    dogma = get_eve_type_dogma(type_id)
+
+    if not dogma:
+        return None
+
+    candidates = []
+
+    for attribute_id, value in dogma.items():
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            continue
+
+        if numeric_value <= 0:
+            continue
+
+        metadata = get_eve_dogma_attribute_metadata(attribute_id)
+        name = str(metadata.get("name") or "")
+        display_name = str(metadata.get("display_name") or "")
+        description = str(metadata.get("description") or "")
+        haystack = " ".join(
+            [name, display_name, description]
+        ).casefold()
+
+        score = 0
+
+        # Strong positive signals.
+        if "powertransferamount" in haystack:
+            score += 12
+        if "energytransferamount" in haystack:
+            score += 12
+        if "capacitortransferamount" in haystack:
+            score += 12
+
+        if "transfer" in haystack:
+            score += 5
+        if "amount" in haystack:
+            score += 3
+        if "capacitor" in haystack:
+            score += 4
+        if "energy" in haystack:
+            score += 3
+        if "power" in haystack:
+            score += 2
+
+        # Reject obvious unrelated attributes.
+        for token in (
+            "range",
+            "optimal",
+            "falloff",
+            "capacitor need",
+            "capacitorneed",
+            "duration",
+            "cpu",
+            "powergrid",
+            "mass",
+            "volume",
+            "radius",
+            "bonus",
+            "multiplier",
+            "resonance",
+            "damage",
+        ):
+            if token in haystack:
+                score -= 8
+
+        candidates.append({
+            "attribute_id": int(attribute_id),
+            "value": numeric_value,
+            "name": name,
+            "display_name": display_name,
+            "score": score,
+        })
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda row: (
+            row["score"],
+            row["value"],
+        ),
+        reverse=True,
+    )
+
+    best = candidates[0]
+
+    # Require meaningful confidence: do not guess from a generic positive attr.
+    if best["score"] < 9:
+        return None
+
+    return best
+
+
+def build_conditional_capacitor_source_dogma_probe(
+    eft_sections,
+    type_ids,
+    capacitor_activity_audit,
+):
+    """
+    Probe the fitted conditional capacitor sources (Nosferatu family).
+
+    The transfer is shown as a *maximum theoretical source* and remains
+    excluded from the stability calculation until target-dependent activation
+    conditions are modeled.
+    """
+    source_rows = (
+        capacitor_activity_audit.get(
+            "conditional_sources",
+            []
+        )
+        or []
+    )
+
+    results = []
+
+    for source in source_rows:
+        name = str(source.get("name") or "")
+        quantity = int(source.get("quantity", 1) or 1)
+        type_id = type_ids.get(name.casefold())
+
+        row = {
+            "name": name,
+            "quantity": quantity,
+            "type_id": type_id,
+            "transfer_gj_cycle": None,
+            "cycle_seconds": None,
+            "max_transfer_gjs": None,
+            "attribute_name": None,
+            "resolved": False,
+        }
+
+        if not type_id:
+            results.append(row)
+            continue
+
+        dogma = get_eve_type_dogma(type_id)
+        duration_ms = dogma.get(DOGMA_DURATION)
+        transfer_attr = find_capacitor_transfer_amount_attribute(
+            type_id
+        )
+
+        if (
+            transfer_attr
+            and duration_ms is not None
+            and float(duration_ms) > 0
+        ):
+            per_cycle = float(transfer_attr["value"])
+            cycle_seconds = float(duration_ms) / 1000.0
+
+            row.update({
+                "transfer_gj_cycle": per_cycle,
+                "cycle_seconds": cycle_seconds,
+                "max_transfer_gjs": (
+                    per_cycle
+                    / cycle_seconds
+                    * quantity
+                ),
+                "attribute_name": (
+                    transfer_attr.get("display_name")
+                    or transfer_attr.get("name")
+                    or f'attribute {transfer_attr["attribute_id"]}'
+                ),
+                "resolved": True,
+            })
+
+        results.append(row)
+
+    return results
+
+
+def format_conditional_source_dogma_probe(rows):
+    """
+    Render an explicit technical proof of what the Dogma probe resolved.
+    """
+    if not rows:
+        return "Aucune source conditionnelle."
+
+    output = []
+
+    for row in rows:
+        safe_name = escape(
+            str(
+                row.get("name")
+                or "Module inconnu"
+            )
+        )
+        quantity = int(
+            row.get("quantity", 1)
+            or 1
+        )
+
+        if not row.get("resolved"):
+            output.append(
+                f"{quantity}× {safe_name} — attribut de transfert non résolu"
+            )
+            continue
+
+        attr_name = escape(
+            str(
+                row.get("attribute_name")
+                or "Dogma"
+            )
+        )
+
+        output.append(
+            f"{quantity}× {safe_name} — "
+            f"{row['transfer_gj_cycle']:.2f} GJ/cycle • "
+            f"{row['cycle_seconds']:.2f} s • "
+            f"maximum théorique {row['max_transfer_gjs']:.2f} GJ/s "
+            f"[{attr_name}]"
+        )
+
+    return "<br>".join(output)
+
+
+
+def get_eve_type_dogma(type_id):
+    """
+    Return one inventory type's Dogma attribute map from public ESI.
+
+    Result format:
+        {
+            attribute_id: float_value,
+            ...
+        }
+
+    A small in-process cache avoids repeating the same public ESI request
+    every time one fitting page is refreshed.
+    """
+    if not type_id:
+        return {}
+
+    type_id = int(type_id)
+
+    if type_id in _eve_type_dogma_cache:
+        return _eve_type_dogma_cache[type_id]
+
+    cached_payload = _eve_type_metadata_cache.get(
+        type_id
+    )
+
+    if cached_payload:
+        dogma = {}
+
+        for row in cached_payload.get(
+            "dogma_attributes",
+            [],
+        ) or []:
+            attribute_id = row.get(
+                "attribute_id"
+            )
+            value = row.get(
+                "value"
+            )
+
+            if (
+                attribute_id is None
+                or value is None
+            ):
+                continue
+
+            try:
+                dogma[
+                    int(attribute_id)
+                ] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+        _eve_type_dogma_cache[
+            type_id
+        ] = dogma
+
+        return dogma
+
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/types/{type_id}/",
+            params={"datasource": "tranquility"},
+            headers={
+                "User-Agent": "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        if type_id not in _eve_type_metadata_cache:
+            _eve_type_metadata_cache[
+                type_id
+            ] = payload
+
+        dogma = {}
+        for row in payload.get("dogma_attributes", []) or []:
+            attribute_id = row.get("attribute_id")
+            value = row.get("value")
+            if attribute_id is None or value is None:
+                continue
+            try:
+                dogma[int(attribute_id)] = float(value)
+            except (TypeError, ValueError):
+                continue
+
+        _eve_type_dogma_cache[type_id] = dogma
+        return dogma
+
+    except Exception as error:
+        print(
+            "Freeborn Fittings ESI Dogma type lookup failed:",
+            type_id,
+            repr(error),
+        )
+        return {}
+
+
+def _eft_fitted_module_counts(eft_sections, type_ids):
+    """
+    Return {type_id: quantity} for fitted modules only.
+
+    Cargo, drones, charges and scripts are intentionally excluded from
+    fitting-resource usage. Low/Mid/High/Rig sections are included.
+    """
+    counts = {}
+
+    fitted_lines = (
+        eft_sections.get("low", [])
+        + eft_sections.get("mid", [])
+        + eft_sections.get("high", [])
+        + eft_sections.get("rigs", [])
+    )
+
+    for line in fitted_lines:
+        item_name = normalize_eft_item_name(line)
+        type_id = type_ids.get(item_name.casefold())
+
+        if not type_id:
+            continue
+
+        type_id = int(type_id)
+        counts[type_id] = counts.get(type_id, 0) + 1
+
+    return counts
+
+
+
+def find_dogma_attribute_by_names(
+    type_id,
+    exact_names=(),
+    contains_names=(),
+):
+    """
+    Resolve one Dogma attribute from the actual type attributes + public ESI
+    attribute metadata.
+
+    Exact normalized metadata-name matches win. contains_names are fallback
+    probes only; no guessed numeric attribute IDs are required.
+    """
+    cache_key = (
+        int(type_id or 0),
+        tuple(sorted(
+            str(name).strip().casefold()
+            for name in exact_names
+            if str(name).strip()
+        )),
+        tuple(sorted(
+            str(name).strip().casefold()
+            for name in contains_names
+            if str(name).strip()
+        )),
+    )
+
+    if cache_key in _eve_dogma_named_lookup_cache:
+        cached = _eve_dogma_named_lookup_cache[cache_key]
+        return dict(cached) if isinstance(cached, dict) else None
+
+    dogma = get_eve_type_dogma(type_id)
+
+    if not dogma:
+        _eve_dogma_named_lookup_cache[cache_key] = None
+        return None
+
+    exact = {
+        str(name).strip().casefold()
+        for name in exact_names
+        if str(name).strip()
+    }
+    contains = tuple(
+        str(name).strip().casefold()
+        for name in contains_names
+        if str(name).strip()
+    )
+
+    fallback = []
+
+    for attribute_id, value in dogma.items():
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or ""
+        ).strip()
+        display_name = str(
+            metadata.get("display_name")
+            or ""
+        ).strip()
+
+        normalized_name = name.casefold()
+        normalized_display = display_name.casefold()
+
+        if (
+            normalized_name in exact
+            or normalized_display in exact
+        ):
+            result = {
+                "attribute_id": int(attribute_id),
+                "name": name,
+                "display_name": display_name,
+                "value": float(value),
+            }
+            _eve_dogma_named_lookup_cache[cache_key] = dict(result)
+            return result
+
+        haystack = (
+            normalized_name
+            + " "
+            + normalized_display
+        )
+
+        if (
+            contains
+            and any(
+                token in haystack
+                for token in contains
+            )
+        ):
+            fallback.append({
+                "attribute_id": int(attribute_id),
+                "name": name,
+                "display_name": display_name,
+                "value": float(value),
+            })
+
+    if len(fallback) == 1:
+        result = fallback[0]
+        _eve_dogma_named_lookup_cache[cache_key] = dict(result)
+        return result
+
+    _eve_dogma_named_lookup_cache[cache_key] = None
+    return None
+
+
+def get_ship_base_max_velocity(ship_type_id):
+    """
+    Return the hull's TRUE base maxVelocity in m/s.
+
+    EVE Dogma attribute 37 is the canonical maxVelocity attribute.
+    It is intentionally read BEFORE any name-based metadata lookup because
+    fuzzy/name resolution can accidentally match a derived/bonus velocity
+    attribute and return an ALL-V-like value instead of the raw hull value.
+
+    Example validated in-game:
+      Thanatos raw hull speed = 80 m/s
+      Navigation V => 80 × 1.25 = 100 m/s
+    """
+    if not ship_type_id:
+        return None
+
+    ship_type_id = int(ship_type_id)
+
+    # 1) Canonical cached Dogma attribute: 37 = maxVelocity.
+    dogma = get_eve_type_dogma(
+        ship_type_id
+    )
+
+    try:
+        value = float(dogma.get(37))
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+
+    # 2) Fresh public ESI type payload, still using attribute 37 explicitly.
+    try:
+        response = requests.get(
+            f"{ESI_BASE_URL}/universe/types/{ship_type_id}/",
+            params={
+                "datasource": "tranquility",
+                "language": "en",
+            },
+            headers={
+                "User-Agent":
+                    "Freeborn/3.0 Freeborn-Legacy-Discord-Bot",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json() or {}
+
+        refreshed_dogma = {}
+
+        for attribute in payload.get(
+            "dogma_attributes",
+            [],
+        ) or []:
+            try:
+                attribute_id = int(
+                    attribute.get("attribute_id")
+                )
+                attribute_value = float(
+                    attribute.get("value")
+                )
+            except (TypeError, ValueError):
+                continue
+
+            refreshed_dogma[
+                attribute_id
+            ] = attribute_value
+
+        if refreshed_dogma:
+            _eve_type_dogma_cache[
+                ship_type_id
+            ] = refreshed_dogma
+
+        _eve_type_metadata_cache[
+            ship_type_id
+        ] = payload
+
+        value = refreshed_dogma.get(37)
+
+        if value is not None and float(value) > 0:
+            print(
+                "Freeborn base velocity attr37:",
+                ship_type_id,
+                float(value),
+                "m/s",
+            )
+            return float(value)
+
+    except Exception as error:
+        print(
+            "Freeborn base velocity attr37 fresh lookup failed:",
+            ship_type_id,
+            repr(error),
+        )
+
+    # 3) Last fallback: exact metadata name only, NO fuzzy contains lookup.
+    row = find_dogma_attribute_by_names(
+        ship_type_id,
+        exact_names=(
+            "maxVelocity",
+            "Max Velocity",
+        ),
+    )
+
+    if row:
+        try:
+            value = float(row["value"])
+            if value > 0:
+                return value
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    return None
+
+
+def get_ship_base_mass(ship_type_id):
+    """Return the hull's raw mass Dogma attribute in kg."""
+    row = find_dogma_attribute_by_names(
+        ship_type_id,
+        exact_names=(
+            "mass",
+            "Mass",
+        ),
+    )
+
+    return (
+        float(row["value"])
+        if row
+        else None
+    )
+
+
+def fitted_mass_additions(
+    eft_sections,
+    type_ids,
+):
+    """
+    Sum positive Dogma massAddition values from fitted modules.
+
+    This covers propulsion mass and common fitted mass additions without
+    guessing from item names.
+    """
+    total = 0.0
+    rows = []
+
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    for type_id, quantity in counts.items():
+        mass_row = find_dogma_attribute_by_names(
+            type_id,
+            exact_names=(
+                "massAddition",
+                "Mass Addition",
+            ),
+            contains_names=(
+                "mass addition",
+            ),
+        )
+
+        if not mass_row:
+            continue
+
+        value = float(
+            mass_row["value"]
+        )
+
+        if value <= 0:
+            continue
+
+        contribution = (
+            value
+            * int(quantity)
+        )
+
+        total += contribution
+
+        metadata = get_eve_type_metadata(
+            type_id
+        )
+
+        rows.append({
+            "type_id": int(type_id),
+            "name": str(
+                metadata.get("name")
+                or f"Type {type_id}"
+            ),
+            "quantity": int(quantity),
+            "mass_addition_kg": value,
+            "contribution_kg": contribution,
+        })
+
+    return {
+        "total_kg": total,
+        "rows": rows,
+    }
+
+
+def resolve_effective_propulsion_thrust(row):
+    """
+    Resolve propulsion thrust in Newtons without trusting a possibly scaled
+    raw SDE/ESI thrust value blindly.
+
+    For standard EVE propulsion size classes the canonical relationship is:
+        effective thrust = 3 × massAddition
+
+    Examples:
+        500,000 kg   -> 1,500,000 N
+        5,000,000 kg -> 15,000,000 N
+        50,000,000 kg -> 150,000,000 N
+
+    We retain the raw Dogma value and expose the scale ratio for audit.
+    If massAddition is unavailable, raw thrust is used only as a fallback.
+    """
+    mass_addition = row.get("mass_addition")
+    raw_thrust = row.get("thrust")
+
+    canonical = None
+    source = "unresolved"
+
+    if mass_addition is not None and float(mass_addition) > 0:
+        canonical = float(mass_addition) * 3.0
+        source = "massAddition × 3"
+    elif raw_thrust is not None and float(raw_thrust) > 0:
+        canonical = float(raw_thrust)
+        source = "raw Dogma fallback"
+
+    ratio = None
+    if (
+        canonical is not None
+        and canonical > 0
+        and raw_thrust is not None
+    ):
+        ratio = float(raw_thrust) / canonical
+
+    return {
+        "effective_thrust_n": canonical,
+        "raw_thrust": (
+            float(raw_thrust)
+            if raw_thrust is not None
+            else None
+        ),
+        "raw_to_effective_ratio": ratio,
+        "source": source,
+    }
+
+
+def effective_propulsion_thrust(row):
+    """Compatibility wrapper retained for existing 4P-C call sites."""
+    return resolve_effective_propulsion_thrust(
+        row
+    )["effective_thrust_n"]
+
+
+def freeborn_propulsion_kind(
+    type_id,
+):
+    """
+    Resolve whether an EVE type is an Afterburner or Microwarpdrive.
+
+    Do not depend on one metadata field only. EVE group naming can be broader
+    than the marketed type name, so Freeborn checks type name, group name,
+    then the actual propulsion Dogma signature.
+    """
+    metadata = get_eve_type_metadata(
+        type_id
+    )
+    type_name = str(
+        metadata.get("name")
+        or ""
+    ).strip()
+
+    group_name = get_eve_type_group_name(
+        type_id
+    ).strip()
+
+    haystack = (
+        type_name
+        + " "
+        + group_name
+    ).casefold()
+
+    if (
+        "microwarpdrive" in haystack
+        or "micro warp drive" in haystack
+        or "mwd" in haystack
+    ):
+        return "MWD"
+
+    if "afterburner" in haystack:
+        return "AB"
+
+    # Final fallback: detect the characteristic propulsion attributes.
+    speed_factor = find_dogma_attribute_by_names(
+        type_id,
+        exact_names=(
+            "speedFactor",
+            "Speed Factor",
+            "maxVelocityBonus",
+            "Maximum Velocity Bonus",
+        ),
+        contains_names=(
+            "speed factor",
+            "velocity bonus",
+        ),
+    )
+
+    mass_addition = find_dogma_attribute_by_names(
+        type_id,
+        exact_names=(
+            "massAddition",
+            "Mass Addition",
+        ),
+        contains_names=(
+            "mass addition",
+        ),
+    )
+
+    thrust = find_dogma_attribute_by_names(
+        type_id,
+        exact_names=(
+            "thrust",
+            "Thrust",
+        ),
+        contains_names=(
+            "thrust",
+        ),
+    )
+
+    # Requiring at least two propulsion-specific attributes avoids treating
+    # unrelated modules as prop mods.
+    signature_count = sum(
+        value is not None
+        for value in (
+            speed_factor,
+            mass_addition,
+            thrust,
+        )
+    )
+
+    if signature_count >= 2:
+        return "PROP"
+
+    return None
+
+
+def find_fitted_propulsion_modules(
+    eft_sections,
+    type_ids,
+):
+    """
+    Find fitted propulsion modules and expose their actual Dogma attributes.
+
+    4P-B fixes 4P-A's group-name-only classifier. Detection now uses:
+      - type name;
+      - group name;
+      - Dogma propulsion signature.
+
+    Active velocity remains deliberately unclaimed until the exact thrust /
+    mass application is validated against EVE.
+    """
+    rows = []
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    for type_id, quantity in counts.items():
+        kind = freeborn_propulsion_kind(
+            type_id
+        )
+
+        if not kind:
+            continue
+
+        metadata = get_eve_type_metadata(
+            type_id
+        )
+
+        speed_factor = find_dogma_attribute_by_names(
+            type_id,
+            exact_names=(
+                "speedFactor",
+                "Speed Factor",
+                "maxVelocityBonus",
+                "Maximum Velocity Bonus",
+            ),
+            contains_names=(
+                "speed factor",
+                "velocity bonus",
+            ),
+        )
+
+        mass_addition = find_dogma_attribute_by_names(
+            type_id,
+            exact_names=(
+                "massAddition",
+                "Mass Addition",
+            ),
+            contains_names=(
+                "mass addition",
+            ),
+        )
+
+        thrust = find_dogma_attribute_by_names(
+            type_id,
+            exact_names=(
+                "thrust",
+                "Thrust",
+            ),
+            contains_names=(
+                "thrust",
+            ),
+        )
+
+        rows.append({
+            "type_id": int(type_id),
+            "name": str(
+                metadata.get("name")
+                or f"Type {type_id}"
+            ),
+            "quantity": int(quantity),
+            "kind": kind,
+            "group_name": get_eve_type_group_name(
+                type_id
+            ),
+            "speed_factor": (
+                speed_factor["value"]
+                if speed_factor
+                else None
+            ),
+            "speed_factor_attribute": (
+                speed_factor.get("display_name")
+                or speed_factor.get("name")
+                if speed_factor
+                else None
+            ),
+            "mass_addition": (
+                mass_addition["value"]
+                if mass_addition
+                else None
+            ),
+            "mass_addition_attribute": (
+                mass_addition.get("display_name")
+                or mass_addition.get("name")
+                if mass_addition
+                else None
+            ),
+            "thrust": (
+                thrust["value"]
+                if thrust
+                else None
+            ),
+            "thrust_attribute": (
+                thrust.get("display_name")
+                or thrust.get("name")
+                if thrust
+                else None
+            ),
+        })
+
+    return rows
+
+
+def calculate_skill_aware_velocity(
+    ship_type_id,
+    *,
+    mode="all_v",
+    skills_snapshot=None,
+    eft_sections=None,
+    type_ids=None,
+):
+    """
+    Velocity engine.
+
+    OFF:
+        hull maxVelocity × Navigation.
+
+    ACTIVE AB/MWD:
+        Voff × (
+            1
+            + effective_prop_bonus
+            × effective_thrust / active_mass
+        )
+
+    effective_prop_bonus:
+        speedFactor × Acceleration Control.
+
+    active_mass:
+        hull mass + positive fitted Dogma mass additions.
+
+    Only the first fitted propulsion module is evaluated as active because
+    EVE does not permit multiple propulsion modules to run simultaneously.
+    """
+    base_velocity = get_ship_base_max_velocity(
+        ship_type_id
+    )
+    base_mass = get_ship_base_mass(
+        ship_type_id
+    )
+
+    context = freeborn_fitting_skill_context(
+        mode=mode,
+        skills_snapshot=skills_snapshot,
+    )
+
+    navigation_level = (
+        freeborn_context_named_skill_level(
+            context,
+            "Navigation",
+        )
+    )
+
+    acceleration_control_level = (
+        freeborn_context_named_skill_level(
+            context,
+            "Acceleration Control",
+        )
+    )
+
+    velocity_off = (
+        float(base_velocity)
+        * (
+            1.0
+            + (0.05 * navigation_level)
+        )
+        if base_velocity is not None
+        else None
+    )
+
+    propulsion_rows = []
+
+    if (
+        eft_sections is not None
+        and type_ids is not None
+    ):
+        propulsion_rows = (
+            find_fitted_propulsion_modules(
+                eft_sections,
+                type_ids,
+            )
+        )
+
+    mass_audit = {
+        "total_kg": 0.0,
+        "rows": [],
+    }
+
+    if (
+        eft_sections is not None
+        and type_ids is not None
+    ):
+        mass_audit = fitted_mass_additions(
+            eft_sections,
+            type_ids,
+        )
+
+    active_mass = (
+        float(base_mass)
+        + float(
+            mass_audit["total_kg"]
+        )
+        if base_mass is not None
+        else None
+    )
+
+    active_velocity = None
+    active_propulsion = None
+    effective_bonus = None
+    effective_thrust = None
+    thrust_audit = {
+        "effective_thrust_n": None,
+        "raw_thrust": None,
+        "raw_to_effective_ratio": None,
+        "source": "unresolved",
+    }
+
+    if (
+        velocity_off is not None
+        and active_mass
+        and active_mass > 0
+        and propulsion_rows
+    ):
+        active_propulsion = propulsion_rows[0]
+
+        speed_factor = active_propulsion.get(
+            "speed_factor"
+        )
+
+        thrust_audit = (
+            resolve_effective_propulsion_thrust(
+                active_propulsion
+            )
+        )
+        effective_thrust = thrust_audit[
+            "effective_thrust_n"
+        ]
+
+        if (
+            speed_factor is not None
+            and effective_thrust is not None
+        ):
+            effective_bonus = (
+                float(speed_factor)
+                / 100.0
+            ) * (
+                1.0
+                + (
+                    0.05
+                    * acceleration_control_level
+                )
+            )
+
+            active_velocity = (
+                float(velocity_off)
+                * (
+                    1.0
+                    + (
+                        effective_bonus
+                        * float(effective_thrust)
+                        / float(active_mass)
+                    )
+                )
+            )
+
+    return {
+        "mode": context["mode"],
+        "navigation_level": navigation_level,
+        "acceleration_control_level": acceleration_control_level,
+        "base_velocity_ms": base_velocity,
+        "base_mass_kg": base_mass,
+        "mass_addition_kg": mass_audit["total_kg"],
+        "active_mass_kg": active_mass,
+        "propulsion_off_velocity_ms": velocity_off,
+        "propulsion_active_velocity_ms": active_velocity,
+        "active_propulsion": active_propulsion,
+        "propulsion_rows": propulsion_rows,
+        "effective_propulsion_bonus": effective_bonus,
+        "effective_thrust_n": effective_thrust,
+        "raw_propulsion_thrust": thrust_audit[
+            "raw_thrust"
+        ],
+        "raw_to_effective_thrust_ratio": thrust_audit[
+            "raw_to_effective_ratio"
+        ],
+        "thrust_source": thrust_audit[
+            "source"
+        ],
+    }
+
+
+
+# ============================================================
+# FREEBORN FITTINGS — DPS
+# ============================================================
+# DPS volontairement non calculé.
+# Freeborn Fittings conserve l'EFT comme source et laisse au client EVE
+# le calcul exact lié aux munitions, skills, implants, heat, boosts, etc.
+
+
+def format_velocity(value):
+    if value is None:
+        return "—"
+
+    value = float(value)
+
+    if abs(value - round(value)) < 0.05:
+        return (
+            f"{int(round(value)):,} m/s"
+            .replace(",", " ")
+        )
+
+    return (
+        f"{value:,.1f} m/s"
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+
+def format_propulsion_dogma_probe(rows):
+    if not rows:
+        return (
+            "Aucun propulseur reconnu — anomalie de détection à investiguer"
+        )
+
+    parts = []
+
+    for row in rows:
+        details = []
+
+        details.append(
+            "type "
+            + escape(
+                str(
+                    row.get("kind")
+                    or "PROP"
+                )
+            )
+        )
+
+        group_name = str(
+            row.get("group_name")
+            or ""
+        ).strip()
+
+        if group_name:
+            details.append(
+                "groupe "
+                + escape(group_name)
+            )
+
+        if row.get("speed_factor") is not None:
+            label = escape(
+                str(
+                    row.get("speed_factor_attribute")
+                    or "speedFactor"
+                )
+            )
+            details.append(
+                f"{label} "
+                + f'{row["speed_factor"]:.2f}'
+            )
+
+        if row.get("mass_addition") is not None:
+            label = escape(
+                str(
+                    row.get("mass_addition_attribute")
+                    or "massAddition"
+                )
+            )
+            details.append(
+                f"{label} "
+                + f'{row["mass_addition"]:,.0f} kg'
+                .replace(",", " ")
+            )
+
+        if row.get("thrust") is not None:
+            label = escape(
+                str(
+                    row.get("thrust_attribute")
+                    or "thrust"
+                )
+            )
+            details.append(
+                f"{label} "
+                + f'{row["thrust"]:,.0f}'
+                .replace(",", " ")
+            )
+
+        parts.append(
+            f'{int(row["quantity"])}× '
+            + escape(row["name"])
+            + " — "
+            + " • ".join(details)
+        )
+
+    return "<br>".join(parts)
+
+
+
+
+_freeborn_base_resource_cache = {}
+_freeborn_base_capacitor_cache = {}
+_freeborn_module_rows_cache = {}
+
+
+def freeborn_static_fitting_cache_key(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+):
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    return (
+        int(ship_type_id or 0),
+        tuple(sorted(
+            (
+                int(type_id),
+                int(quantity),
+            )
+            for type_id, quantity
+            in counts.items()
+        )),
+    )
+
+
+def calculate_base_fitting_resources(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+):
+    """
+    Calculate static/base CPU and Powergrid telemetry.
+
+    This deliberately does NOT pretend to be a complete EVE Dogma engine.
+    It uses the raw ship outputs and raw module fitting requirements exposed
+    by ESI. Character skills, implants, fleet effects, modules that alter
+    fitting resources, and other Dogma modifiers are not applied yet.
+
+    Returning explicit completeness flags lets the Web UI distinguish a
+    usable base figure from missing ESI data.
+    """
+    cache_key = freeborn_static_fitting_cache_key(
+        ship_type_id,
+        eft_sections,
+        type_ids,
+    )
+
+    cached = _freeborn_base_resource_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+
+    result = {
+        "cpu_output": None,
+        "cpu_used": 0.0,
+        "cpu_complete": False,
+        "power_output": None,
+        "power_used": 0.0,
+        "power_complete": False,
+    }
+
+    ship_dogma = get_eve_type_dogma(ship_type_id)
+
+    if DOGMA_CPU_OUTPUT in ship_dogma:
+        result["cpu_output"] = ship_dogma[DOGMA_CPU_OUTPUT]
+
+    if DOGMA_POWER_OUTPUT in ship_dogma:
+        result["power_output"] = ship_dogma[DOGMA_POWER_OUTPUT]
+
+    module_counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    cpu_ok = result["cpu_output"] is not None
+    power_ok = result["power_output"] is not None
+
+    for type_id, quantity in module_counts.items():
+        dogma = get_eve_type_dogma(type_id)
+
+        # A module can legitimately have no CPU or PG requirement.
+        # Missing Dogma entirely is treated as incomplete resolution.
+        if not dogma:
+            cpu_ok = False
+            power_ok = False
+            continue
+
+        cpu_need = dogma.get(DOGMA_CPU_NEED, 0.0)
+        power_need = dogma.get(DOGMA_POWER_NEED, 0.0)
+
+        result["cpu_used"] += float(cpu_need) * int(quantity)
+        result["power_used"] += float(power_need) * int(quantity)
+
+    result["cpu_complete"] = cpu_ok
+    result["power_complete"] = power_ok
+
+    _freeborn_base_resource_cache[cache_key] = dict(result)
+    return result
+
+
+
+def calculate_base_capacitor_engine(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+):
+    """
+    Capacitor engine.
+
+    This layer intentionally stays conservative. It calculates only values
+    directly supported by public Dogma attributes:
+      - base capacitor capacity;
+      - base recharge time;
+      - theoretical peak passive recharge (2.5 * capacity / recharge time);
+      - capacitor drain of fitted modules exposing both capacitorNeed and
+        duration.
+
+    It does NOT yet claim final EVE stability when conditional capacitor
+    warfare/injection, charges, scripts, overheating, implants, fleet effects,
+    or uncovered modifier chains can alter the result.
+    """
+    cache_key = freeborn_static_fitting_cache_key(
+        ship_type_id,
+        eft_sections,
+        type_ids,
+    )
+
+    cached = _freeborn_base_capacitor_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+
+    result = {
+        "capacity_gj": None,
+        "recharge_seconds": None,
+        "peak_recharge_gjs": None,
+        "active_drain_gjs": 0.0,
+        "net_peak_gjs": None,
+        "complete": False,
+        "consumer_count": 0,
+        "unresolved_count": 0,
+    }
+
+    ship_dogma = get_eve_type_dogma(ship_type_id)
+    if not ship_dogma:
+        _freeborn_base_capacitor_cache[cache_key] = dict(result)
+        return result
+
+    capacity = ship_dogma.get(DOGMA_CAPACITOR_CAPACITY)
+    recharge_ms = ship_dogma.get(DOGMA_CAPACITOR_RECHARGE_TIME)
+
+    if capacity is None or recharge_ms in (None, 0):
+        _freeborn_base_capacitor_cache[cache_key] = dict(result)
+        return result
+
+    capacity = float(capacity)
+    recharge_seconds = float(recharge_ms) / 1000.0
+    peak_recharge = (2.5 * capacity / recharge_seconds) if recharge_seconds > 0 else None
+
+    result["capacity_gj"] = capacity
+    result["recharge_seconds"] = recharge_seconds
+    result["peak_recharge_gjs"] = peak_recharge
+
+    module_counts = _eft_fitted_module_counts(eft_sections, type_ids)
+    module_dogma_complete = True
+
+    for type_id, quantity in module_counts.items():
+        dogma = get_eve_type_dogma(type_id)
+        if not dogma:
+            module_dogma_complete = False
+            result["unresolved_count"] += int(quantity)
+            continue
+
+        cap_need = dogma.get(DOGMA_CAPACITOR_NEED)
+        duration_ms = dogma.get(DOGMA_DURATION)
+
+        # No capacitorNeed means no directly measurable cyclic drain here.
+        if cap_need is None or float(cap_need) <= 0:
+            continue
+
+        # A positive capacitorNeed without a usable duration cannot safely be
+        # converted to GJ/s; mark the audit incomplete rather than guessing.
+        if duration_ms is None or float(duration_ms) <= 0:
+            module_dogma_complete = False
+            result["unresolved_count"] += int(quantity)
+            continue
+
+        per_module_gjs = float(cap_need) / (float(duration_ms) / 1000.0)
+        result["active_drain_gjs"] += per_module_gjs * int(quantity)
+        result["consumer_count"] += int(quantity)
+
+    if peak_recharge is not None:
+        result["net_peak_gjs"] = peak_recharge - result["active_drain_gjs"]
+
+    result["complete"] = module_dogma_complete
+    _freeborn_base_capacitor_cache[cache_key] = dict(result)
+    return result
+
+
+
+
+_freeborn_skill_type_id_cache = {}
+
+
+def freeborn_skill_type_id(skill_name):
+    """
+    Resolve an exact EVE skill typeID once per process through public ESI.
+    This keeps the code independent from hard-coded skill typeIDs.
+    """
+    clean = str(skill_name or "").strip()
+
+    if not clean:
+        return None
+
+    key = clean.casefold()
+
+    if key in _freeborn_skill_type_id_cache:
+        return _freeborn_skill_type_id_cache[key]
+
+    type_id = resolve_eve_inventory_type_id(clean)
+    _freeborn_skill_type_id_cache[key] = type_id
+    return type_id
+
+
+FREEBORN_FITTING_NAMED_SKILLS = (
+    "Capacitor Management",
+    "Capacitor Systems Operation",
+    "High Speed Maneuvering",
+    "Afterburner",
+    "Shield Compensation",
+    "Navigation",
+    "Acceleration Control",
+    "Controlled Bursts",
+    "Long Range Targeting",
+    "Signature Analysis",
+    "Target Management",
+    "Advanced Target Management",
+    "Evasive Maneuvering",
+    "Spaceship Command",
+)
+
+
+def prefetch_freeborn_fitting_skill_ids():
+    unresolved = [
+        name
+        for name in FREEBORN_FITTING_NAMED_SKILLS
+        if name.casefold() not in _freeborn_skill_type_id_cache
+    ]
+
+    if not unresolved:
+        return
+
+    resolved = resolve_eve_inventory_type_ids(
+        unresolved
+    )
+
+    for name in unresolved:
+        key = name.casefold()
+        _freeborn_skill_type_id_cache[
+            key
+        ] = resolved.get(key)
+
+
+def freeborn_context_named_skill_level(context, skill_name):
+    """Resolve a named skill level for ALL V or a real ESI character."""
+    if context.get("mode") == "all_v":
+        return FREEBORN_ALL_V_LEVEL
+
+    type_id = freeborn_skill_type_id(skill_name)
+
+    if not type_id:
+        return 0
+
+    return freeborn_context_skill_level(
+        context,
+        type_id,
+    )
+
+
+def freeborn_capacitor_module_skill_modifier(
+    type_id,
+    context,
+):
+    """
+    Return (cap_need_multiplier, duration_multiplier, rule_label).
+
+    The capacitor model intentionally recognizes only well-defined, common fitting
+    families. Unknown groups remain at 1.0 rather than receiving a guessed
+    bonus. Full SDE modifierInfo coverage remains outside this conservative model.
+    """
+    group_name = get_eve_type_group_name(type_id).casefold()
+
+    cap_mult = 1.0
+    duration_mult = 1.0
+    rule = None
+
+    if "microwarpdrive" in group_name:
+        level = freeborn_context_named_skill_level(
+            context,
+            "High Speed Maneuvering",
+        )
+        cap_mult *= max(0.0, 1.0 - (0.05 * level))
+        rule = f"High Speed Maneuvering {level}/5"
+
+    elif "afterburner" in group_name:
+        level = freeborn_context_named_skill_level(
+            context,
+            "Afterburner",
+        )
+        cap_mult *= max(0.0, 1.0 - (0.10 * level))
+        duration_mult *= max(0.01, 1.0 - (0.05 * level))
+        rule = f"Afterburner {level}/5"
+
+    elif "shield booster" in group_name:
+        level = freeborn_context_named_skill_level(
+            context,
+            "Shield Compensation",
+        )
+        cap_mult *= max(0.0, 1.0 - (0.02 * level))
+        rule = f"Shield Compensation {level}/5"
+
+    elif "turret" in group_name:
+        level = freeborn_context_named_skill_level(
+            context,
+            "Controlled Bursts",
+        )
+        cap_mult *= max(0.0, 1.0 - (0.05 * level))
+        rule = f"Controlled Bursts {level}/5"
+
+    return cap_mult, duration_mult, rule
+
+
+def freeborn_capacitor_recharge_rate(
+    capacity_gj,
+    recharge_seconds,
+    capacitor_fraction,
+):
+    """
+    EVE capacitor recharge curve used for the continuous-load estimator.
+
+    x = capacitor fraction (0..1)
+    rate = 10 * C/T * (sqrt(x) - x)
+
+    Peak occurs at 25% capacitor and equals 2.5 * C/T.
+    """
+    if (
+        capacity_gj is None
+        or recharge_seconds in (None, 0)
+    ):
+        return None
+
+    x = max(0.0, min(1.0, float(capacitor_fraction)))
+
+    return (
+        10.0
+        * float(capacity_gj)
+        / float(recharge_seconds)
+        * ((x ** 0.5) - x)
+    )
+
+
+def freeborn_capacitor_continuous_state(
+    capacity_gj,
+    recharge_seconds,
+    drain_gjs,
+):
+    """
+    Estimate the continuous all-active capacitor state.
+
+    Returns:
+      stable=True + equilibrium_percent when average drain <= peak recharge;
+      stable=False + cap_out_seconds when drain exceeds peak recharge.
+
+    This is a continuous-load model, not yet a final discrete-cycle EVE
+    simulation. Conditional gains such as Nosferatu/cap injection are not
+    included.
+    """
+    if (
+        capacity_gj is None
+        or recharge_seconds in (None, 0)
+        or drain_gjs is None
+    ):
+        return {
+            "stable": None,
+            "equilibrium_percent": None,
+            "cap_out_seconds": None,
+        }
+
+    capacity = float(capacity_gj)
+    recharge = float(recharge_seconds)
+    drain = max(0.0, float(drain_gjs))
+    peak = 2.5 * capacity / recharge
+
+    if drain <= 0:
+        return {
+            "stable": True,
+            "equilibrium_percent": 100.0,
+            "cap_out_seconds": None,
+        }
+
+    if drain <= peak:
+        k = drain * recharge / (10.0 * capacity)
+        discriminant = max(0.0, 1.0 - (4.0 * k))
+        y = (1.0 + discriminant ** 0.5) / 2.0
+        equilibrium = max(0.0, min(1.0, y * y))
+
+        return {
+            "stable": True,
+            "equilibrium_percent": equilibrium * 100.0,
+            "cap_out_seconds": None,
+        }
+
+    # Numerical integration from 100% capacitor for an understandable
+    # cap-out estimate under constant average load.
+    cap = capacity
+    elapsed = 0.0
+    dt = 0.25
+    max_seconds = 24.0 * 60.0 * 60.0
+
+    while cap > 0 and elapsed < max_seconds:
+        fraction = cap / capacity
+        recharge_rate = freeborn_capacitor_recharge_rate(
+            capacity,
+            recharge,
+            fraction,
+        )
+        net = float(recharge_rate or 0.0) - drain
+        cap += net * dt
+        elapsed += dt
+
+    return {
+        "stable": False,
+        "equilibrium_percent": None,
+        "cap_out_seconds": elapsed if cap <= 0 else None,
+    }
+
+
+def format_capacitor_duration(seconds):
+    if seconds is None:
+        return "—"
+
+    seconds = max(0, int(round(float(seconds))))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+
+    if hours:
+        return f"{hours} h {minutes:02d} min {sec:02d} s"
+
+    if minutes:
+        return f"{minutes} min {sec:02d} s"
+
+    return f"{sec} s"
+
+
+def calculate_skill_aware_capacitor(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+    *,
+    mode="all_v",
+    skills_snapshot=None,
+):
+    """
+    Skill-aware capacitor profile.
+
+    Universal pilot skills:
+      - Capacitor Management: +5% capacity / level
+      - Capacitor Systems Operation: -5% recharge time / level
+
+    Recognized module-use reductions are applied conservatively through
+    freeborn_capacitor_module_skill_modifier().
+    """
+    base = calculate_base_capacitor_engine(
+        ship_type_id,
+        eft_sections,
+        type_ids,
+    )
+
+    context = freeborn_fitting_skill_context(
+        mode=mode,
+        skills_snapshot=skills_snapshot,
+    )
+
+    cap_management = freeborn_context_named_skill_level(
+        context,
+        "Capacitor Management",
+    )
+    cap_systems = freeborn_context_named_skill_level(
+        context,
+        "Capacitor Systems Operation",
+    )
+
+    capacity = base["capacity_gj"]
+    recharge = base["recharge_seconds"]
+
+    if capacity is not None:
+        capacity = float(capacity) * (
+            1.0 + (0.05 * cap_management)
+        )
+
+    if recharge is not None:
+        recharge = float(recharge) * max(
+            0.01,
+            1.0 - (0.05 * cap_systems),
+        )
+
+    module_counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    drain = 0.0
+    consumers = 0
+    unresolved = 0
+    modified_modules = 0
+
+    for type_id, quantity in module_counts.items():
+        dogma = get_eve_type_dogma(type_id)
+
+        if not dogma:
+            unresolved += int(quantity)
+            continue
+
+        cap_need = dogma.get(DOGMA_CAPACITOR_NEED)
+        duration_ms = dogma.get(DOGMA_DURATION)
+
+        if cap_need is None or float(cap_need) <= 0:
+            continue
+
+        if duration_ms is None or float(duration_ms) <= 0:
+            unresolved += int(quantity)
+            continue
+
+        cap_mult, duration_mult, rule = (
+            freeborn_capacitor_module_skill_modifier(
+                type_id,
+                context,
+            )
+        )
+
+        if rule:
+            modified_modules += int(quantity)
+
+        adjusted_need = float(cap_need) * cap_mult
+        adjusted_duration_ms = float(duration_ms) * duration_mult
+
+        if adjusted_duration_ms <= 0:
+            unresolved += int(quantity)
+            continue
+
+        per_module = (
+            adjusted_need
+            / (adjusted_duration_ms / 1000.0)
+        )
+
+        drain += per_module * int(quantity)
+        consumers += int(quantity)
+
+    peak = (
+        2.5 * float(capacity) / float(recharge)
+        if (
+            capacity is not None
+            and recharge not in (None, 0)
+        )
+        else None
+    )
+
+    net_peak = (
+        float(peak) - float(drain)
+        if peak is not None
+        else None
+    )
+
+    continuous = freeborn_capacitor_continuous_state(
+        capacity,
+        recharge,
+        drain,
+    )
+
+    return {
+        "mode": context["mode"],
+        "capacitor_management_level": cap_management,
+        "capacitor_systems_operation_level": cap_systems,
+        "capacity_gj": capacity,
+        "recharge_seconds": recharge,
+        "peak_recharge_gjs": peak,
+        "active_drain_gjs": drain,
+        "net_peak_gjs": net_peak,
+        "consumer_count": consumers,
+        "modified_module_count": modified_modules,
+        "unresolved_count": unresolved,
+        "complete": unresolved == 0,
+        "continuous_stable": continuous["stable"],
+        "equilibrium_percent": continuous["equilibrium_percent"],
+        "cap_out_seconds": continuous["cap_out_seconds"],
+    }
+
+
+# ============================================================
+# FREEBORN FITTINGS — SKILL-AWARE ENGINE
+# ============================================================
+
+# Universal Engineering skills affecting the ship's fitting outputs.
+EVE_SKILL_CPU_MANAGEMENT = 3426
+EVE_SKILL_POWER_GRID_MANAGEMENT = 3413
+
+# Weapon fitting skills.
+EVE_SKILL_WEAPON_UPGRADES = 3318
+EVE_SKILL_ADVANCED_WEAPON_UPGRADES = 11207
+
+FREEBORN_ALL_V_LEVEL = 5
+
+# CCP-documented Dogma attribute pairs for item/skill requirements.
+FREEBORN_REQUIRED_SKILL_ATTRIBUTE_PAIRS = (
+    (182, 277),
+    (183, 278),
+    (184, 279),
+    (1285, 1286),
+    (1289, 1287),
+    (1290, 1288),
+)
+
+
+def freeborn_direct_required_skills(type_id):
+    """
+    Return the direct skill requirements encoded on one EVE type.
+
+    Output rows:
+      {
+        "skill_id": int,
+        "required_level": int,
+        "skill_name": str,
+      }
+    """
+    if not type_id:
+        return []
+
+    dogma = get_eve_type_dogma(type_id) or {}
+    rows = []
+
+    for skill_attr_id, level_attr_id in FREEBORN_REQUIRED_SKILL_ATTRIBUTE_PAIRS:
+        raw_skill_id = dogma.get(skill_attr_id)
+        raw_level = dogma.get(level_attr_id)
+
+        try:
+            skill_id = int(float(raw_skill_id))
+        except (TypeError, ValueError):
+            continue
+
+        if skill_id <= 0:
+            continue
+
+        try:
+            required_level = int(float(raw_level))
+        except (TypeError, ValueError):
+            required_level = 1
+
+        required_level = max(1, min(5, required_level))
+
+        metadata = get_eve_type_metadata(skill_id) or {}
+        skill_name = str(
+            metadata.get("name")
+            or f"Skill {skill_id}"
+        )
+
+        rows.append({
+            "skill_id": skill_id,
+            "required_level": required_level,
+            "skill_name": skill_name,
+        })
+
+    return rows
+
+
+def freeborn_recursive_required_skills(type_id, _visiting=None):
+    """
+    Expand the complete prerequisite tree for a ship/type.
+
+    CCP documents that the same Required Skill / Required Level Dogma
+    attributes also apply to skill types. Recursing through them reproduces
+    the minimum prerequisite chain much more closely than checking only the
+    ship's direct requirements.
+
+    Duplicate skills are collapsed to the highest required level encountered.
+    """
+    if not type_id:
+        return []
+
+    visiting = set(_visiting or set())
+    type_id = int(type_id)
+
+    if type_id in visiting:
+        return []
+
+    visiting.add(type_id)
+
+    merged = {}
+
+    def merge_row(row):
+        skill_id = int(row["skill_id"])
+        current = merged.get(skill_id)
+
+        if (
+            current is None
+            or int(row["required_level"]) > int(current["required_level"])
+        ):
+            merged[skill_id] = dict(row)
+
+    for row in freeborn_direct_required_skills(type_id):
+        # First include prerequisites of the required skill itself.
+        for parent in freeborn_recursive_required_skills(
+            row["skill_id"],
+            visiting,
+        ):
+            merge_row(parent)
+
+        # Then include the skill required by this type.
+        merge_row(row)
+
+    # Stable output: broad prerequisites first, then alphabetical as fallback.
+    return list(merged.values())
+
+
+def freeborn_pilotability_result(ship_type_id, skills_snapshot):
+    """
+    Compare the complete minimum hull prerequisite tree against one Main's
+    actual ESI trained skill levels.
+    """
+    required = freeborn_recursive_required_skills(
+        ship_type_id
+    )
+    trained = freeborn_skill_level_map(
+        skills_snapshot
+    )
+
+    rows = []
+    missing = []
+
+    for row in required:
+        skill_id = int(row["skill_id"])
+        required_level = int(row["required_level"])
+        trained_level = int(
+            trained.get(skill_id, 0)
+        )
+
+        result_row = {
+            "skill_id": skill_id,
+            "skill_name": row["skill_name"],
+            "required_level": required_level,
+            "trained_level": trained_level,
+            "met": trained_level >= required_level,
+        }
+
+        rows.append(result_row)
+
+        if not result_row["met"]:
+            missing.append(result_row)
+
+    return {
+        "available": bool(required),
+        "pilotable": bool(required) and not missing,
+        "requirements": rows,
+        "missing": missing,
+    }
+
+
+def freeborn_render_pilotability_badge(result):
+    """
+    Compact badge + hover/focus tooltip for the ship image.
+    """
+    if not result or not result.get("available"):
+        return (
+            '<div class="pilotability-badge pilotability-unknown" tabindex="0">'
+            '<span class="pilotability-mark">?</span>'
+            '<span>PILOTABILITÉ</span>'
+            '<div class="pilotability-tooltip">'
+            '<strong>PRÉREQUIS DU VAISSEAU</strong>'
+            '<span>Impossible de résoudre les compétences minimales pour ce hull.</span>'
+            '</div>'
+            '</div>'
+        )
+
+    pilotable = bool(result.get("pilotable"))
+    rows = result.get("requirements") or []
+
+    tooltip_rows = []
+
+    for row in rows:
+        state = "✓" if row.get("met") else "✕"
+        css_class = "ok" if row.get("met") else "missing"
+
+        tooltip_rows.append(
+            '<div class="pilotability-skill-row '
+            + css_class
+            + '">'
+            + '<span>'
+            + state
+            + ' '
+            + escape(str(row.get("skill_name") or "Skill"))
+            + '</span>'
+            + '<b>'
+            + str(int(row.get("trained_level") or 0))
+            + '/'
+            + str(int(row.get("required_level") or 0))
+            + '</b>'
+            + '</div>'
+        )
+
+    if pilotable:
+        badge_class = "pilotability-ok"
+        badge_mark = "✓"
+        badge_text = "PILOTABLE"
+        summary = "Ce Main possède tous les prérequis minimum du hull."
+    else:
+        badge_class = "pilotability-no"
+        badge_mark = "⚠"
+        badge_text = "NON PILOTABLE"
+        missing_count = len(result.get("missing") or [])
+        summary = (
+            f"{missing_count} compétence manquante."
+            if missing_count == 1
+            else f"{missing_count} compétences manquantes."
+        )
+
+    return (
+        '<div class="pilotability-badge '
+        + badge_class
+        + '" tabindex="0">'
+        + '<span class="pilotability-mark">'
+        + badge_mark
+        + '</span>'
+        + '<span>'
+        + badge_text
+        + '</span>'
+        + '<div class="pilotability-tooltip">'
+        + '<strong>COMPÉTENCES MINIMUM REQUISES</strong>'
+        + '<span class="pilotability-summary">'
+        + escape(summary)
+        + '</span>'
+        + ''.join(tooltip_rows)
+        + '</div>'
+        + '</div>'
+    )
+
+
+def freeborn_skill_level_map(skills_snapshot):
+    """
+    Convert the ESI skills snapshot into:
+        {skill_id: trained_skill_level}
+    """
+    levels = {}
+
+    for row in skills_snapshot or []:
+        if not isinstance(row, dict):
+            continue
+
+        try:
+            skill_id = int(row.get("skill_id"))
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            level = int(
+                row.get(
+                    "trained_skill_level",
+                    row.get("active_skill_level", 0),
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            level = 0
+
+        levels[skill_id] = max(0, min(5, level))
+
+    return levels
+
+
+def freeborn_fitting_skill_context(
+    mode="all_v",
+    skills_snapshot=None,
+):
+    """
+    Build the skill context used by the fitting engine.
+
+    mode='all_v':
+        all relevant skills are evaluated at V.
+
+    mode='character':
+        actual trained levels from the ESI snapshot are used.
+    """
+    mode = str(mode or "all_v").lower()
+
+    if mode == "all_v":
+        return {
+            "mode": "all_v",
+            "levels": {},
+        }
+
+    if mode == "character":
+        return {
+            "mode": "character",
+            "levels": freeborn_skill_level_map(
+                skills_snapshot
+            ),
+        }
+
+    raise ValueError(
+        f"Unsupported Freeborn fitting skill mode: {mode}"
+    )
+
+
+def freeborn_context_skill_level(context, skill_id):
+    """Resolve one skill level from an ALL V or character context."""
+    if context.get("mode") == "all_v":
+        return FREEBORN_ALL_V_LEVEL
+
+    return int(
+        context.get("levels", {}).get(
+            int(skill_id),
+            0,
+        )
+    )
+
+
+def freeborn_fitted_module_rows(
+    eft_sections,
+    type_ids,
+):
+    """
+    Return one normalized row per fitted module type.
+
+    Cargo, drones, charges and scripts are excluded.
+    """
+    cache_key = freeborn_static_fitting_cache_key(
+        0,
+        eft_sections,
+        type_ids,
+    )
+
+    cached = _freeborn_module_rows_cache.get(cache_key)
+    if cached is not None:
+        return [dict(row) for row in cached]
+
+    rows = []
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    for type_id, quantity in counts.items():
+        dogma = get_eve_type_dogma(type_id)
+
+        rows.append({
+            "type_id": int(type_id),
+            "quantity": int(quantity),
+            "cpu_base": float(
+                dogma.get(DOGMA_CPU_NEED, 0.0)
+                if dogma
+                else 0.0
+            ),
+            "power_base": float(
+                dogma.get(DOGMA_POWER_NEED, 0.0)
+                if dogma
+                else 0.0
+            ),
+            "dogma_ok": bool(dogma),
+            "weapon_group":
+                freeborn_is_weapon_fitting_group(type_id),
+        })
+
+    _freeborn_module_rows_cache[cache_key] = [
+        dict(row)
+        for row in rows
+    ]
+    return rows
+
+
+def calculate_skill_aware_fitting_resources(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+    *,
+    mode="all_v",
+    skills_snapshot=None,
+):
+    """
+    CPU/PG engine.
+
+    Applied here:
+      Ship output:
+        - CPU Management: +5% CPU output / level
+        - Power Grid Management: +5% PG output / level
+
+      Weapon module fitting needs:
+        - Weapon Upgrades: -5% CPU need / level
+          on conservative weapon groups
+        - Advanced Weapon Upgrades: -2% PG need / level
+          on conservative weapon groups
+
+    This is materially closer to EVE fitting than BASE/4O-A, but it is still
+    marked "validation" until the SDE modifierInfo layer covers the remaining
+    skill-conditioned module families generically.
+    """
+    base = calculate_base_fitting_resources(
+        ship_type_id,
+        eft_sections,
+        type_ids,
+    )
+
+    context = freeborn_fitting_skill_context(
+        mode=mode,
+        skills_snapshot=skills_snapshot,
+    )
+
+    cpu_level = freeborn_context_skill_level(
+        context,
+        EVE_SKILL_CPU_MANAGEMENT,
+    )
+    pg_level = freeborn_context_skill_level(
+        context,
+        EVE_SKILL_POWER_GRID_MANAGEMENT,
+    )
+    weapon_upgrades_level = freeborn_context_skill_level(
+        context,
+        EVE_SKILL_WEAPON_UPGRADES,
+    )
+    awu_level = freeborn_context_skill_level(
+        context,
+        EVE_SKILL_ADVANCED_WEAPON_UPGRADES,
+    )
+
+    cpu_output = base["cpu_output"]
+    power_output = base["power_output"]
+
+    if cpu_output is not None:
+        cpu_output = float(cpu_output) * (
+            1.0 + (0.05 * cpu_level)
+        )
+
+    if power_output is not None:
+        power_output = float(power_output) * (
+            1.0 + (0.05 * pg_level)
+        )
+
+    module_rows = freeborn_fitted_module_rows(
+        eft_sections,
+        type_ids,
+    )
+
+    cpu_used = 0.0
+    power_used = 0.0
+    weapon_module_count = 0
+    module_data_complete = True
+
+    for row in module_rows:
+        if not row["dogma_ok"]:
+            module_data_complete = False
+
+        cpu_need = row["cpu_base"]
+        power_need = row["power_base"]
+
+        if row["weapon_group"]:
+            weapon_module_count += int(row["quantity"])
+
+            cpu_need *= (
+                1.0 - (0.05 * weapon_upgrades_level)
+            )
+
+            # AWU applies to turrets/launchers. The conservative classifier
+            # also recognizes smartbomb groups for WU; smartbomb PG is not
+            # modified here.
+            group_name = get_eve_type_group_name(
+                row["type_id"]
+            ).casefold()
+
+            if (
+                "launcher" in group_name
+                or
+                "turret" in group_name
+            ):
+                power_need *= (
+                    1.0 - (0.02 * awu_level)
+                )
+
+        cpu_used += (
+            float(cpu_need)
+            * int(row["quantity"])
+        )
+        power_used += (
+            float(power_need)
+            * int(row["quantity"])
+        )
+
+    cpu_remaining = (
+        float(cpu_output) - float(cpu_used)
+        if cpu_output is not None
+        else None
+    )
+    power_remaining = (
+        float(power_output) - float(power_used)
+        if power_output is not None
+        else None
+    )
+
+    return {
+        "mode": context["mode"],
+
+        "cpu_management_level": cpu_level,
+        "power_grid_management_level": pg_level,
+        "weapon_upgrades_level": weapon_upgrades_level,
+        "advanced_weapon_upgrades_level": awu_level,
+
+        "cpu_used": cpu_used,
+        "cpu_output": cpu_output,
+        "cpu_remaining": cpu_remaining,
+        "cpu_valid": (
+            cpu_remaining is not None
+            and cpu_remaining >= -0.0001
+        ),
+
+        "power_used": power_used,
+        "power_output": power_output,
+        "power_remaining": power_remaining,
+        "power_valid": (
+            power_remaining is not None
+            and power_remaining >= -0.0001
+        ),
+
+        "weapon_module_count": weapon_module_count,
+
+        "data_complete": (
+            bool(base["cpu_complete"])
+            and bool(base["power_complete"])
+            and module_data_complete
+        ),
+
+        # 4O-B is a validation engine: universal + weapon fitting skills
+        # are applied, but the full SDE modifierInfo pass is still pending.
+        "official_all_v_ready": False,
+    }
+
+
+def format_engine_number(value, unit):
+    if value is None:
+        return "— " + unit
+
+    value = float(value)
+
+    if abs(value - round(value)) < 0.0001:
+        number = f"{int(round(value)):,}".replace(",", " ")
+    else:
+        number = (
+            f"{value:,.1f}"
+            .replace(",", " ")
+            .replace(".", ",")
+        )
+
+    return f"{number} {unit}"
+
+
+def format_engine_resource_pair(
+    used,
+    output,
+    unit,
+):
+    if used is None or output is None:
+        return "— / — " + unit
+
+    def fmt(value):
+        value = float(value)
+
+        if abs(value - round(value)) < 0.0001:
+            return f"{int(round(value)):,}".replace(",", " ")
+
+        return (
+            f"{value:,.1f}"
+            .replace(",", " ")
+            .replace(".", ",")
+        )
+
+    return f"{fmt(used)} / {fmt(output)} {unit}"
+
+
+def format_engine_margin(
+    remaining,
+    unit,
+):
+    if remaining is None:
+        return "Donnée indisponible"
+
+    value = float(remaining)
+    sign = "+" if value >= 0 else "−"
+
+    return (
+        f"{sign}{format_engine_number(abs(value), unit)}"
+    )
+
+
+
+
+def format_engine_delta(
+    character_value,
+    all_v_value,
+    unit,
+    *,
+    lower_is_better=False,
+):
+    """
+    Format the difference Character - ALL V.
+
+    For resource consumption (CPU/PG used), lower_is_better=True means
+    a positive raw difference is displayed as a penalty.
+    """
+    if character_value is None or all_v_value is None:
+        return "—"
+
+    delta = float(character_value) - float(all_v_value)
+
+    if abs(delta) < 0.0001:
+        return "Identique à ALL V"
+
+    amount = format_engine_number(abs(delta), unit)
+
+    if lower_is_better:
+        return (
+            f"+{amount} vs ALL V"
+            if delta > 0
+            else f"−{amount} vs ALL V"
+        )
+
+    return (
+        f"+{amount} vs ALL V"
+        if delta > 0
+        else f"−{amount} vs ALL V"
+    )
+
+
+def freeborn_4ob_coverage_label(engine_result):
+    """
+    Make the current validation scope explicit.
+    4O-C still uses the 4O-B calculation kernel; this label prevents the
+    partial engine from being confused with the final complete Dogma engine.
+    """
+    weapon_count = int(
+        engine_result.get("weapon_module_count", 0) or 0
+    )
+
+    return (
+        f"Universel + armes reconnues ({weapon_count} module"
+        + ("" if weapon_count == 1 else "s")
+        + ")"
+    )
+
+
+
+def format_fitting_resource_value(
+    used,
+    output,
+    complete,
+    unit,
+):
+    """Render one compact base fitting-resource value for the HUD."""
+    if output is None:
+        return "— / — " + unit
+
+    # Keep one decimal only when it carries information.
+    def _fmt(value):
+        value = float(value)
+        if abs(value - round(value)) < 0.0001:
+            return f"{int(round(value)):,}".replace(",", " ")
+        return f"{value:,.1f}".replace(",", " ").replace(".", ",")
+
+    prefix = "" if complete else "≈ "
+    return (
+        f"{prefix}{_fmt(used)} / {_fmt(output)} {unit}"
+    )
+
+
+def format_eft_web_items(items, type_ids=None):
+    """
+    Render EFT items with normalized quantities and EVE inventory icons.
+
+    - repeated fitted modules are collapsed;
+    - trailing EFT quantities such as `x2000` become the actual quantity;
+    - the suffix is removed from the displayed item name.
+    """
+    if not items:
+        return '<div class="slot-empty">Aucun élément renseigné</div>'
+
+    type_ids = type_ids or {}
+    collapsed = []
+    index_by_key = {}
+
+    for raw_line in items:
+        display_line, quantity = parse_eft_display_quantity(raw_line)
+
+        if not display_line:
+            continue
+
+        item_name = normalize_eft_item_name(display_line)
+        key = display_line.casefold()
+
+        if key in index_by_key:
+            collapsed[index_by_key[key]]["quantity"] += quantity
+        else:
+            index_by_key[key] = len(collapsed)
+            collapsed.append({
+                "line": display_line,
+                "item_name": item_name,
+                "quantity": quantity,
+            })
+
+    html = []
+
+    for item in collapsed:
+        type_id = type_ids.get(item["item_name"].casefold())
+        icon_url = eve_type_icon_url(type_id, 64)
+
+        icon_html = (
+            f'<img class="item-icon" src="{escape(icon_url)}" '
+            f'alt="" loading="lazy">'
+            if icon_url
+            else '<span class="item-icon item-icon-fallback">◆</span>'
+        )
+
+        html.append(
+            '<div class="slot-item">'
+            f'{icon_html}'
+            f'<span class="slot-qty">{int(item["quantity"])}×</span>'
+            f'<span class="slot-label">{escape(item["line"])}</span>'
+            '</div>'
+        )
+
+    return "".join(html)
+
+
+# NOTE — specialized ship holds:
+# The official EFT clipboard format explicitly separates drone/fighter bay
+# from cargo bay, but it does not encode Fuel/Ore/Gas/PI/etc. hold assignment.
+# This renderer is intentionally generic so future specialized holds can reuse
+# exactly the same icon-grid/tooltip UI when Freeborn has a trustworthy source
+# for those hold contents/capacities.
+def format_eft_bay_items(items, type_ids=None):
+    """
+    Render Drone/Cargo-style bays as an EVE-like icon grid.
+
+    Each tile shows:
+      - the EVE inventory icon when available,
+      - the quantity below the icon,
+      - complete item name + quantity on hover/focus.
+    """
+    if not items:
+        return '<div class="bay-empty">Aucun élément renseigné</div>'
+
+    type_ids = type_ids or {}
+    collapsed = []
+    index_by_key = {}
+
+    for raw_line in items:
+        display_line, quantity = parse_eft_display_quantity(raw_line)
+
+        if not display_line:
+            continue
+
+        item_name = normalize_eft_item_name(display_line)
+        key = display_line.casefold()
+
+        if key in index_by_key:
+            collapsed[index_by_key[key]]["quantity"] += quantity
+        else:
+            index_by_key[key] = len(collapsed)
+            collapsed.append({
+                "line": display_line,
+                "item_name": item_name,
+                "quantity": quantity,
+            })
+
+    tiles = []
+
+    for item in collapsed:
+        type_id = type_ids.get(item["item_name"].casefold())
+        icon_url = eve_type_icon_url(type_id, 64)
+
+        icon_html = (
+            f'<img class="bay-item-icon" src="{escape(icon_url)}" '
+            f'alt="" loading="lazy">'
+            if icon_url
+            else '<span class="bay-item-icon bay-item-fallback">◆</span>'
+        )
+
+        quantity = int(item["quantity"])
+        quantity_text = f"{quantity:,}".replace(",", " ")
+        tooltip = escape(f'{item["line"]} ×{quantity_text}')
+
+        tiles.append(
+            '<div class="bay-item" tabindex="0" '
+            f'aria-label="{tooltip}">'
+            f'{icon_html}'
+            f'<span class="bay-qty">{quantity_text}×</span>'
+            f'<span class="bay-tooltip">{tooltip}</span>'
+            '</div>'
+        )
+
+    return "".join(tiles)
+
+
+
+
+# ============================================================
+# FREEBORN FITTINGS — PERSISTENT SNAPSHOT
+# ============================================================
+
+FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-A-AUTO-INVENTORY-V1"
+
+
+def freeborn_technical_snapshot_fingerprint(fit):
+    """
+    Stable invalidation fingerprint.
+
+    Status / notes / usage do not invalidate technical calculations.
+    Ship type + normalized EFT do.
+    """
+    payload = (
+        str(fit.get("ship_type_id") or "")
+        + "\n"
+        + str(fit.get("eft_text") or "")
+    ).encode("utf-8")
+
+    return hashlib.sha256(
+        payload
+    ).hexdigest()
+
+
+def freeborn_technical_snapshot_valid(fit):
+    snapshot = fit.get(
+        "technical_snapshot"
+    )
+
+    if not isinstance(snapshot, dict):
+        return False
+
+    if (
+        str(
+            fit.get(
+                "technical_snapshot_version"
+            )
+            or ""
+        )
+        != FREEBORN_TECHNICAL_SNAPSHOT_VERSION
+    ):
+        return False
+
+    return (
+        snapshot.get("fingerprint")
+        == freeborn_technical_snapshot_fingerprint(
+            fit
+        )
+    )
+
+
+def persist_freeborn_technical_snapshot(
+    fit,
+    snapshot,
+):
+    """
+    Persist technical data in Neon so a new Render worker can serve the page
+    without rebuilding EVE static data from ESI.
+    """
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE fits
+                SET
+                    technical_snapshot = %s::jsonb,
+                    technical_snapshot_version = %s,
+                    technical_snapshot_updated_at = NOW()
+                WHERE guild_id = %s
+                AND fit_id = %s;
+                """,
+                (
+                    json.dumps(
+                        snapshot,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    FREEBORN_TECHNICAL_SNAPSHOT_VERSION,
+                    str(fit["guild_id"]),
+                    int(fit["fit_id"]),
+                ),
+            )
+
+        conn.commit()
+
+    fit["technical_snapshot"] = snapshot
+    fit[
+        "technical_snapshot_version"
+    ] = FREEBORN_TECHNICAL_SNAPSHOT_VERSION
+
+
+def freeborn_snapshot_skill_ids():
+    """
+    Resolve and persist the handful of named skill IDs required by the
+    personalized CPU/PG/cap/velocity layer.
+    """
+    names = tuple(
+        FREEBORN_FITTING_NAMED_SKILLS
+    )
+
+    resolved = resolve_eve_inventory_type_ids(
+        names
+    )
+
+    result = {}
+
+    for name in names:
+        key = name.casefold()
+        type_id = resolved.get(key)
+
+        if type_id:
+            result[name] = int(type_id)
+
+    return result
+
+
+def freeborn_snapshot_module_rows(
+    eft_sections,
+    type_ids,
+):
+    """
+    Static module rows sufficient for CPU/PG and capacitor personalized
+    calculations without future ESI reads.
+    """
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    rows = []
+
+    for type_id, quantity in counts.items():
+        dogma = get_eve_type_dogma(
+            type_id
+        )
+        group_name = (
+            get_eve_type_group_name(
+                type_id
+            )
+            or ""
+        )
+
+        rows.append({
+            "type_id": int(type_id),
+            "quantity": int(quantity),
+            "group_name": group_name,
+            "weapon_group": (
+                "launcher"
+                in group_name.casefold()
+                or "turret"
+                in group_name.casefold()
+                or "smartbomb"
+                in group_name.casefold()
+            ),
+            "cpu_base": float(
+                dogma.get(
+                    DOGMA_CPU_NEED,
+                    0.0,
+                )
+                if dogma else 0.0
+            ),
+            "power_base": float(
+                dogma.get(
+                    DOGMA_POWER_NEED,
+                    0.0,
+                )
+                if dogma else 0.0
+            ),
+            "cap_need": (
+                float(
+                    dogma[
+                        DOGMA_CAPACITOR_NEED
+                    ]
+                )
+                if (
+                    dogma
+                    and dogma.get(
+                        DOGMA_CAPACITOR_NEED
+                    ) is not None
+                )
+                else None
+            ),
+            "duration_ms": (
+                float(
+                    dogma[
+                        DOGMA_DURATION
+                    ]
+                )
+                if (
+                    dogma
+                    and dogma.get(
+                        DOGMA_DURATION
+                    ) is not None
+                )
+                else None
+            ),
+            "dogma_ok": bool(dogma),
+        })
+
+    return rows
+
+
+
+def freeborn_type_volume_m3(type_id):
+    """Return inventory volume from cached EVE type metadata."""
+    if not type_id:
+        return 0.0
+
+    payload = get_eve_type_metadata(
+        type_id
+    )
+
+    try:
+        return float(
+            payload.get("volume")
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def freeborn_bay_used_volume(
+    lines,
+    type_ids,
+):
+    """Sum item volume × EFT quantity for one bay."""
+    total = 0.0
+    unresolved = []
+
+    for raw_line in lines or []:
+        display_line, quantity = (
+            parse_eft_display_quantity(
+                raw_line
+            )
+        )
+
+        item_name = normalize_eft_item_name(
+            display_line
+        )
+
+        type_id = type_ids.get(
+            item_name.casefold()
+        )
+
+        if not type_id:
+            unresolved.append(
+                item_name
+            )
+            continue
+
+        total += (
+            freeborn_type_volume_m3(
+                type_id
+            )
+            * int(quantity)
+        )
+
+    return {
+        "used_m3": total,
+        "unresolved": unresolved,
+        "complete": not unresolved,
+    }
+
+
+def build_freeborn_ship_resource_usage(
+    ship_type_id,
+    eft_sections,
+    type_ids,
+):
+    """
+    FREEBORN FITTINGS — 4S-N-A Dynamic Specialized Bays Engine.
+    """
+    ship_metadata = get_eve_type_metadata(
+        ship_type_id
+    )
+
+    try:
+        cargo_capacity = float(
+            ship_metadata.get("capacity") or 0.0
+        )
+    except (TypeError, ValueError):
+        cargo_capacity = 0.0
+
+    drone_capacity_attr = find_dogma_attribute_by_names(
+        ship_type_id,
+        exact_names=(
+            "droneCapacity",
+            "Drone Capacity",
+            "Drone Bay Capacity",
+        ),
+        contains_names=(
+            "drone capacity",
+            "drone bay capacity",
+        ),
+    )
+
+    drone_bandwidth_attr = find_dogma_attribute_by_names(
+        ship_type_id,
+        exact_names=(
+            "droneBandwidth",
+            "Drone Bandwidth",
+        ),
+        contains_names=(
+            "drone bandwidth",
+        ),
+    )
+
+    drone_capacity = (
+        float(drone_capacity_attr["value"])
+        if drone_capacity_attr
+        else None
+    )
+
+    drone_bandwidth = (
+        float(drone_bandwidth_attr["value"])
+        if drone_bandwidth_attr
+        else None
+    )
+
+    drone_lines, specialized_buckets, cargo_lines, active_holds = (
+        split_eft_dynamic_bays(
+            eft_sections.get("extras", []),
+            type_ids,
+            ship_type_id,
+        )
+    )
+
+    drone_usage = freeborn_bay_used_volume(
+        drone_lines,
+        type_ids,
+    )
+
+    cargo_usage = freeborn_bay_used_volume(
+        cargo_lines,
+        type_ids,
+    )
+
+    specialized_holds = []
+
+    for hold in active_holds:
+        hold_lines = specialized_buckets.get(
+            hold["key"],
+            [],
+        )
+        usage = freeborn_bay_used_volume(
+            hold_lines,
+            type_ids,
+        )
+
+        specialized_holds.append({
+            "key": hold["key"],
+            "label": hold["label"],
+            "code": hold["code"],
+            "icon": hold["icon"],
+            "capacity_m3": hold["capacity_m3"],
+            "used_m3": usage["used_m3"],
+            "complete": usage["complete"],
+            "items": hold_lines,
+            "routed": bool(hold.get("router")),
+        })
+
+    return {
+        "cargo_used_m3": cargo_usage["used_m3"],
+        "cargo_capacity_m3": cargo_capacity,
+        "cargo_complete": cargo_usage["complete"],
+        "drone_bay_used_m3": drone_usage["used_m3"],
+        "drone_bay_capacity_m3": drone_capacity,
+        "drone_bay_complete": drone_usage["complete"],
+        "drone_bandwidth_used_mbps": 0.0,
+        "drone_bandwidth_available_mbps": drone_bandwidth,
+        "specialized_holds": specialized_holds,
+    }
+
+
+def format_resource_usage_value(
+    used,
+    available,
+    unit,
+):
+    if available is None:
+        return "—"
+
+    used = float(
+        used or 0.0
+    )
+    available = float(
+        available
+    )
+
+    def fmt(value):
+        if abs(
+            value - round(value)
+        ) < 0.05:
+            return (
+                f"{int(round(value)):,}"
+                .replace(",", " ")
+            )
+
+        return (
+            f"{value:,.1f}"
+            .replace(",", " ")
+            .replace(".", ",")
+        )
+
+    return (
+        f"{fmt(used)} / "
+        f"{fmt(available)} {unit}"
+    )
+
+
+
+def freeborn_ship_tank_base(ship_type_id):
+    """
+    Read raw hull hitpoints and base resistance attributes from Dogma.
+
+    Returned resistances are normalized as percentages when possible.
+    No fitted module, skill, stacking penalty or reactive effect is applied.
+    """
+    dogma = get_eve_type_dogma(
+        ship_type_id
+    )
+
+    if not dogma:
+        return {}
+
+    aliases = {
+        "shield_hp": (
+            "shield capacity",
+            "shieldcapacity",
+        ),
+        "armor_hp": (
+            "armor hp",
+            "armorhp",
+        ),
+        "structure_hp": (
+            "hp",
+            "structure hp",
+            "structurehitpoints",
+        ),
+        "shield_em": (
+            "shield em damage resistance",
+            "shield em resistance",
+        ),
+        "shield_therm": (
+            "shield thermal damage resistance",
+            "shield thermal resistance",
+        ),
+        "shield_kin": (
+            "shield kinetic damage resistance",
+            "shield kinetic resistance",
+        ),
+        "shield_exp": (
+            "shield explosive damage resistance",
+            "shield explosive resistance",
+        ),
+        "armor_em": (
+            "armor em damage resistance",
+            "armor em resistance",
+        ),
+        "armor_therm": (
+            "armor thermal damage resistance",
+            "armor thermal resistance",
+        ),
+        "armor_kin": (
+            "armor kinetic damage resistance",
+            "armor kinetic resistance",
+        ),
+        "armor_exp": (
+            "armor explosive damage resistance",
+            "armor explosive resistance",
+        ),
+        "structure_em": (
+            "structure em damage resistance",
+            "structure em resistance",
+            "hull em resistance",
+        ),
+        "structure_therm": (
+            "structure thermal damage resistance",
+            "structure thermal resistance",
+            "hull thermal resistance",
+        ),
+        "structure_kin": (
+            "structure kinetic damage resistance",
+            "structure kinetic resistance",
+            "hull kinetic resistance",
+        ),
+        "structure_exp": (
+            "structure explosive damage resistance",
+            "structure explosive resistance",
+            "hull explosive resistance",
+        ),
+    }
+
+    result = {
+        key: None
+        for key in aliases
+    }
+
+    # Keep structure HP from matching every generic "... hp" attribute:
+    # exact matches win, otherwise require context-specific wording.
+    for attribute_id, value in dogma.items():
+        metadata = get_eve_dogma_attribute_metadata(
+            attribute_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or ""
+        ).strip()
+
+        display_name = str(
+            metadata.get("display_name")
+            or ""
+        ).strip()
+
+        normalized = (
+            name
+            + " "
+            + display_name
+        ).casefold()
+
+        for key, terms in aliases.items():
+            if result[key] is not None:
+                continue
+
+            matched = False
+
+            if key == "structure_hp":
+                matched = (
+                    normalized.strip() == "hp"
+                    or "structure hp" in normalized
+                    or "structure hitpoints" in normalized
+                )
+            else:
+                matched = any(
+                    term in normalized
+                    for term in terms
+                )
+
+            if not matched:
+                continue
+
+            try:
+                numeric = float(
+                    value
+                )
+            except (TypeError, ValueError):
+                continue
+
+            # Resistance Dogma can be either a multiplier (0..1) or percent.
+            if "_em" in key or "_therm" in key or "_kin" in key or "_exp" in key:
+                if 0.0 <= numeric <= 1.0:
+                    # EVE often stores damage resonance; convert to resistance.
+                    numeric = (
+                        1.0 - numeric
+                    ) * 100.0
+
+            result[key] = numeric
+
+    return result
+
+
+def freeborn_tank_module_audit(
+    eft_sections,
+    type_ids,
+):
+    """
+    Inventory fitted tank modules and expose Dogma attributes likely to affect:
+      - shield/armor/structure HP;
+      - EM/Thermal/Kinetic/Explosive resistances;
+      - shield boost / armor repair amount;
+      - cycle duration.
+
+    This is an audit only. 4S-B deliberately does not derive final tank stats.
+    """
+    counts = _eft_fitted_module_counts(
+        eft_sections,
+        type_ids,
+    )
+
+    relevant_fragments = (
+        "shield bonus",
+        "armor bonus",
+        "structure bonus",
+        "shield capacity",
+        "armor hp",
+        "hp bonus",
+        "resonance",
+        "resistance",
+        "shield boost",
+        "armor repair",
+        "repair amount",
+        "duration",
+        "cycle time",
+    )
+
+    rows = []
+
+    for type_id, quantity in counts.items():
+        metadata = get_eve_type_metadata(
+            type_id
+        )
+
+        name = str(
+            metadata.get("name")
+            or f"Type {type_id}"
+        )
+        group_name = get_eve_type_group_name(
+            type_id
+        )
+
+        haystack = (
+            name
+            + " "
+            + str(group_name or "")
+        ).casefold()
+
+        tankish = any(
+            token in haystack
+            for token in (
+                "shield",
+                "armor",
+                "hardener",
+                "damage control",
+                "bulkhead",
+                "extender",
+                "plate",
+                "booster",
+                "repairer",
+                "resistance",
+            )
+        )
+
+        if not tankish:
+            continue
+
+        dogma = get_eve_type_dogma(
+            type_id
+        )
+
+        attributes = []
+
+        for attribute_id, value in dogma.items():
+            meta = get_eve_dogma_attribute_metadata(
+                attribute_id
+            )
+
+            attr_name = str(
+                meta.get("name")
+                or ""
+            ).strip()
+            display_name = str(
+                meta.get("display_name")
+                or ""
+            ).strip()
+
+            normalized = (
+                attr_name
+                + " "
+                + display_name
+            ).casefold()
+
+            if not any(
+                fragment in normalized
+                for fragment in relevant_fragments
+            ):
+                continue
+
+            attributes.append({
+                "attribute_id":
+                    int(attribute_id),
+                "name":
+                    display_name
+                    or attr_name
+                    or f"attribute {attribute_id}",
+                "value":
+                    value,
+            })
+
+        rows.append({
+            "type_id": int(type_id),
+            "name": name,
+            "group_name":
+                str(group_name or ""),
+            "quantity": int(quantity),
+            "attributes": attributes,
+        })
+
+    return rows
+
+
+def format_tank_resistance(value):
+    if value is None:
+        return "—"
+
+    return (
+        f"{float(value):.1f}%"
+        .replace(".", ",")
+    )
+
+
+def freeborn_render_tank_audit(
+    tank_base,
+    modules,
+):
+    chunks = [
+        '<strong>TANK / RÉSISTANCES — AUDIT 4S-B</strong>',
+        '<br><span class="cap-audit-key">Hull brut :</span>',
+        '<br>Shield HP : '
+        + escape(
+            str(
+                tank_base.get(
+                    "shield_hp",
+                    "—",
+                )
+            )
+        ),
+        ' • Armor HP : '
+        + escape(
+            str(
+                tank_base.get(
+                    "armor_hp",
+                    "—",
+                )
+            )
+        ),
+        ' • Structure HP : '
+        + escape(
+            str(
+                tank_base.get(
+                    "structure_hp",
+                    "—",
+                )
+            )
+        ),
+        '<br><span class="cap-audit-key">Shield :</span> '
+        + 'EM '
+        + format_tank_resistance(
+            tank_base.get("shield_em")
+        )
+        + ' • THERM '
+        + format_tank_resistance(
+            tank_base.get("shield_therm")
+        )
+        + ' • KIN '
+        + format_tank_resistance(
+            tank_base.get("shield_kin")
+        )
+        + ' • EXP '
+        + format_tank_resistance(
+            tank_base.get("shield_exp")
+        ),
+        '<br><span class="cap-audit-key">Armor :</span> '
+        + 'EM '
+        + format_tank_resistance(
+            tank_base.get("armor_em")
+        )
+        + ' • THERM '
+        + format_tank_resistance(
+            tank_base.get("armor_therm")
+        )
+        + ' • KIN '
+        + format_tank_resistance(
+            tank_base.get("armor_kin")
+        )
+        + ' • EXP '
+        + format_tank_resistance(
+            tank_base.get("armor_exp")
+        ),
+        '<br><span class="cap-audit-key">Structure :</span> '
+        + 'EM '
+        + format_tank_resistance(
+            tank_base.get("structure_em")
+        )
+        + ' • THERM '
+        + format_tank_resistance(
+            tank_base.get("structure_therm")
+        )
+        + ' • KIN '
+        + format_tank_resistance(
+            tank_base.get("structure_kin")
+        )
+        + ' • EXP '
+        + format_tank_resistance(
+            tank_base.get("structure_exp")
+        ),
+        '<br><strong>MODULES TANK DÉTECTÉS</strong>',
+    ]
+
+    if not modules:
+        chunks.append(
+            '<br>Aucun module tank détecté.'
+        )
+        return "".join(chunks)
+
+    for row in modules:
+        chunks.append(
+            '<br>'
+            + f'{row["quantity"]}× '
+            + escape(row["name"])
+            + (
+                ' — '
+                + escape(
+                    row["group_name"]
+                )
+                if row["group_name"]
+                else ''
+            )
+        )
+
+        if not row["attributes"]:
+            chunks.append(
+                '<br><span class="cap-audit-muted">'
+                'Aucun attribut tank filtré.'
+                '</span>'
+            )
+            continue
+
+        for attr in row["attributes"]:
+            chunks.append(
+                '<br>'
+                + '<span class="cap-audit-key">'
+                + escape(
+                    str(attr["name"])
+                )
+                + '</span> = '
+                + escape(
+                    str(attr["value"])
+                )
+                + ' <span class="cap-audit-muted">[#'
+                + escape(
+                    str(attr["attribute_id"])
+                )
+                + ']</span>'
+            )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">État :</span> '
+        '4S-B est volontairement un audit. '
+        'Aucune résistance finale, EHP ou réparation/s n’est encore publiée.'
+    )
+
+    return "".join(chunks)
+
+
+
+def freeborn_resistance_stacking_penalty(rank):
+    """
+    Standard EVE stacking effectiveness, rank is 1-based.
+    """
+    try:
+        rank = max(
+            1,
+            int(rank),
+        )
+    except (TypeError, ValueError):
+        rank = 1
+
+    return 0.5 ** (
+        (
+            0.45
+            * (rank - 1)
+        ) ** 2
+    )
+
+
+def freeborn_resistance_bonus_from_attribute_name(
+    name,
+):
+    """
+    Map one Dogma resistance-bonus attribute label to damage type.
+    Returns None for non-resistance attributes.
+    """
+    normalized = str(
+        name or ""
+    ).casefold()
+
+    if "damage resistance bonus" not in normalized:
+        return None
+
+    if "em " in normalized or normalized.startswith("em"):
+        return "em"
+
+    if "thermal" in normalized:
+        return "therm"
+
+    if "kinetic" in normalized:
+        return "kin"
+
+    if "explosive" in normalized:
+        return "exp"
+
+    return None
+
+
+def freeborn_tank_module_resistance_layer(
+    module_row,
+):
+    """
+    Determine the resistance layer affected by a validated module family.
+
+    4S-C explicitly covers:
+      - Shield Hardener -> shield
+      - Armor Hardener / energized armor -> armor
+      - Damage Control -> all three layers, if Dogma exposes direct bonuses
+
+    Unknown families are excluded from the numeric result.
+    """
+    group = str(
+        module_row.get(
+            "group_name",
+            "",
+        )
+    ).casefold()
+
+    name = str(
+        module_row.get(
+            "name",
+            "",
+        )
+    ).casefold()
+
+    haystack = (
+        group
+        + " "
+        + name
+    )
+
+    if "damage control" in haystack:
+        return "all"
+
+    if (
+        "shield hardener" in haystack
+        or "shield resistance" in haystack
+    ):
+        return "shield"
+
+    if (
+        "armor hardener" in haystack
+        or "energized" in haystack
+        or "armor resistance" in haystack
+    ):
+        return "armor"
+
+    return None
+
+
+def freeborn_calculate_final_resistances(
+    tank_base,
+    tank_modules,
+):
+    """
+    Calculate final resistances from base hull + direct resistance modifiers.
+
+    EVE resistance modules modify DAMAGE RESONANCE, not resistance points:
+        final_resonance = base_resonance × Π(1 + bonus × stacking_penalty)
+        final_resistance = 1 - final_resonance
+
+    Dogma bonuses in the audited hardeners are negative percentages
+    (e.g. -45.38), therefore factor = 1 + (-0.4538 × penalty).
+    """
+    damage_types = (
+        "em",
+        "therm",
+        "kin",
+        "exp",
+    )
+    layers = (
+        "shield",
+        "armor",
+        "structure",
+    )
+
+    final = {
+        layer: {
+            damage: tank_base.get(
+                f"{layer}_{damage}"
+            )
+            for damage in damage_types
+        }
+        for layer in layers
+    }
+
+    effect_buckets = {
+        layer: {
+            damage: []
+            for damage in damage_types
+        }
+        for layer in layers
+    }
+
+    excluded_modules = []
+
+    for module in tank_modules or []:
+        layer = (
+            freeborn_tank_module_resistance_layer(
+                module
+            )
+        )
+
+        if layer is None:
+            continue
+
+        found_effect = False
+        quantity = max(
+            1,
+            int(
+                module.get(
+                    "quantity",
+                    1,
+                )
+                or 1
+            ),
+        )
+
+        for attr in module.get(
+            "attributes",
+            [],
+        ):
+            damage = (
+                freeborn_resistance_bonus_from_attribute_name(
+                    attr.get(
+                        "name"
+                    )
+                )
+            )
+
+            if not damage:
+                continue
+
+            try:
+                bonus_percent = float(
+                    attr.get(
+                        "value"
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+
+            # The current audited resistance modifiers are negative percentages.
+            raw_bonus = (
+                bonus_percent
+                / 100.0
+            )
+
+            target_layers = (
+                layers
+                if layer == "all"
+                else (layer,)
+            )
+
+            for target_layer in target_layers:
+                for _ in range(quantity):
+                    effect_buckets[
+                        target_layer
+                    ][
+                        damage
+                    ].append({
+                        "module":
+                            module.get(
+                                "name",
+                                "",
+                            ),
+                        "raw_bonus":
+                            raw_bonus,
+                    })
+
+            found_effect = True
+
+        if not found_effect and layer is not None:
+            excluded_modules.append(
+                module.get(
+                    "name",
+                    "",
+                )
+            )
+
+    audit = []
+
+    for layer in layers:
+        for damage in damage_types:
+            base_resistance = final[
+                layer
+            ][
+                damage
+            ]
+
+            if base_resistance is None:
+                continue
+
+            base_resonance = (
+                1.0
+                - (
+                    float(
+                        base_resistance
+                    )
+                    / 100.0
+                )
+            )
+
+            effects = effect_buckets[
+                layer
+            ][
+                damage
+            ]
+
+            # Strongest modifier first.
+            effects.sort(
+                key=lambda row: abs(
+                    row["raw_bonus"]
+                ),
+                reverse=True,
+            )
+
+            resonance = (
+                base_resonance
+            )
+
+            applied = []
+
+            for rank, row in enumerate(
+                effects,
+                start=1,
+            ):
+                penalty = (
+                    freeborn_resistance_stacking_penalty(
+                        rank
+                    )
+                )
+
+                effective_bonus = (
+                    float(
+                        row[
+                            "raw_bonus"
+                        ]
+                    )
+                    * penalty
+                )
+
+                factor = (
+                    1.0
+                    + effective_bonus
+                )
+
+                # Do not allow invalid negative resonance.
+                factor = max(
+                    0.0,
+                    factor,
+                )
+
+                resonance *= (
+                    factor
+                )
+
+                applied.append({
+                    "rank": rank,
+                    "module":
+                        row["module"],
+                    "penalty":
+                        penalty,
+                    "raw_bonus":
+                        row[
+                            "raw_bonus"
+                        ],
+                    "effective_bonus":
+                        effective_bonus,
+                    "factor":
+                        factor,
+                })
+
+            resistance = (
+                1.0
+                - resonance
+            ) * 100.0
+
+            resistance = min(
+                100.0,
+                max(
+                    0.0,
+                    resistance,
+                ),
+            )
+
+            final[
+                layer
+            ][
+                damage
+            ] = resistance
+
+            if applied:
+                audit.append({
+                    "layer": layer,
+                    "damage": damage,
+                    "base_resistance":
+                        base_resistance,
+                    "final_resistance":
+                        resistance,
+                    "effects":
+                        applied,
+                })
+
+    return {
+        "final": final,
+        "audit": audit,
+        "excluded_modules":
+            excluded_modules,
+    }
+
+
+def freeborn_render_final_resistance_audit(
+    result,
+):
+    final = result.get(
+        "final",
+        {},
+    )
+
+    chunks = [
+        '<strong>RÉSISTANCES FINALES — 4S-C</strong>',
+        '<br>Calcul : résonance de base × modificateurs Dogma '
+        'avec stacking penalties.',
+    ]
+
+    for layer, label in (
+        ("shield", "Shield"),
+        ("armor", "Armor"),
+        ("structure", "Structure"),
+    ):
+        row = final.get(
+            layer,
+            {},
+        )
+
+        chunks.append(
+            '<br><span class="cap-audit-key">'
+            + label
+            + ' :</span> '
+            + 'EM '
+            + format_tank_resistance(
+                row.get("em")
+            )
+            + ' • THERM '
+            + format_tank_resistance(
+                row.get("therm")
+            )
+            + ' • KIN '
+            + format_tank_resistance(
+                row.get("kin")
+            )
+            + ' • EXP '
+            + format_tank_resistance(
+                row.get("exp")
+            )
+        )
+
+    if result.get(
+        "audit"
+    ):
+        chunks.append(
+            '<br><strong>STACKING APPLIQUÉ</strong>'
+        )
+
+        for row in result[
+            "audit"
+        ]:
+            chunks.append(
+                '<br>'
+                + escape(
+                    row["layer"].upper()
+                )
+                + ' '
+                + escape(
+                    row["damage"].upper()
+                )
+                + ' : '
+                + format_tank_resistance(
+                    row[
+                        "base_resistance"
+                    ]
+                )
+                + ' → '
+                + format_tank_resistance(
+                    row[
+                        "final_resistance"
+                    ]
+                )
+            )
+
+            for effect in row[
+                "effects"
+            ]:
+                chunks.append(
+                    '<br>&nbsp;&nbsp;#'
+                    + str(
+                        effect["rank"]
+                    )
+                    + ' '
+                    + escape(
+                        str(
+                            effect[
+                                "module"
+                            ]
+                        )
+                    )
+                    + ' • efficacité '
+                    + f'{effect["penalty"] * 100:.3f}%'
+                    + ' • bonus brut '
+                    + f'{effect["raw_bonus"] * 100:+.3f}%'
+                    + ' → effectif '
+                    + f'{effect["effective_bonus"] * 100:+.3f}%'
+                )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">Couverture 4S-C :</span> '
+        'résistances directes des hardeners/armure/damage control détectés. '
+        'Reactive effects, heat, fleet boosts et effets conditionnels restent exclus.'
+    )
+
+    return "".join(
+        chunks
+    )
+
+
+
+def freeborn_layer_omni_ehp(raw_hp, resistances):
+    """Calculate EHP for one layer against a uniform 25/25/25/25 profile."""
+    if raw_hp is None:
+        return None
+
+    try:
+        raw_hp = float(raw_hp)
+    except (TypeError, ValueError):
+        return None
+
+    resonances = []
+
+    for damage in ("em", "therm", "kin", "exp"):
+        resistance = resistances.get(damage)
+
+        if resistance is None:
+            return None
+
+        try:
+            resistance = float(resistance)
+        except (TypeError, ValueError):
+            return None
+
+        resonance = 1.0 - resistance / 100.0
+        resonances.append(
+            min(1.0, max(0.0, resonance))
+        )
+
+    average_resonance = sum(resonances) / len(resonances)
+
+    if average_resonance <= 0:
+        return None
+
+    return raw_hp / average_resonance
+
+
+def freeborn_calculate_omni_ehp(tank_base, final_resistance_result):
+    """Return Shield / Armor / Structure and total OMNI EHP."""
+    final = final_resistance_result.get("final", {})
+
+    shield_ehp = freeborn_layer_omni_ehp(
+        tank_base.get("shield_hp"),
+        final.get("shield", {}),
+    )
+    armor_ehp = freeborn_layer_omni_ehp(
+        tank_base.get("armor_hp"),
+        final.get("armor", {}),
+    )
+    structure_ehp = freeborn_layer_omni_ehp(
+        tank_base.get("structure_hp"),
+        final.get("structure", {}),
+    )
+
+    values = (shield_ehp, armor_ehp, structure_ehp)
+
+    total_ehp = (
+        sum(value for value in values if value is not None)
+        if any(value is not None for value in values)
+        else None
+    )
+
+    return {
+        "profile": "OMNI 25/25/25/25",
+        "shield_ehp": shield_ehp,
+        "armor_ehp": armor_ehp,
+        "structure_ehp": structure_ehp,
+        "total_ehp": total_ehp,
+    }
+
+
+def format_ehp_value(value):
+    if value is None:
+        return "—"
+
+    value = float(value)
+
+    if value >= 1000000:
+        return f"{value / 1000000:.2f} M".replace(".", ",")
+
+    if value >= 1000:
+        return f"{value / 1000:.2f} k".replace(".", ",")
+
+    return f"{value:,.0f}".replace(",", " ")
+
+
+def freeborn_render_ehp_audit(ehp_result):
+    return (
+        '<strong>EHP — MOTEUR 4S-D</strong><br>'
+        '<span class="cap-audit-key">Profil :</span> '
+        + escape(str(ehp_result.get("profile", "—")))
+        + '<br><span class="cap-audit-key">Shield EHP :</span> '
+        + escape(format_ehp_value(ehp_result.get("shield_ehp")))
+        + '<br><span class="cap-audit-key">Armor EHP :</span> '
+        + escape(format_ehp_value(ehp_result.get("armor_ehp")))
+        + '<br><span class="cap-audit-key">Structure EHP :</span> '
+        + escape(format_ehp_value(ehp_result.get("structure_ehp")))
+        + '<br><span class="cap-audit-key">TOTAL EHP :</span> <strong>'
+        + escape(format_ehp_value(ehp_result.get("total_ehp")))
+        + '</strong>'
+        + '<br><span class="cap-audit-muted">'
+          'Convention 4S-D : dégâts entrants uniformes '
+          '25% EM / 25% THERM / 25% KIN / 25% EXP.'
+          '</span>'
+    )
+
+
+
+def freeborn_repair_module_profile(module_row):
+    """
+    Resolve active repair amount + cycle from one already-audited tank module.
+
+    Supports:
+      - Shield Booster
+      - Armor Repairer
+
+    Uses only attributes already captured in tank_module_audit.
+    """
+    name = str(
+        module_row.get("name")
+        or ""
+    )
+    group = str(
+        module_row.get("group_name")
+        or ""
+    )
+
+    haystack = (
+        name + " " + group
+    ).casefold()
+
+    repair_layer = None
+
+    if "shield booster" in haystack:
+        repair_layer = "shield"
+    elif "armor repair" in haystack:
+        repair_layer = "armor"
+
+    if not repair_layer:
+        return None
+
+    amount = None
+    duration_ms = None
+
+    for attr in module_row.get(
+        "attributes",
+        [],
+    ):
+        attr_name = str(
+            attr.get("name")
+            or ""
+        ).casefold()
+
+        try:
+            value = float(
+                attr.get("value")
+            )
+        except (TypeError, ValueError):
+            continue
+
+        if repair_layer == "shield":
+            if (
+                "shield bonus" in attr_name
+                and "overload" not in attr_name
+            ):
+                amount = value
+
+        if repair_layer == "armor":
+            if (
+                "armor repair" in attr_name
+                and "overload" not in attr_name
+            ):
+                amount = value
+
+        if (
+            "activation time / duration" in attr_name
+            or (
+                "duration" in attr_name
+                and "overload" not in attr_name
+            )
+        ):
+            # Preserve the first normal duration attribute found.
+            if duration_ms is None:
+                duration_ms = value
+
+    if (
+        amount is None
+        or duration_ms is None
+        or duration_ms <= 0
+    ):
+        return None
+
+    quantity = max(
+        1,
+        int(
+            module_row.get(
+                "quantity",
+                1,
+            )
+            or 1
+        ),
+    )
+
+    hp_per_second = (
+        float(amount)
+        / (
+            float(duration_ms)
+            / 1000.0
+        )
+        * quantity
+    )
+
+    return {
+        "name": name,
+        "layer": repair_layer,
+        "quantity": quantity,
+        "repair_amount_per_cycle":
+            float(amount),
+        "duration_ms":
+            float(duration_ms),
+        "hp_per_second":
+            hp_per_second,
+    }
+
+
+def freeborn_omni_repair_ehps(
+    raw_hps,
+    resistances,
+):
+    """
+    Convert raw repaired HP/s into OMNI EHP/s using the same
+    25/25/25/25 resonance convention as 4S-D.
+    """
+    if raw_hps is None:
+        return None
+
+    resonances = []
+
+    for damage in (
+        "em",
+        "therm",
+        "kin",
+        "exp",
+    ):
+        resistance = resistances.get(
+            damage
+        )
+
+        if resistance is None:
+            return None
+
+        try:
+            resistance = float(
+                resistance
+            )
+        except (TypeError, ValueError):
+            return None
+
+        resonances.append(
+            min(
+                1.0,
+                max(
+                    0.0,
+                    1.0
+                    - resistance / 100.0,
+                ),
+            )
+        )
+
+    average_resonance = (
+        sum(resonances)
+        / len(resonances)
+    )
+
+    if average_resonance <= 0:
+        return None
+
+    return (
+        float(raw_hps)
+        / average_resonance
+    )
+
+
+def freeborn_calculate_active_repairs(
+    tank_modules,
+    final_resistance_result,
+):
+    """
+    Aggregate active repair modules by layer.
+    """
+    final = final_resistance_result.get(
+        "final",
+        {},
+    )
+
+    modules = []
+    totals = {
+        "shield_raw_hps": 0.0,
+        "armor_raw_hps": 0.0,
+        "shield_ehps": 0.0,
+        "armor_ehps": 0.0,
+    }
+
+    for module_row in tank_modules or []:
+        profile = freeborn_repair_module_profile(
+            module_row
+        )
+
+        if not profile:
+            continue
+
+        layer = profile[
+            "layer"
+        ]
+
+        ehps = freeborn_omni_repair_ehps(
+            profile[
+                "hp_per_second"
+            ],
+            final.get(
+                layer,
+                {},
+            ),
+        )
+
+        profile[
+            "omni_ehp_per_second"
+        ] = ehps
+
+        modules.append(
+            profile
+        )
+
+        if layer == "shield":
+            totals[
+                "shield_raw_hps"
+            ] += profile[
+                "hp_per_second"
+            ]
+
+            if ehps is not None:
+                totals[
+                    "shield_ehps"
+                ] += ehps
+
+        elif layer == "armor":
+            totals[
+                "armor_raw_hps"
+            ] += profile[
+                "hp_per_second"
+            ]
+
+            if ehps is not None:
+                totals[
+                    "armor_ehps"
+                ] += ehps
+
+    return {
+        "profile":
+            "OMNI 25/25/25/25",
+        "modules":
+            modules,
+        **totals,
+    }
+
+
+def format_repairs_value(
+    value,
+):
+    if value is None:
+        return "—"
+
+    return (
+        f"{float(value):,.1f}"
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+
+def freeborn_render_repairs_audit(
+    result,
+):
+    chunks = [
+        '<strong>RÉPARATIONS — MOTEUR 4S-E</strong>',
+        '<br><span class="cap-audit-key">Profil :</span> '
+        + escape(
+            str(
+                result.get(
+                    "profile",
+                    "—",
+                )
+            )
+        ),
+    ]
+
+    modules = result.get(
+        "modules",
+        [],
+    )
+
+    if not modules:
+        chunks.append(
+            '<br>Aucun module de réparation actif résolu.'
+        )
+    else:
+        for module in modules:
+            chunks.append(
+                '<br>'
+                + f'{module["quantity"]}× '
+                + escape(
+                    str(
+                        module["name"]
+                    )
+                )
+                + ' • '
+                + escape(
+                    module["layer"].upper()
+                )
+                + ' • '
+                + format_repairs_value(
+                    module[
+                        "repair_amount_per_cycle"
+                    ]
+                )
+                + ' HP/cycle'
+                + ' • '
+                + format_repairs_value(
+                    module[
+                        "duration_ms"
+                    ]
+                    / 1000.0
+                )
+                + ' s'
+                + ' • '
+                + format_repairs_value(
+                    module[
+                        "hp_per_second"
+                    ]
+                )
+                + ' HP/s'
+                + ' • '
+                + format_repairs_value(
+                    module.get(
+                        "omni_ehp_per_second"
+                    )
+                )
+                + ' EHP/s'
+            )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">Shield :</span> '
+        + format_repairs_value(
+            result.get(
+                "shield_raw_hps"
+            )
+        )
+        + ' HP/s • '
+        + format_repairs_value(
+            result.get(
+                "shield_ehps"
+            )
+        )
+        + ' EHP/s'
+    )
+
+    chunks.append(
+        '<br><span class="cap-audit-key">Armor :</span> '
+        + format_repairs_value(
+            result.get(
+                "armor_raw_hps"
+            )
+        )
+        + ' HP/s • '
+        + format_repairs_value(
+            result.get(
+                "armor_ehps"
+            )
+        )
+        + ' EHP/s'
+    )
+
+    chunks.append(
+        '<br><span class="cap-audit-muted">'
+        '4S-E exclut volontairement surchauffe, implants, boosts de flotte, '
+        'effets de bastion/skills non encore modélisés dans cette couche.'
+        '</span>'
+    )
+
+    return "".join(
+        chunks
+    )
+
+
+
+def freeborn_ship_targeting_misc_base(ship_type_id):
+    """Static hull targeting/navigation values from cached Dogma."""
+    dogma = get_eve_type_dogma(ship_type_id)
+    if not dogma:
+        return {}
+
+    def value(exact_names=(), contains_names=()):
+        row = find_dogma_attribute_by_names(
+            ship_type_id,
+            exact_names=exact_names,
+            contains_names=contains_names,
+        )
+        if not row:
+            return None
+        try:
+            return float(row.get("value"))
+        except (TypeError, ValueError):
+            return None
+
+    target_range_m = value(
+        exact_names=("maxTargetRange", "Maximum Targeting Range"),
+        contains_names=("target range",),
+    )
+
+    return {
+        "max_locked_targets": value(
+            exact_names=("maxLockedTargets", "Max Locked Targets"),
+            contains_names=("max locked targets",),
+        ),
+        "targeting_range_km": (
+            target_range_m / 1000.0
+            if target_range_m is not None
+            else None
+        ),
+        "scan_resolution_mm": value(
+            exact_names=("scanResolution", "Scan Resolution"),
+            contains_names=("scan resolution",),
+        ),
+        "signature_radius_m": value(
+            exact_names=("signatureRadius", "Signature Radius"),
+            contains_names=("signature radius",),
+        ),
+        "warp_speed_au_s": value(
+            exact_names=("warpSpeedMultiplier", "Warp Speed Multiplier"),
+            contains_names=("warp speed",),
+        ),
+    }
+
+
+def freeborn_format_misc_number(value, decimals=1):
+    if value is None:
+        return "—"
+    value = float(value)
+    if decimals == 0:
+        return f"{value:,.0f}".replace(",", " ")
+    return (
+        f"{value:,.{decimals}f}"
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+
+def freeborn_render_targeting_misc_audit(
+    values,
+    ship_resource_usage,
+    base_velocity,
+):
+    return (
+        '<strong>CIBLAGE & DIVERS — MOTEUR 4S-F</strong>'
+        '<br><span class="cap-audit-key">Targets BASE :</span> '
+        + freeborn_format_misc_number(values.get("max_locked_targets"), 0)
+        + '<br><span class="cap-audit-key">Targeting Range BASE :</span> '
+        + freeborn_format_misc_number(values.get("targeting_range_km"), 1)
+        + ' km'
+        + '<br><span class="cap-audit-key">Scan Resolution BASE :</span> '
+        + freeborn_format_misc_number(values.get("scan_resolution_mm"), 0)
+        + ' mm'
+        + '<br><span class="cap-audit-key">Rayon de signature BASE :</span> '
+        + freeborn_format_misc_number(values.get("signature_radius_m"), 0)
+        + ' m'
+        + '<br><span class="cap-audit-key">Speed BASE :</span> '
+        + freeborn_format_misc_number(base_velocity, 0)
+        + ' m/s'
+        + '<br><span class="cap-audit-key">Warp speed BASE :</span> '
+        + freeborn_format_misc_number(values.get("warp_speed_au_s"), 2)
+        + ' AU/s'
+        + '<br><span class="cap-audit-key">Cargo :</span> '
+        + escape(
+            format_resource_usage_value(
+                ship_resource_usage.get("cargo_used_m3"),
+                ship_resource_usage.get("cargo_capacity_m3"),
+                "m³",
+            )
+        )
+        + '<br><span class="cap-audit-muted">'
+          '4S-F valide d’abord les attributs statiques du hull. '
+          'Les bonus ALL V de ciblage restent volontairement séparés '
+          'jusqu’à validation de cette couche.'
+          '</span>'
+    )
+
+
+
+def freeborn_calculate_targeting_all_v(
+    targeting_base,
+):
+    """
+    Calculate ALL V targeting values from the validated 4S-F hull values.
+
+    The ship hard cap remains authoritative for simultaneous target locks.
+    """
+    base_targets = targeting_base.get(
+        "max_locked_targets"
+    )
+    base_range_km = targeting_base.get(
+        "targeting_range_km"
+    )
+    base_scan_resolution = targeting_base.get(
+        "scan_resolution_mm"
+    )
+
+    all_v_range_km = (
+        float(base_range_km) * 1.25
+        if base_range_km is not None
+        else None
+    )
+
+    all_v_scan_resolution = (
+        float(base_scan_resolution) * 1.25
+        if base_scan_resolution is not None
+        else None
+    )
+
+    # Base character targeting capacity is 2.
+    # Target Management V adds 5, Advanced Target Management V adds 5.
+    character_target_capacity = 12
+
+    all_v_targets = None
+
+    if base_targets is not None:
+        all_v_targets = min(
+            int(round(float(base_targets))),
+            character_target_capacity,
+        )
+
+    return {
+        "max_locked_targets":
+            all_v_targets,
+        "targeting_range_km":
+            all_v_range_km,
+        "scan_resolution_mm":
+            all_v_scan_resolution,
+        "signature_radius_m":
+            targeting_base.get(
+                "signature_radius_m"
+            ),
+        "warp_speed_au_s":
+            targeting_base.get(
+                "warp_speed_au_s"
+            ),
+        "skills": {
+            "Long Range Targeting": 5,
+            "Signature Analysis": 5,
+            "Target Management": 5,
+            "Advanced Target Management": 5,
+        },
+    }
+
+
+def freeborn_render_targeting_all_v_audit(
+    values,
+):
+    skills = values.get(
+        "skills",
+        {},
+    )
+
+    return (
+        '<strong>CIBLAGE ALL V — MOTEUR 4S-G</strong>'
+        '<br><span class="cap-audit-key">Targets :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "max_locked_targets"
+            ),
+            0,
+        )
+        + '<br><span class="cap-audit-key">Targeting Range :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "targeting_range_km"
+            ),
+            1,
+        )
+        + ' km'
+        + '<br><span class="cap-audit-key">Scan Resolution :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "scan_resolution_mm"
+            ),
+            0,
+        )
+        + ' mm'
+        + '<br><span class="cap-audit-key">Rayon de signature :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "signature_radius_m"
+            ),
+            0,
+        )
+        + ' m'
+        + '<br><span class="cap-audit-key">Warp speed :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "warp_speed_au_s"
+            ),
+            2,
+        )
+        + ' AU/s'
+        + '<br><strong>SKILLS ALL V APPLIQUÉS</strong>'
+        + '<br>Long Range Targeting '
+        + str(
+            skills.get(
+                "Long Range Targeting",
+                0,
+            )
+        )
+        + '/5'
+        + '<br>Signature Analysis '
+        + str(
+            skills.get(
+                "Signature Analysis",
+                0,
+            )
+        )
+        + '/5'
+        + '<br>Target Management '
+        + str(
+            skills.get(
+                "Target Management",
+                0,
+            )
+        )
+        + '/5'
+        + '<br>Advanced Target Management '
+        + str(
+            skills.get(
+                "Advanced Target Management",
+                0,
+            )
+        )
+        + '/5'
+        + '<br><span class="cap-audit-muted">'
+          'La capacité de verrouillage personnage est plafonnée '
+          'par la limite propre au vaisseau.'
+          '</span>'
+    )
+
+
+
+def freeborn_calculate_targeting_character(
+    technical_snapshot,
+    skills_snapshot,
+):
+    """Real ESI pilot targeting values compared with the ALL V reference."""
+    base = dict(
+        technical_snapshot.get(
+            "targeting_misc_base",
+            {},
+        )
+    )
+
+    lrt = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Long Range Targeting",
+    )
+    sig = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Signature Analysis",
+    )
+    tm = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Target Management",
+    )
+    atm = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Advanced Target Management",
+    )
+
+    base_range = base.get(
+        "targeting_range_km"
+    )
+    base_scan = base.get(
+        "scan_resolution_mm"
+    )
+    ship_target_cap = base.get(
+        "max_locked_targets"
+    )
+
+    range_km = (
+        float(base_range)
+        * (1.0 + 0.05 * lrt)
+        if base_range is not None
+        else None
+    )
+
+    scan_mm = (
+        float(base_scan)
+        * (1.0 + 0.05 * sig)
+        if base_scan is not None
+        else None
+    )
+
+    pilot_target_capacity = (
+        2
+        + int(tm)
+        + int(atm)
+    )
+
+    locked_targets = (
+        min(
+            int(round(float(ship_target_cap))),
+            pilot_target_capacity,
+        )
+        if ship_target_cap is not None
+        else None
+    )
+
+    return {
+        "long_range_targeting_level": lrt,
+        "signature_analysis_level": sig,
+        "target_management_level": tm,
+        "advanced_target_management_level": atm,
+        "max_locked_targets": locked_targets,
+        "targeting_range_km": range_km,
+        "scan_resolution_mm": scan_mm,
+        "signature_radius_m": base.get(
+            "signature_radius_m"
+        ),
+        "warp_speed_au_s": base.get(
+            "warp_speed_au_s"
+        ),
+    }
+
+
+def freeborn_format_targeting_delta(
+    character_value,
+    all_v_value,
+    unit="",
+    decimals=1,
+):
+    if (
+        character_value is None
+        or all_v_value is None
+    ):
+        return "—"
+
+    delta = (
+        float(character_value)
+        - float(all_v_value)
+    )
+
+    if abs(delta) < 0.0001:
+        return "Identique à ALL V"
+
+    sign = "+" if delta > 0 else ""
+    value = (
+        f"{sign}{delta:.{decimals}f}"
+        .replace(".", ",")
+    )
+
+    return (
+        value
+        + (f" {unit}" if unit else "")
+        + " vs ALL V"
+    )
+
+
+def freeborn_render_targeting_character_audit(
+    values,
+    all_v_values,
+):
+    return (
+        '<strong>CIBLAGE PERSONNAGE — MOTEUR 4S-H</strong>'
+        '<br><span class="cap-audit-key">Long Range Targeting :</span> '
+        + str(values.get("long_range_targeting_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Signature Analysis :</span> '
+        + str(values.get("signature_analysis_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Target Management :</span> '
+        + str(values.get("target_management_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Advanced Target Management :</span> '
+        + str(values.get("advanced_target_management_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Targets :</span> '
+        + freeborn_format_misc_number(
+            values.get("max_locked_targets"),
+            0,
+        )
+        + ' • '
+        + escape(
+            freeborn_format_targeting_delta(
+                values.get("max_locked_targets"),
+                all_v_values.get("max_locked_targets"),
+                "",
+                0,
+            )
+        )
+        + '<br><span class="cap-audit-key">Targeting Range :</span> '
+        + freeborn_format_misc_number(
+            values.get("targeting_range_km"),
+            1,
+        )
+        + ' km • '
+        + escape(
+            freeborn_format_targeting_delta(
+                values.get("targeting_range_km"),
+                all_v_values.get("targeting_range_km"),
+                "km",
+                1,
+            )
+        )
+        + '<br><span class="cap-audit-key">Scan Resolution :</span> '
+        + freeborn_format_misc_number(
+            values.get("scan_resolution_mm"),
+            0,
+        )
+        + ' mm • '
+        + escape(
+            freeborn_format_targeting_delta(
+                values.get("scan_resolution_mm"),
+                all_v_values.get("scan_resolution_mm"),
+                "mm",
+                0,
+            )
+        )
+    )
+
+
+
+def freeborn_ship_mobility_base(ship_type_id):
+    """
+    Resolve static hull mass / inertia and derive BASE align time.
+
+    No skill modifier is applied in 4S-I.
+    """
+    metadata = get_eve_type_metadata(
+        ship_type_id
+    )
+
+    try:
+        mass_kg = float(
+            metadata.get(
+                "mass"
+            )
+        )
+    except (TypeError, ValueError):
+        mass_kg = None
+
+    inertia_row = (
+        find_dogma_attribute_by_names(
+            ship_type_id,
+            exact_names=(
+                "agility",
+                "Agility",
+                "Inertia Modifier",
+                "inertiaModifier",
+            ),
+            contains_names=(
+                "agility",
+                "inertia modifier",
+            ),
+        )
+    )
+
+    inertia_modifier = None
+
+    if inertia_row:
+        try:
+            inertia_modifier = float(
+                inertia_row.get(
+                    "value"
+                )
+            )
+        except (TypeError, ValueError):
+            inertia_modifier = None
+
+    align_seconds = None
+
+    if (
+        mass_kg is not None
+        and inertia_modifier is not None
+        and mass_kg > 0
+        and inertia_modifier > 0
+    ):
+        align_seconds = (
+            1.3862943611198906
+            * mass_kg
+            * inertia_modifier
+            / 1_000_000.0
+        )
+
+    return {
+        "mass_kg":
+            mass_kg,
+        "inertia_modifier":
+            inertia_modifier,
+        "align_time_base_seconds":
+            align_seconds,
+    }
+
+
+def freeborn_render_mobility_base_audit(
+    mobility,
+):
+    return (
+        '<strong>MOBILITÉ — MOTEUR 4S-I</strong>'
+        '<br><span class="cap-audit-key">Masse hull :</span> '
+        + (
+            freeborn_format_misc_number(
+                mobility.get(
+                    "mass_kg"
+                ),
+                0,
+            )
+            + ' kg'
+            if mobility.get(
+                "mass_kg"
+            ) is not None
+            else '—'
+        )
+        + '<br><span class="cap-audit-key">Inertia modifier BASE :</span> '
+        + freeborn_format_misc_number(
+            mobility.get(
+                "inertia_modifier"
+            ),
+            4,
+        )
+        + '<br><span class="cap-audit-key">Align time BASE :</span> '
+        + (
+            freeborn_format_misc_number(
+                mobility.get(
+                    "align_time_base_seconds"
+                ),
+                2,
+            )
+            + ' s'
+            if mobility.get(
+                "align_time_base_seconds"
+            ) is not None
+            else '—'
+        )
+        + '<br><span class="cap-audit-muted">'
+          '4S-I utilise uniquement masse + inertia du hull. '
+          'Les compétences/agility du pilote ne sont pas encore appliquées.'
+          '</span>'
+    )
+
+
+
+def freeborn_calculate_align_all_v(
+    mobility_base,
+):
+    """
+    Derive ALL V align time from the validated 4S-I hull mobility data.
+    """
+    mass_kg = mobility_base.get(
+        "mass_kg"
+    )
+    inertia_base = mobility_base.get(
+        "inertia_modifier"
+    )
+
+    if (
+        mass_kg is None
+        or inertia_base is None
+    ):
+        return {
+            "mass_kg": mass_kg,
+            "inertia_base": inertia_base,
+            "inertia_all_v": None,
+            "align_time_all_v_seconds": None,
+            "evasive_maneuvering_level": 5,
+            "spaceship_command_level": 5,
+        }
+
+    mass_kg = float(
+        mass_kg
+    )
+    inertia_base = float(
+        inertia_base
+    )
+
+    evasive_multiplier = (
+        1.0 - 0.05 * 5
+    )
+    spaceship_command_multiplier = (
+        1.0 - 0.02 * 5
+    )
+
+    inertia_all_v = (
+        inertia_base
+        * evasive_multiplier
+        * spaceship_command_multiplier
+    )
+
+    align_seconds = (
+        1.3862943611198906
+        * mass_kg
+        * inertia_all_v
+        / 1_000_000.0
+    )
+
+    return {
+        "mass_kg":
+            mass_kg,
+        "inertia_base":
+            inertia_base,
+        "inertia_all_v":
+            inertia_all_v,
+        "align_time_all_v_seconds":
+            align_seconds,
+        "evasive_maneuvering_level":
+            5,
+        "spaceship_command_level":
+            5,
+    }
+
+
+def freeborn_render_align_all_v_audit(
+    values,
+):
+    return (
+        '<strong>MOBILITÉ ALL V — MOTEUR 4S-J</strong>'
+        '<br><span class="cap-audit-key">Evasive Maneuvering :</span> '
+        + str(
+            values.get(
+                "evasive_maneuvering_level",
+                0,
+            )
+        )
+        + '/5'
+        '<br><span class="cap-audit-key">Spaceship Command :</span> '
+        + str(
+            values.get(
+                "spaceship_command_level",
+                0,
+            )
+        )
+        + '/5'
+        '<br><span class="cap-audit-key">Inertia BASE :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "inertia_base"
+            ),
+            4,
+        )
+        + '<br><span class="cap-audit-key">Inertia ALL V :</span> '
+        + freeborn_format_misc_number(
+            values.get(
+                "inertia_all_v"
+            ),
+            4,
+        )
+        + '<br><span class="cap-audit-key">Align time ALL V :</span> '
+        + (
+            freeborn_format_misc_number(
+                values.get(
+                    "align_time_all_v_seconds"
+                ),
+                2,
+            )
+            + ' s'
+            if values.get(
+                "align_time_all_v_seconds"
+            ) is not None
+            else '—'
+        )
+        + '<br><span class="cap-audit-muted">'
+          '4S-J applique uniquement les deux compétences universelles '
+          'd’agilité à V. Modules, rigs, implants et boosts de flotte '
+          'restent hors couverture.'
+          '</span>'
+    )
+
+
+
+def freeborn_calculate_align_character(
+    mobility_base,
+    technical_snapshot,
+    skills_snapshot,
+):
+    """
+    4S-K: real ESI pilot align time using the same universal agility layer
+    validated in 4S-J.
+    """
+    mass_kg = mobility_base.get("mass_kg")
+    inertia_base = mobility_base.get("inertia_modifier")
+
+    evasive_level = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Evasive Maneuvering",
+    )
+    spaceship_level = freeborn_snapshot_skill_level(
+        technical_snapshot,
+        skills_snapshot,
+        "Spaceship Command",
+    )
+
+    if mass_kg is None or inertia_base is None:
+        return {
+            "mass_kg": mass_kg,
+            "inertia_base": inertia_base,
+            "inertia_character": None,
+            "align_time_character_seconds": None,
+            "evasive_maneuvering_level": evasive_level,
+            "spaceship_command_level": spaceship_level,
+        }
+
+    mass_kg = float(mass_kg)
+    inertia_base = float(inertia_base)
+
+    inertia_character = (
+        inertia_base
+        * (1.0 - 0.05 * evasive_level)
+        * (1.0 - 0.02 * spaceship_level)
+    )
+
+    align_seconds = (
+        1.3862943611198906
+        * mass_kg
+        * inertia_character
+        / 1_000_000.0
+    )
+
+    return {
+        "mass_kg": mass_kg,
+        "inertia_base": inertia_base,
+        "inertia_character": inertia_character,
+        "align_time_character_seconds": align_seconds,
+        "evasive_maneuvering_level": evasive_level,
+        "spaceship_command_level": spaceship_level,
+    }
+
+
+def freeborn_render_align_character_audit(
+    values,
+    all_v_values,
+):
+    align_character = values.get("align_time_character_seconds")
+    align_all_v = all_v_values.get("align_time_all_v_seconds")
+
+    return (
+        '<strong>MOBILITÉ PERSONNAGE — MOTEUR 4S-K</strong>'
+        '<br><span class="cap-audit-key">Evasive Maneuvering :</span> '
+        + str(values.get("evasive_maneuvering_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Spaceship Command :</span> '
+        + str(values.get("spaceship_command_level", 0))
+        + '/5'
+        '<br><span class="cap-audit-key">Inertia personnage :</span> '
+        + freeborn_format_misc_number(
+            values.get("inertia_character"),
+            4,
+        )
+        + '<br><span class="cap-audit-key">Align time personnage :</span> '
+        + (
+            freeborn_format_misc_number(align_character, 2) + ' s'
+            if align_character is not None
+            else '—'
+        )
+        + '<br><span class="cap-audit-key">Δ Align Time vs ALL V :</span> '
+        + escape(
+            freeborn_format_targeting_delta(
+                align_character,
+                align_all_v,
+                "s",
+                2,
+            )
+        )
+        + '<br><span class="cap-audit-muted">'
+          '4S-K applique les niveaux ESI réels de Evasive Maneuvering et '
+          'Spaceship Command. Modules, rigs, implants, boosts et compétences '
+          'spécifiques de hull restent exclus.'
+          '</span>'
+    )
+
+
+def build_freeborn_technical_snapshot(
+    fit,
+    *,
+    creator_display=None,
+):
+    """
+    Expensive path, executed once per technical revision of a fitting.
+
+    All values stored here are static with respect to the fit or ALL V
+    reference. Character-specific values are intentionally not persisted.
+    """
+    eft_sections = parse_eft_web_sections(
+        fit.get("eft_text")
+    )
+
+    all_eft_items = (
+        eft_sections["low"]
+        + eft_sections["mid"]
+        + eft_sections["high"]
+        + eft_sections["rigs"]
+        + eft_sections["extras"]
+    )
+
+    eft_type_ids = (
+        resolve_eve_inventory_type_ids(
+            all_eft_items
+        )
+    )
+
+    prefetch_eve_static_type_data(
+        list(
+            eft_type_ids.values()
+        )
+        + [fit.get("ship_type_id")],
+        max_workers=8,
+    )
+
+    skill_ids = (
+        freeborn_snapshot_skill_ids()
+    )
+
+    base_resources = (
+        calculate_base_fitting_resources(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
+    base_velocity = (
+        get_ship_base_max_velocity(
+            fit.get("ship_type_id")
+        )
+    )
+
+    all_v_velocity = (
+        calculate_skill_aware_velocity(
+            fit.get("ship_type_id"),
+            mode="all_v",
+            eft_sections=eft_sections,
+            type_ids=eft_type_ids,
+        )
+    )
+
+    capacitor_engine = (
+        calculate_base_capacitor_engine(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
+    capacitor_activity_audit = (
+        build_fitted_capacitor_activity_audit(
+            eft_sections
+        )
+    )
+
+    conditional_source_dogma_probe = (
+        build_conditional_capacitor_source_dogma_probe(
+            eft_sections,
+            eft_type_ids,
+            capacitor_activity_audit,
+        )
+    )
+
+    all_v_cap = (
+        calculate_skill_aware_capacitor(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+            mode="all_v",
+        )
+    )
+
+    all_v_core = (
+        calculate_skill_aware_fitting_resources(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+            mode="all_v",
+        )
+    )
+
+    module_rows = (
+        freeborn_snapshot_module_rows(
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
+    ship_resource_usage = (
+        build_freeborn_ship_resource_usage(
+            fit.get("ship_type_id"),
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
+    tank_base = (
+        freeborn_ship_tank_base(
+            fit.get("ship_type_id")
+        )
+    )
+
+    targeting_misc_base = (
+        freeborn_ship_targeting_misc_base(
+            fit.get("ship_type_id")
+        )
+    )
+
+    mobility_base = (
+        freeborn_ship_mobility_base(
+            fit.get("ship_type_id")
+        )
+    )
+
+    tank_module_audit = (
+        freeborn_tank_module_audit(
+            eft_sections,
+            eft_type_ids,
+        )
+    )
+
+    final_resistances = (
+        freeborn_calculate_final_resistances(
+            tank_base,
+            tank_module_audit,
+        )
+    )
+
+    return {
+        "version":
+            FREEBORN_TECHNICAL_SNAPSHOT_VERSION,
+        "fingerprint":
+            freeborn_technical_snapshot_fingerprint(
+                fit
+            ),
+        "creator_display":
+            str(
+                creator_display
+                or ""
+            ),
+        "eft_type_ids": {
+            str(key): int(value)
+            for key, value
+            in eft_type_ids.items()
+        },
+        "skill_ids": skill_ids,
+        "module_rows": module_rows,
+        "ship_resource_usage":
+            ship_resource_usage,
+        "tank_base":
+            tank_base,
+        "targeting_misc_base":
+            targeting_misc_base,
+        "mobility_base":
+            mobility_base,
+        "tank_module_audit":
+            tank_module_audit,
+        "final_resistances":
+            final_resistances,
+        "base_resources": base_resources,
+        "base_velocity": base_velocity,
+        "all_v_velocity": all_v_velocity,
+        "capacitor_engine":
+            capacitor_engine,
+        "capacitor_activity_audit":
+            capacitor_activity_audit,
+        "conditional_source_dogma_probe":
+            conditional_source_dogma_probe,
+        "all_v_cap": all_v_cap,
+        "all_v_core": all_v_core,
+    }
+
+
+def ensure_freeborn_technical_snapshot(
+    fit,
+    *,
+    creator_display=None,
+):
+    """
+    Fast path: return JSONB already loaded by get_fit().
+
+    Slow path: build once, save to Neon, then every future Render worker can
+    reuse it even after a cold start.
+    """
+    if freeborn_technical_snapshot_valid(
+        fit
+    ):
+        return fit[
+            "technical_snapshot"
+        ]
+
+    snapshot = (
+        build_freeborn_technical_snapshot(
+            fit,
+            creator_display=creator_display,
+        )
+    )
+
+    persist_freeborn_technical_snapshot(
+        fit,
+        snapshot,
+    )
+
+    return snapshot
+
+
+def freeborn_snapshot_skill_level(
+    snapshot,
+    skills_snapshot,
+    skill_name,
+):
+    type_id = (
+        snapshot.get(
+            "skill_ids",
+            {},
+        ).get(
+            skill_name
+        )
+    )
+
+    if not type_id:
+        return 0
+
+    levels = freeborn_skill_level_map(
+        skills_snapshot
+    )
+
+    return int(
+        levels.get(
+            int(type_id),
+            0,
+        )
+    )
+
+
+def calculate_character_resources_from_snapshot(
+    snapshot,
+    skills_snapshot,
+):
+    """
+    Character CPU/PG calculation with zero ESI static-data reads.
+    """
+    base = snapshot[
+        "base_resources"
+    ]
+
+    levels = freeborn_skill_level_map(
+        skills_snapshot
+    )
+
+    cpu_level = int(
+        levels.get(
+            EVE_SKILL_CPU_MANAGEMENT,
+            0,
+        )
+    )
+    pg_level = int(
+        levels.get(
+            EVE_SKILL_POWER_GRID_MANAGEMENT,
+            0,
+        )
+    )
+    wu_level = int(
+        levels.get(
+            EVE_SKILL_WEAPON_UPGRADES,
+            0,
+        )
+    )
+    awu_level = int(
+        levels.get(
+            EVE_SKILL_ADVANCED_WEAPON_UPGRADES,
+            0,
+        )
+    )
+
+    cpu_output = base.get(
+        "cpu_output"
+    )
+    pg_output = base.get(
+        "power_output"
+    )
+
+    if cpu_output is not None:
+        cpu_output = float(
+            cpu_output
+        ) * (
+            1.0
+            + 0.05 * cpu_level
+        )
+
+    if pg_output is not None:
+        pg_output = float(
+            pg_output
+        ) * (
+            1.0
+            + 0.05 * pg_level
+        )
+
+    cpu_used = 0.0
+    pg_used = 0.0
+    weapon_count = 0
+    complete = True
+
+    for row in snapshot.get(
+        "module_rows",
+        [],
+    ):
+        if not row.get(
+            "dogma_ok"
+        ):
+            complete = False
+
+        cpu_need = float(
+            row.get(
+                "cpu_base",
+                0.0,
+            )
+        )
+        pg_need = float(
+            row.get(
+                "power_base",
+                0.0,
+            )
+        )
+
+        group_name = str(
+            row.get(
+                "group_name",
+                ""
+            )
+        ).casefold()
+
+        if row.get(
+            "weapon_group"
+        ):
+            weapon_count += int(
+                row.get(
+                    "quantity",
+                    1,
+                )
+            )
+            cpu_need *= (
+                1.0
+                - 0.05 * wu_level
+            )
+
+            if (
+                "launcher" in group_name
+                or "turret" in group_name
+            ):
+                pg_need *= (
+                    1.0
+                    - 0.02 * awu_level
+                )
+
+        quantity = int(
+            row.get(
+                "quantity",
+                1,
+            )
+        )
+
+        cpu_used += (
+            cpu_need
+            * quantity
+        )
+        pg_used += (
+            pg_need
+            * quantity
+        )
+
+    cpu_remaining = (
+        float(cpu_output)
+        - cpu_used
+        if cpu_output is not None
+        else None
+    )
+    pg_remaining = (
+        float(pg_output)
+        - pg_used
+        if pg_output is not None
+        else None
+    )
+
+    return {
+        "mode": "character",
+        "cpu_management_level":
+            cpu_level,
+        "power_grid_management_level":
+            pg_level,
+        "weapon_upgrades_level":
+            wu_level,
+        "advanced_weapon_upgrades_level":
+            awu_level,
+        "cpu_used": cpu_used,
+        "cpu_output": cpu_output,
+        "cpu_remaining":
+            cpu_remaining,
+        "cpu_valid": (
+            cpu_remaining is not None
+            and cpu_remaining >= -0.0001
+        ),
+        "power_used": pg_used,
+        "power_output": pg_output,
+        "power_remaining":
+            pg_remaining,
+        "power_valid": (
+            pg_remaining is not None
+            and pg_remaining >= -0.0001
+        ),
+        "weapon_module_count":
+            weapon_count,
+        "data_complete": (
+            bool(
+                base.get(
+                    "cpu_complete"
+                )
+            )
+            and bool(
+                base.get(
+                    "power_complete"
+                )
+            )
+            and complete
+        ),
+        "official_all_v_ready":
+            False,
+    }
+
+
+def freeborn_snapshot_cap_module_modifier(
+    group_name,
+    snapshot,
+    skills_snapshot,
+):
+    group = str(
+        group_name
+        or ""
+    ).casefold()
+
+    cap_mult = 1.0
+    duration_mult = 1.0
+    rule = None
+
+    if "microwarpdrive" in group:
+        level = (
+            freeborn_snapshot_skill_level(
+                snapshot,
+                skills_snapshot,
+                "High Speed Maneuvering",
+            )
+        )
+        cap_mult *= max(
+            0.0,
+            1.0 - 0.05 * level,
+        )
+        rule = (
+            f"High Speed Maneuvering "
+            f"{level}/5"
+        )
+
+    elif "afterburner" in group:
+        level = (
+            freeborn_snapshot_skill_level(
+                snapshot,
+                skills_snapshot,
+                "Afterburner",
+            )
+        )
+        cap_mult *= max(
+            0.0,
+            1.0 - 0.10 * level,
+        )
+        duration_mult *= max(
+            0.01,
+            1.0 - 0.05 * level,
+        )
+        rule = (
+            f"Afterburner {level}/5"
+        )
+
+    elif "shield booster" in group:
+        level = (
+            freeborn_snapshot_skill_level(
+                snapshot,
+                skills_snapshot,
+                "Shield Compensation",
+            )
+        )
+        cap_mult *= max(
+            0.0,
+            1.0 - 0.02 * level,
+        )
+        rule = (
+            f"Shield Compensation {level}/5"
+        )
+
+    elif "turret" in group:
+        level = (
+            freeborn_snapshot_skill_level(
+                snapshot,
+                skills_snapshot,
+                "Controlled Bursts",
+            )
+        )
+        cap_mult *= max(
+            0.0,
+            1.0 - 0.05 * level,
+        )
+        rule = (
+            f"Controlled Bursts {level}/5"
+        )
+
+    return (
+        cap_mult,
+        duration_mult,
+        rule,
+    )
+
+
+def calculate_character_capacitor_from_snapshot(
+    snapshot,
+    skills_snapshot,
+):
+    """
+    Character capacitor profile from persisted module Dogma essentials.
+    """
+    base = snapshot[
+        "capacitor_engine"
+    ]
+
+    cap_management = (
+        freeborn_snapshot_skill_level(
+            snapshot,
+            skills_snapshot,
+            "Capacitor Management",
+        )
+    )
+    cap_systems = (
+        freeborn_snapshot_skill_level(
+            snapshot,
+            skills_snapshot,
+            "Capacitor Systems Operation",
+        )
+    )
+
+    capacity = base.get(
+        "capacity_gj"
+    )
+    recharge = base.get(
+        "recharge_seconds"
+    )
+
+    if capacity is not None:
+        capacity = float(
+            capacity
+        ) * (
+            1.0
+            + 0.05 * cap_management
+        )
+
+    if recharge is not None:
+        recharge = float(
+            recharge
+        ) * max(
+            0.01,
+            1.0
+            - 0.05 * cap_systems,
+        )
+
+    drain = 0.0
+    consumers = 0
+    unresolved = 0
+    modified = 0
+
+    for row in snapshot.get(
+        "module_rows",
+        [],
+    ):
+        quantity = int(
+            row.get(
+                "quantity",
+                1,
+            )
+        )
+
+        if not row.get(
+            "dogma_ok"
+        ):
+            unresolved += quantity
+            continue
+
+        cap_need = row.get(
+            "cap_need"
+        )
+        duration_ms = row.get(
+            "duration_ms"
+        )
+
+        if (
+            cap_need is None
+            or float(cap_need) <= 0
+        ):
+            continue
+
+        if (
+            duration_ms is None
+            or float(duration_ms) <= 0
+        ):
+            unresolved += quantity
+            continue
+
+        (
+            cap_mult,
+            duration_mult,
+            rule,
+        ) = (
+            freeborn_snapshot_cap_module_modifier(
+                row.get(
+                    "group_name"
+                ),
+                snapshot,
+                skills_snapshot,
+            )
+        )
+
+        if rule:
+            modified += quantity
+
+        adjusted_need = (
+            float(cap_need)
+            * cap_mult
+        )
+        adjusted_duration = (
+            float(duration_ms)
+            * duration_mult
+        )
+
+        if adjusted_duration <= 0:
+            unresolved += quantity
+            continue
+
+        drain += (
+            adjusted_need
+            / (
+                adjusted_duration
+                / 1000.0
+            )
+            * quantity
+        )
+        consumers += quantity
+
+    peak = (
+        2.5
+        * float(capacity)
+        / float(recharge)
+        if (
+            capacity is not None
+            and recharge not in (
+                None,
+                0,
+            )
+        )
+        else None
+    )
+
+    net_peak = (
+        float(peak) - drain
+        if peak is not None
+        else None
+    )
+
+    continuous = (
+        freeborn_capacitor_continuous_state(
+            capacity,
+            recharge,
+            drain,
+        )
+    )
+
+    return {
+        "mode": "character",
+        "capacitor_management_level":
+            cap_management,
+        "capacitor_systems_operation_level":
+            cap_systems,
+        "capacity_gj": capacity,
+        "recharge_seconds": recharge,
+        "peak_recharge_gjs": peak,
+        "active_drain_gjs": drain,
+        "net_peak_gjs": net_peak,
+        "consumer_count": consumers,
+        "modified_module_count":
+            modified,
+        "unresolved_count":
+            unresolved,
+        "complete":
+            unresolved == 0,
+        "continuous_stable":
+            continuous["stable"],
+        "equilibrium_percent":
+            continuous[
+                "equilibrium_percent"
+            ],
+        "cap_out_seconds":
+            continuous[
+                "cap_out_seconds"
+            ],
+    }
+
+
+def calculate_character_velocity_from_snapshot(
+    snapshot,
+    skills_snapshot,
+):
+    """
+    Character propulsion result from the persisted ALL V/static propulsion
+    data. No EVE static endpoint is touched.
+    """
+    all_v = snapshot[
+        "all_v_velocity"
+    ]
+
+    navigation = (
+        freeborn_snapshot_skill_level(
+            snapshot,
+            skills_snapshot,
+            "Navigation",
+        )
+    )
+    acceleration = (
+        freeborn_snapshot_skill_level(
+            snapshot,
+            skills_snapshot,
+            "Acceleration Control",
+        )
+    )
+
+    base_velocity = all_v.get(
+        "base_velocity_ms"
+    )
+
+    velocity_off = (
+        float(base_velocity)
+        * (
+            1.0
+            + 0.05 * navigation
+        )
+        if base_velocity is not None
+        else None
+    )
+
+    active_velocity = None
+
+    active_propulsion = all_v.get(
+        "active_propulsion"
+    )
+    active_mass = all_v.get(
+        "active_mass_kg"
+    )
+    effective_thrust = all_v.get(
+        "effective_thrust_n"
+    )
+
+    if (
+        velocity_off is not None
+        and active_propulsion
+        and active_mass
+        and effective_thrust
+    ):
+        speed_factor = (
+            active_propulsion.get(
+                "speed_factor"
+            )
+        )
+
+        if speed_factor is not None:
+            effective_bonus = (
+                float(speed_factor)
+                / 100.0
+            ) * (
+                1.0
+                + 0.05 * acceleration
+            )
+
+            active_velocity = (
+                float(velocity_off)
+                * (
+                    1.0
+                    + (
+                        effective_bonus
+                        * float(
+                            effective_thrust
+                        )
+                        / float(
+                            active_mass
+                        )
+                    )
+                )
+            )
+
+    return {
+        "mode": "character",
+        "navigation_level":
+            navigation,
+        "acceleration_control_level":
+            acceleration,
+        "base_velocity_ms":
+            base_velocity,
+        "base_mass_kg":
+            all_v.get(
+                "base_mass_kg"
+            ),
+        "mass_addition_kg":
+            all_v.get(
+                "mass_addition_kg"
+            ),
+        "active_mass_kg":
+            active_mass,
+        "propulsion_off_velocity_ms":
+            velocity_off,
+        "propulsion_active_velocity_ms":
+            active_velocity,
+        "active_propulsion":
+            active_propulsion,
+        "effective_propulsion_bonus":
+            None,
+        "effective_thrust_n":
+            effective_thrust,
+        "raw_propulsion_thrust":
+            all_v.get(
+                "raw_propulsion_thrust"
+            ),
+        "raw_to_effective_thrust_ratio":
+            all_v.get(
+                "raw_to_effective_thrust_ratio"
+            ),
+        "thrust_source":
+            all_v.get(
+                "thrust_source"
+            ),
+    }
+
+
+
+def freeborn_usage_percent(used, available):
+    try:
+        used = float(used)
+        available = float(available)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if available <= 0:
+        return 0.0
+
+    return max(
+        0.0,
+        min(
+            100.0,
+            used / available * 100.0,
+        ),
+    )
+
+
+def freeborn_fmt_plain(value, decimals=1):
+    if value is None:
+        return "—"
+
+    value = float(value)
+
+    if decimals == 0:
+        return (
+            f"{value:,.0f}"
+            .replace(",", " ")
+        )
+
+    return (
+        f"{value:,.{decimals}f}"
+        .replace(",", " ")
+        .replace(".", ",")
+    )
+
+
+def freeborn_compare_delta_class(
+    character_value,
+    all_v_value,
+    *,
+    lower_is_better=False,
+):
+    if (
+        character_value is None
+        or all_v_value is None
+    ):
+        return "compare-neutral"
+
+    try:
+        delta = (
+            float(character_value)
+            - float(all_v_value)
+        )
+    except (TypeError, ValueError):
+        return "compare-neutral"
+
+    if abs(delta) < 0.0001:
+        return "compare-good"
+
+    favorable = (
+        delta < 0
+        if lower_is_better
+        else delta > 0
+    )
+
+    return (
+        "compare-good"
+        if favorable
+        else "compare-bad"
+    )
+
+
+def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
+    """
+    FREEBORN FITTINGS
+    EVE-like corporate technical layout.
+
+    The visual structure follows the final Freeborn target:
+    - slots on the left,
+    - fitting identity / cargo / creator notes in the centre,
+    - ship render / technical telemetry on the right,
+    - action bar and corporate footer at the bottom.
+
+    EFT stored in Neon remains the source of truth.
+    """
+    fit = ensure_fit_ship_type_id(dict(fit))
+
+    safe_ref = escape(format_fit_reference(fit["fit_id"]))
+    safe_name = escape(str(fit.get("name") or "Fitting Freeborn"))
+    safe_ship = escape(str(fit.get("ship_name") or "Vaisseau inconnu"))
+    safe_usage = escape(str(fit.get("usage") or "Non précisé"))
+    safe_notes = escape(str(fit.get("notes") or "Aucune note du créateur."))
+    safe_eft = escape(str(fit.get("eft_text") or "EFT indisponible."))
+    creator_id = str(fit.get("created_by_discord_user_id") or "")
+    status = str(fit.get("status") or "proposed").lower()
+
+    creator_display = creator_id or "Créateur inconnu"
+
+    existing_snapshot = (
+        fit.get("technical_snapshot")
+        if freeborn_technical_snapshot_valid(
+            fit
+        )
+        else None
+    )
+
+    cached_creator_display = (
+        existing_snapshot.get(
+            "creator_display"
+        )
+        if isinstance(
+            existing_snapshot,
+            dict,
+        )
+        else None
+    )
+
+    if cached_creator_display:
+        creator_display = str(
+            cached_creator_display
+        )
+    else:
+        try:
+            member = get_discord_member(
+                str(
+                    fit.get("guild_id")
+                    or DISCORD_GUILD_ID
+                ),
+                creator_id,
+            )
+            if member:
+                user = member.get(
+                    "user"
+                ) or {}
+                creator_display = (
+                    member.get("nick")
+                    or user.get(
+                        "global_name"
+                    )
+                    or user.get(
+                        "username"
+                    )
+                    or creator_display
+                )
+        except Exception as error:
+            print(
+                "Freeborn Fittings creator lookup failed:",
+                repr(error),
+            )
+
+    safe_creator = escape(
+        str(creator_display)
+    )
+
+    raw_fit_ref = format_fit_reference(fit["fit_id"])
+
+    pilot_start_url = (
+        f"{PUBLIC_BASE_URL}/fittings/pilot/{raw_fit_ref}?"
+        + urlencode({
+            "token": str(fit_web_token or ""),
+        })
+    )
+
+    pilot_profile = pilot_profile or None
+
+    if pilot_profile:
+        pilot_name = escape(
+            str(
+                pilot_profile.get("character_name")
+                or "Pilote EVE"
+            )
+        )
+        pilot_total_sp = int(
+            pilot_profile.get("total_skill_points")
+            or 0
+        )
+        pilot_skills = (
+            pilot_profile.get("skills_snapshot")
+            or []
+        )
+        pilot_skill_count = len(pilot_skills)
+
+        pilot_updated_at = pilot_profile.get("skills_updated_at")
+        if pilot_updated_at:
+            try:
+                pilot_updated_display = pilot_updated_at.strftime(
+                    "%d/%m/%Y %H:%M"
+                )
+            except Exception:
+                pilot_updated_display = str(pilot_updated_at)
+        else:
+            pilot_updated_display = "Non disponible"
+
+        # Engine values are filled later, after EFT/type resolution.
+        # Placeholders are replaced after the engine has calculated the fit.
+        pilot_panel_html = f"""
+        <div class="pilot-panel pilot-connected">
+          <div class="pilot-panel-head">
+            <span class="pilot-icon">◉</span>
+            <div class="pilot-heading-copy">
+              <strong>MON PERSONNAGE — {pilot_name}</strong>
+              <small>Profil ESI reconnu et actualisé</small>
+            </div>
+          </div>
+
+          <div class="pilot-meta">
+            <span><b>{pilot_total_sp:,}</b> SP</span>
+            <span><b>{pilot_skill_count}</b> compétences</span>
+            <span class="pilot-ready">✓ Profil prêt</span>
+          </div>
+
+          <div class="pilot-note pilot-intro-copy">
+            Comparaison directe avec la référence corporate ALL V.
+            Les valeurs ci-dessous utilisent les compétences réellement
+            remontées par ESI pour ce Main.
+          </div>
+
+          <div class="pilot-tech-grid">
+            <div class="pilot-engine-core">
+              <div class="pilot-engine-title">SKILLS & FITTING CHECK</div>
+
+              <div class="pilot-engine-row">
+                <span>CPU Management</span>
+                <b id="pilot-cpu-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Power Grid Management</span>
+                <b id="pilot-pg-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Weapon Upgrades</span>
+                <b id="pilot-wu-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Advanced Weapon Upgrades</span>
+                <b id="pilot-awu-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Capacitor Management</span>
+                <b id="pilot-cap-management">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Capacitor Systems Operation</span>
+                <b id="pilot-cap-systems">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Navigation</span>
+                <b id="pilot-navigation">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Long Range Targeting</span>
+                <b id="pilot-lrt-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Signature Analysis</span>
+                <b id="pilot-sig-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Target Management</span>
+                <b id="pilot-tm-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Advanced Target Management</span>
+                <b id="pilot-atm-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Evasive Maneuvering</span>
+                <b id="pilot-evasive-skill">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Spaceship Command</span>
+                <b id="pilot-spaceship-skill">—</b>
+              </div>
+
+              <div class="pilot-engine-separator"></div>
+
+              <div class="pilot-engine-row">
+                <span>CPU — Character</span>
+                <b id="pilot-cpu-pair">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>CPU Margin</span>
+                <b id="pilot-cpu-margin">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Powergrid — Character</span>
+                <b id="pilot-pg-pair">—</b>
+              </div>
+              <div class="pilot-engine-row">
+                <span>Powergrid Margin</span>
+                <b id="pilot-pg-margin">—</b>
+              </div>
+
+              <div class="pilot-engine-compat" id="pilot-compat">
+                ANALYSE EN COURS
+              </div>
+            </div>
+
+            <div class="pilot-side">
+              <div class="pilot-compare" id="pilot-compare">
+                <div class="pilot-compare-title">
+                  COMPARAISON AVEC ALL V
+                </div>
+                <div class="pilot-compare-grid">
+                  <span>CPU utilisé</span><b id="pilot-delta-cpu-used">—</b>
+                  <span>CPU disponible</span><b id="pilot-delta-cpu-out">—</b>
+                  <span>PG utilisé</span><b id="pilot-delta-pg-used">—</b>
+                  <span>PG disponible</span><b id="pilot-delta-pg-out">—</b>
+                  <span>Capacitor Capacity</span><b id="pilot-cap-capacity">—</b>
+                  <span>Capacitor Recharge</span><b id="pilot-cap-recharge">—</b>
+                  <span>Capacitor Drain</span><b id="pilot-cap-drain">—</b>
+                  <span>Capacitor State</span><b id="pilot-cap-state">—</b>
+                  <span>Speed prop. OFF</span><b id="pilot-velocity-off">—</b>
+                  <span>Speed prop. ACTIVE</span><b id="pilot-velocity-active">—</b>
+                  <span>Acceleration Control</span><b id="pilot-acceleration-control">—</b>
+                  <span>Δ Speed vs ALL V</span><b id="pilot-delta-velocity">—</b>
+                  <span>Targets</span><b id="pilot-targets">—</b>
+                  <span>Targeting Range</span><b id="pilot-target-range">—</b>
+                  <span>Δ Targeting Range vs ALL V</span><b id="pilot-delta-target-range">—</b>
+                  <span>Scan Resolution</span><b id="pilot-scan-resolution">—</b>
+                  <span>Δ Scan Resolution vs ALL V</span><b id="pilot-delta-scan-resolution">—</b>
+                  <span>Align time</span><b id="pilot-align-time">—</b>
+                  <span>Δ Align Time vs ALL V</span><b id="pilot-delta-align-time">—</b>
+                </div>
+              </div>
+
+              <div class="pilot-update">
+                <small>Dernière mise à jour ESI</small>
+                <strong>{escape(pilot_updated_display)}</strong>
+              </div>
+
+              <a class="pilot-button pilot-refresh pilot-refresh-control" href="{escape(pilot_start_url)}">
+                ↻ Actualiser mon profil EVE
+              </a>
+            </div>
+          </div>
+        </div>
+        """
+    else:
+        pilot_panel_html = f"""
+        <div class="pilot-panel">
+          <div class="pilot-panel-head">
+            <span class="pilot-icon">◉</span>
+            <div>
+              <strong>TESTER AVEC MON PERSONNAGE</strong>
+              <small>Comparaison personnelle avec la référence corporate ALL V</small>
+            </div>
+          </div>
+          <div class="pilot-note">
+            Connecte ton Main EVE vérifié. Freeborn utilisera uniquement
+            le scope compétences déjà prévu par l'intégration membre.
+          </div>
+          <a class="pilot-button" href="{escape(pilot_start_url)}">
+            Tester avec mon personnage
+          </a>
+        </div>
+        """
+
+    status_map = {
+        "proposed": ("PROPOSÉ", "#d8aa42"),
+        "approved": ("FREEBORN APPROVED", "#79dd73"),
+        "rejected": ("REFUSÉ", "#e45757"),
+        "archived": ("ARCHIVÉ", "#8996a3"),
+    }
+    status_label, status_color = status_map.get(
+        status,
+        (status.upper(), "#29a9ff"),
+    )
+
+    pilotability_html = ""
+
+    if pilot_profile:
+        pilotability_result = freeborn_pilotability_result(
+            fit.get("ship_type_id"),
+            pilot_profile.get("skills_snapshot") or [],
+        )
+        pilotability_html = freeborn_render_pilotability_badge(
+            pilotability_result
+        )
+
+    render_url = eve_type_render_url(
+        fit.get("ship_type_id"),
+        512,
+    )
+    ship_html = (
+        f'<img class="ship-render" src="{escape(render_url)}" alt="{safe_ship}">'
+        if render_url
+        else '<div class="ship-placeholder">VISUEL EVE<br>INDISPONIBLE</div>'
+    )
+
+    eft_sections = parse_eft_web_sections(
+        fit.get("eft_text")
+    )
+    technical_snapshot = (
+        ensure_freeborn_technical_snapshot(
+            fit,
+            creator_display=creator_display,
+        )
+    )
+
+    eft_type_ids = {
+        str(key): int(value)
+        for key, value
+        in technical_snapshot.get(
+            "eft_type_ids",
+            {},
+        ).items()
+    }
+
+    base_resources = dict(
+        technical_snapshot[
+            "base_resources"
+        ]
+    )
+
+    ship_resource_usage = dict(
+        technical_snapshot.get(
+            "ship_resource_usage",
+            {},
+        )
+    )
+
+    tank_base = dict(
+        technical_snapshot.get(
+            "tank_base",
+            {},
+        )
+    )
+
+    targeting_misc_base = dict(
+        technical_snapshot.get(
+            "targeting_misc_base",
+            {},
+        )
+    )
+
+    mobility_base = dict(
+        technical_snapshot.get(
+            "mobility_base",
+            {},
+        )
+    )
+
+    mobility_base_audit_html = (
+        freeborn_render_mobility_base_audit(
+            mobility_base
+        )
+    )
+
+    mobility_all_v = (
+        freeborn_calculate_align_all_v(
+            mobility_base
+        )
+    )
+
+    mobility_all_v_audit_html = (
+        freeborn_render_align_all_v_audit(
+            mobility_all_v
+        )
+    )
+
+    targeting_all_v = (
+        freeborn_calculate_targeting_all_v(
+            targeting_misc_base
+        )
+    )
+
+    targeting_all_v_audit_html = (
+        freeborn_render_targeting_all_v_audit(
+            targeting_all_v
+        )
+    )
+
+    tank_module_audit = list(
+        technical_snapshot.get(
+            "tank_module_audit",
+            [],
+        )
+    )
+
+    tank_audit_html = (
+        freeborn_render_tank_audit(
+            tank_base,
+            tank_module_audit,
+        )
+    )
+
+    final_resistance_result = dict(
+        technical_snapshot.get(
+            "final_resistances",
+            {},
+        )
+    )
+
+    final_resistance_audit_html = (
+        freeborn_render_final_resistance_audit(
+            final_resistance_result
+        )
+    )
+
+    final_resistance_values = (
+        final_resistance_result.get(
+            "final",
+            {},
+        )
+    )
+
+    final_shield_resistance = (
+        final_resistance_values.get(
+            "shield",
+            {},
+        )
+    )
+
+    ehp_result = freeborn_calculate_omni_ehp(
+        tank_base,
+        final_resistance_result,
+    )
+
+    ehp_value = escape(
+        format_ehp_value(
+            ehp_result.get("total_ehp")
+        )
+    )
+
+    ehp_audit_html = freeborn_render_ehp_audit(
+        ehp_result
+    )
+
+    active_repairs_result = (
+        freeborn_calculate_active_repairs(
+            tank_module_audit,
+            final_resistance_result,
+        )
+    )
+
+    repairs_audit_html = (
+        freeborn_render_repairs_audit(
+            active_repairs_result
+        )
+    )
+
+    cargo_usage_value = escape(
+        format_resource_usage_value(
+            ship_resource_usage.get(
+                "cargo_used_m3",
+                0.0,
+            ),
+            ship_resource_usage.get(
+                "cargo_capacity_m3"
+            ),
+            "m³",
+        )
+    )
+
+    drone_bay_usage_value = escape(
+        format_resource_usage_value(
+            ship_resource_usage.get(
+                "drone_bay_used_m3",
+                0.0,
+            ),
+            ship_resource_usage.get(
+                "drone_bay_capacity_m3"
+            ),
+            "m³",
+        )
+    )
+
+    drone_bandwidth_value = escape(
+        format_resource_usage_value(
+            ship_resource_usage.get(
+                "drone_bandwidth_used_mbps",
+                0.0,
+            ),
+            ship_resource_usage.get(
+                "drone_bandwidth_available_mbps"
+            ),
+            "Mbit/s",
+        )
+    )
+    cpu_value = escape(
+        format_fitting_resource_value(
+            base_resources["cpu_used"],
+            base_resources["cpu_output"],
+            base_resources["cpu_complete"],
+            "tf",
+        )
+    )
+    power_value = escape(
+        format_fitting_resource_value(
+            base_resources["power_used"],
+            base_resources["power_output"],
+            base_resources["power_complete"],
+            "MW",
+        )
+    )
+
+    base_velocity = (
+        technical_snapshot.get(
+            "base_velocity"
+        )
+    )
+
+    targeting_misc_audit_html = (
+        freeborn_render_targeting_misc_audit(
+            targeting_misc_base,
+            ship_resource_usage,
+            base_velocity,
+        )
+    )
+
+    velocity_value = escape(
+        format_velocity(
+            base_velocity
+        )
+    )
+
+    velocity_title = escape(
+        "Speed maximale BASE du hull, propulsion désactivée. "
+        "Navigation et effets AB/MWD ne sont pas appliqués à cette valeur."
+    )
+
+    all_v_velocity = dict(
+        technical_snapshot[
+            "all_v_velocity"
+        ]
+    )
+
+    propulsion_probe = (
+        all_v_velocity.get("propulsion_rows")
+        or []
+    )
+
+    propulsion_probe_html = (
+        format_propulsion_dogma_probe(
+            propulsion_probe
+        )
+    )
+
+    all_v_velocity_value = escape(
+        format_velocity(
+            all_v_velocity[
+                "propulsion_off_velocity_ms"
+            ]
+        )
+    )
+
+    all_v_active_velocity_value = escape(
+        format_velocity(
+            all_v_velocity[
+                "propulsion_active_velocity_ms"
+            ]
+        )
+    )
+
+    # Capacitor engine.
+    # The main telemetry remains BASE while the engine audits cyclic module
+    # consumption. We expose peak passive recharge but do not invent final
+    # stability for conditional/special capacitor mechanics.
+    capacitor_engine = dict(
+        technical_snapshot[
+            "capacitor_engine"
+        ]
+    )
+    capacitor_capacity = capacitor_engine["capacity_gj"]
+    capacitor_recharge_seconds = capacitor_engine["recharge_seconds"]
+    capacitor_peak = capacitor_engine["peak_recharge_gjs"]
+    capacitor_drain = capacitor_engine["active_drain_gjs"]
+    capacitor_net_peak = capacitor_engine["net_peak_gjs"]
+
+    if capacitor_capacity is not None and capacitor_recharge_seconds is not None:
+        capacitor_value = escape(
+            f"{float(capacitor_capacity):,.0f} GJ • {float(capacitor_recharge_seconds):,.0f} s"
+            .replace(",", " ")
+        )
+        capacitor_title = escape(
+            "Capacitor BASE Dogma. "
+            + (
+                f"Recharge passive maximale théorique : {capacitor_peak:.2f} GJ/s. "
+                if capacitor_peak is not None else ""
+            )
+            + (
+                f"Consommation cyclique détectée : {capacitor_drain:.2f} GJ/s. "
+                if capacitor_engine["consumer_count"] else
+                "Aucune consommation cyclique Dogma détectée. "
+            )
+            + "La stabilité finale n'est pas encore déclarée tant que les effets "
+              "conditionnels et modificateurs Dogma ne sont pas tous couverts."
+        )
+    else:
+        capacitor_value = "À calculer"
+        capacitor_title = "Données Dogma capaciteur indisponibles."
+
+    if capacitor_peak is not None:
+        capacitor_audit_peak = escape(f"{capacitor_peak:.2f} GJ/s")
+        capacitor_audit_drain = escape(f"{capacitor_drain:.2f} GJ/s")
+        capacitor_audit_net = escape(
+            f"{capacitor_net_peak:+.2f} GJ/s" if capacitor_net_peak is not None else "—"
+        )
+        capacitor_audit_coverage = (
+            "Dogma cyclique résolu"
+            if capacitor_engine["complete"]
+            else f"Partiel • {capacitor_engine['unresolved_count']} module(s) non résolu(s)"
+        )
+    else:
+        capacitor_audit_peak = "—"
+        capacitor_audit_drain = "—"
+        capacitor_audit_net = "—"
+        capacitor_audit_coverage = "Données indisponibles"
+
+
+    capacitor_activity_audit = dict(
+        technical_snapshot[
+            "capacitor_activity_audit"
+        ]
+    )
+
+    conditional_sources_html = (
+        format_capacitor_audit_items(
+            capacitor_activity_audit[
+                "conditional_sources"
+            ]
+        )
+    )
+    injectors_html = (
+        format_capacitor_audit_items(
+            capacitor_activity_audit[
+                "active_injectors"
+            ]
+        )
+    )
+    transfers_html = (
+        format_capacitor_audit_items(
+            capacitor_activity_audit[
+                "energy_transfers"
+            ]
+        )
+    )
+
+    conditional_source_dogma_probe = list(
+        technical_snapshot.get(
+            "conditional_source_dogma_probe",
+            [],
+        )
+    )
+
+    conditional_source_dogma_html = (
+        format_conditional_source_dogma_probe(
+            conditional_source_dogma_probe
+        )
+    )
+
+    resolved_conditional_sources = sum(
+        1
+        for row in conditional_source_dogma_probe
+        if row.get("resolved")
+    )
+
+    max_conditional_source_gjs = sum(
+        float(row.get("max_transfer_gjs") or 0.0)
+        for row in conditional_source_dogma_probe
+        if row.get("resolved")
+    )
+
+    all_v_cap = dict(
+        technical_snapshot[
+            "all_v_cap"
+        ]
+    )
+
+    all_v_cap_capacity = escape(
+        format_engine_number(
+            all_v_cap["capacity_gj"],
+            "GJ",
+        )
+    )
+    all_v_cap_recharge = escape(
+        format_engine_number(
+            all_v_cap["recharge_seconds"],
+            "s",
+        )
+    )
+    all_v_cap_peak = escape(
+        f'{all_v_cap["peak_recharge_gjs"]:.2f} GJ/s'
+        if all_v_cap["peak_recharge_gjs"] is not None
+        else "—"
+    )
+    all_v_cap_drain = escape(
+        f'{all_v_cap["active_drain_gjs"]:.2f} GJ/s'
+    )
+
+    if all_v_cap["continuous_stable"] is True:
+        all_v_cap_state = escape(
+            "Stable théorique à "
+            + (
+                f'{all_v_cap["equilibrium_percent"]:.1f}%'
+                if all_v_cap["equilibrium_percent"] is not None
+                else "100%"
+            )
+        )
+    elif all_v_cap["continuous_stable"] is False:
+        all_v_cap_state = escape(
+            "Cap-out théorique : "
+            + format_capacitor_duration(
+                all_v_cap["cap_out_seconds"]
+            )
+        )
+    else:
+        all_v_cap_state = "Indéterminé"
+
+    capacitor_projection_policy = capacitor_verdict_policy(
+        all_v_cap_state,
+        capacitor_activity_audit,
+    )
+
+    capacitor_projection_label = escape(
+        capacitor_projection_policy[
+            "verdict"
+        ]
+    )
+    capacitor_projection_reason = escape(
+        capacitor_projection_policy[
+            "reason"
+        ]
+    )
+
+    character_cap = None
+
+    if pilot_profile:
+        character_cap = (
+            calculate_character_capacitor_from_snapshot(
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
+        )
+
+    all_v_core = dict(
+        technical_snapshot[
+            "all_v_core"
+        ]
+    )
+
+    all_v_cpu_pair = escape(
+        format_engine_resource_pair(
+            all_v_core["cpu_used"],
+            all_v_core["cpu_output"],
+            "tf",
+        )
+    )
+    all_v_pg_pair = escape(
+        format_engine_resource_pair(
+            all_v_core["power_used"],
+            all_v_core["power_output"],
+            "MW",
+        )
+    )
+    all_v_cpu_margin = escape(
+        format_engine_margin(
+            all_v_core["cpu_remaining"],
+            "tf",
+        )
+    )
+    all_v_pg_margin = escape(
+        format_engine_margin(
+            all_v_core["power_remaining"],
+            "MW",
+        )
+    )
+
+    all_v_compat = (
+        "✓ COMPATIBLE"
+        if (
+            all_v_core["cpu_valid"]
+            and all_v_core["power_valid"]
+        )
+        else
+        "✕ FITTING INSUFFISANT"
+    )
+    all_v_coverage = escape(
+        freeborn_4ob_coverage_label(all_v_core)
+    )
+
+
+    character_velocity = None
+    character_targeting = None
+    character_mobility = None
+    targeting_character_audit_html = ""
+    mobility_character_audit_html = ""
+
+    if pilot_profile:
+        character_targeting = (
+            freeborn_calculate_targeting_character(
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
+        )
+
+        targeting_character_audit_html = (
+            freeborn_render_targeting_character_audit(
+                character_targeting,
+                targeting_all_v,
+            )
+        )
+
+        character_mobility = (
+            freeborn_calculate_align_character(
+                mobility_base,
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
+        )
+
+        mobility_character_audit_html = (
+            freeborn_render_align_character_audit(
+                character_mobility,
+                mobility_all_v,
+            )
+        )
+
+        character_velocity = (
+            calculate_character_velocity_from_snapshot(
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
+        )
+
+        character_core = (
+            calculate_character_resources_from_snapshot(
+                technical_snapshot,
+                pilot_profile.get(
+                    "skills_snapshot"
+                ) or [],
+            )
+        )
+
+        pilot_compat = (
+            "✓ COMPATIBLE"
+            if (
+                character_core["cpu_valid"]
+                and character_core["power_valid"]
+            )
+            else "✕ NON COMPATIBLE"
+        )
+
+        pilot_compat_class = (
+            "ok"
+            if pilot_compat.startswith("✓")
+            else "bad"
+        )
+
+        pilot_panel_html = (
+            pilot_panel_html
+            .replace(
+                '<b id="pilot-cpu-skill">—</b>',
+                '<b id="pilot-cpu-skill">'
+                + escape(
+                    f'{character_core["cpu_management_level"]}/5'
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-pg-skill">—</b>',
+                '<b id="pilot-pg-skill">'
+                + escape(
+                    f'{character_core["power_grid_management_level"]}/5'
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-wu-skill">—</b>',
+                '<b id="pilot-wu-skill">'
+                + escape(
+                    f'{character_core["weapon_upgrades_level"]}/5'
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-awu-skill">—</b>',
+                '<b id="pilot-awu-skill">'
+                + escape(
+                    f'{character_core["advanced_weapon_upgrades_level"]}/5'
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cpu-pair">—</b>',
+                '<b id="pilot-cpu-pair">'
+                + escape(
+                    format_engine_resource_pair(
+                        character_core["cpu_used"],
+                        character_core["cpu_output"],
+                        "tf",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cpu-margin">—</b>',
+                '<b id="pilot-cpu-margin">'
+                + escape(
+                    format_engine_margin(
+                        character_core["cpu_remaining"],
+                        "tf",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-pg-pair">—</b>',
+                '<b id="pilot-pg-pair">'
+                + escape(
+                    format_engine_resource_pair(
+                        character_core["power_used"],
+                        character_core["power_output"],
+                        "MW",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-pg-margin">—</b>',
+                '<b id="pilot-pg-margin">'
+                + escape(
+                    format_engine_margin(
+                        character_core["power_remaining"],
+                        "MW",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-cpu-used">—</b>',
+                '<b id="pilot-delta-cpu-used">'
+                + escape(
+                    format_engine_delta(
+                        character_core["cpu_used"],
+                        all_v_core["cpu_used"],
+                        "tf",
+                        lower_is_better=True,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-cpu-out">—</b>',
+                '<b id="pilot-delta-cpu-out">'
+                + escape(
+                    format_engine_delta(
+                        character_core["cpu_output"],
+                        all_v_core["cpu_output"],
+                        "tf",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-pg-used">—</b>',
+                '<b id="pilot-delta-pg-used">'
+                + escape(
+                    format_engine_delta(
+                        character_core["power_used"],
+                        all_v_core["power_used"],
+                        "MW",
+                        lower_is_better=True,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-pg-out">—</b>',
+                '<b id="pilot-delta-pg-out">'
+                + escape(
+                    format_engine_delta(
+                        character_core["power_output"],
+                        all_v_core["power_output"],
+                        "MW",
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-management">—</b>',
+                '<b id="pilot-cap-management">'
+                + escape(
+                    f'{character_cap["capacitor_management_level"]}/5'
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-systems">—</b>',
+                '<b id="pilot-cap-systems">'
+                + escape(
+                    f'{character_cap["capacitor_systems_operation_level"]}/5'
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-capacity">—</b>',
+                '<b id="pilot-cap-capacity">'
+                + escape(
+                    format_engine_number(
+                        character_cap["capacity_gj"],
+                        "GJ",
+                    )
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-recharge">—</b>',
+                '<b id="pilot-cap-recharge">'
+                + escape(
+                    format_engine_number(
+                        character_cap["recharge_seconds"],
+                        "s",
+                    )
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-drain">—</b>',
+                '<b id="pilot-cap-drain">'
+                + escape(
+                    f'{character_cap["active_drain_gjs"]:.2f} GJ/s'
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-cap-state">—</b>',
+                '<b id="pilot-cap-state">'
+                + escape(
+                    (
+                        (
+                            "Stable théorique "
+                            f'{character_cap["equilibrium_percent"]:.1f}%'
+                        )
+                        if character_cap["continuous_stable"] is True
+                        else (
+                            "Cap-out "
+                            + format_capacitor_duration(
+                                character_cap["cap_out_seconds"]
+                            )
+                        )
+                        if character_cap["continuous_stable"] is False
+                        else "Indéterminé"
+                    )
+                    if character_cap else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-navigation">—</b>',
+                '<b id="pilot-navigation">'
+                + escape(
+                    f'{character_velocity["navigation_level"]}/5'
+                    if character_velocity else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-lrt-skill">—</b>',
+                '<b id="pilot-lrt-skill">'
+                + escape(
+                    f'{character_targeting["long_range_targeting_level"]}/5'
+                    if character_targeting else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-sig-skill">—</b>',
+                '<b id="pilot-sig-skill">'
+                + escape(
+                    f'{character_targeting["signature_analysis_level"]}/5'
+                    if character_targeting else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-tm-skill">—</b>',
+                '<b id="pilot-tm-skill">'
+                + escape(
+                    f'{character_targeting["target_management_level"]}/5'
+                    if character_targeting else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-atm-skill">—</b>',
+                '<b id="pilot-atm-skill">'
+                + escape(
+                    f'{character_targeting["advanced_target_management_level"]}/5'
+                    if character_targeting else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-evasive-skill">—</b>',
+                '<b id="pilot-evasive-skill">'
+                + escape(
+                    f'{character_mobility["evasive_maneuvering_level"]}/5'
+                    if character_mobility else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-spaceship-skill">—</b>',
+                '<b id="pilot-spaceship-skill">'
+                + escape(
+                    f'{character_mobility["spaceship_command_level"]}/5'
+                    if character_mobility else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-velocity-off">—</b>',
+                '<b id="pilot-velocity-off">'
+                + escape(
+                    format_velocity(
+                        character_velocity[
+                            "propulsion_off_velocity_ms"
+                        ]
+                    )
+                    if character_velocity else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-velocity-active">—</b>',
+                '<b id="pilot-velocity-active">'
+                + escape(
+                    format_velocity(
+                        character_velocity[
+                            "propulsion_active_velocity_ms"
+                        ]
+                    )
+                    if character_velocity else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-acceleration-control">—</b>',
+                '<b id="pilot-acceleration-control">'
+                + escape(
+                    f'{character_velocity["acceleration_control_level"]}/5'
+                    if character_velocity else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-velocity">—</b>',
+                '<b id="pilot-delta-velocity">'
+                + escape(
+                    format_engine_delta(
+                        character_velocity[
+                            "propulsion_active_velocity_ms"
+                        ],
+                        all_v_velocity[
+                            "propulsion_active_velocity_ms"
+                        ],
+                        "m/s",
+                    )
+                    if (
+                        character_velocity
+                        and character_velocity[
+                            "propulsion_active_velocity_ms"
+                        ] is not None
+                        and all_v_velocity[
+                            "propulsion_active_velocity_ms"
+                        ] is not None
+                    )
+                    else "—"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-targets">—</b>',
+                '<b id="pilot-targets">'
+                + escape(
+                    freeborn_format_misc_number(
+                        character_targeting.get(
+                            "max_locked_targets"
+                        ),
+                        0,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-target-range">—</b>',
+                '<b id="pilot-target-range">'
+                + escape(
+                    freeborn_format_misc_number(
+                        character_targeting.get(
+                            "targeting_range_km"
+                        ),
+                        1,
+                    )
+                    + " km"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-target-range">—</b>',
+                '<b id="pilot-delta-target-range">'
+                + escape(
+                    freeborn_format_targeting_delta(
+                        character_targeting.get(
+                            "targeting_range_km"
+                        ),
+                        targeting_all_v.get(
+                            "targeting_range_km"
+                        ),
+                        "km",
+                        1,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-scan-resolution">—</b>',
+                '<b id="pilot-scan-resolution">'
+                + escape(
+                    freeborn_format_misc_number(
+                        character_targeting.get(
+                            "scan_resolution_mm"
+                        ),
+                        0,
+                    )
+                    + " mm"
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-scan-resolution">—</b>',
+                '<b id="pilot-delta-scan-resolution">'
+                + escape(
+                    freeborn_format_targeting_delta(
+                        character_targeting.get(
+                            "scan_resolution_mm"
+                        ),
+                        targeting_all_v.get(
+                            "scan_resolution_mm"
+                        ),
+                        "mm",
+                        0,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-align-time">—</b>',
+                '<b id="pilot-align-time">'
+                + escape(
+                    (
+                        freeborn_format_misc_number(
+                            character_mobility.get(
+                                "align_time_character_seconds"
+                            ),
+                            2,
+                        )
+                        + " s"
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<b id="pilot-delta-align-time">—</b>',
+                '<b id="pilot-delta-align-time">'
+                + escape(
+                    freeborn_format_targeting_delta(
+                        character_mobility.get(
+                            "align_time_character_seconds"
+                        ),
+                        mobility_all_v.get(
+                            "align_time_all_v_seconds"
+                        ),
+                        "s",
+                        2,
+                    )
+                )
+                + '</b>',
+            )
+            .replace(
+                '<div class="pilot-engine-compat" id="pilot-compat">\\n              ANALYSE EN COURS\\n            </div>',
+                '<div class="pilot-engine-compat '
+                + pilot_compat_class
+                + '" id="pilot-compat">'
+                + escape(pilot_compat)
+                + '</div>',
+            )
+        )
+
+
+        delta_specs = {
+            "pilot-delta-cpu-used": "lower",
+            "pilot-delta-cpu-out": "higher",
+            "pilot-delta-pg-used": "lower",
+            "pilot-delta-pg-out": "higher",
+            "pilot-delta-velocity": "higher",
+            "pilot-delta-target-range": "higher",
+            "pilot-delta-scan-resolution": "higher",
+            "pilot-delta-align-time": "lower",
+        }
+
+        for delta_id, better in delta_specs.items():
+            pilot_panel_html = pilot_panel_html.replace(
+                f'<b id="{delta_id}">',
+                f'<b id="{delta_id}" class="compare-delta" data-better="{better}">',
+            )
+
+        pilot_panel_html = re.sub(
+            r'<div class="pilot-engine-compat" id="pilot-compat">\s*'
+            r'ANALYSE EN COURS\s*</div>',
+            (
+                '<div class="pilot-engine-compat '
+                + pilot_compat_class
+                + '" id="pilot-compat">'
+                + escape(pilot_compat)
+                + '</div>'
+            ),
+            pilot_panel_html,
+            count=1,
+        )
+
+
+    # ------------------------------------------------------------
+    # 4S-L — final compact telemetry values.
+    # ------------------------------------------------------------
+    cpu_all_v_used = all_v_core.get("cpu_used")
+    cpu_all_v_available = all_v_core.get("cpu_output")
+    pg_all_v_used = all_v_core.get("power_used")
+    pg_all_v_available = all_v_core.get("power_output")
+
+    cpu_usage_pct = freeborn_usage_percent(
+        cpu_all_v_used,
+        cpu_all_v_available,
+    )
+    pg_usage_pct = freeborn_usage_percent(
+        pg_all_v_used,
+        pg_all_v_available,
+    )
+
+    cargo_used = ship_resource_usage.get(
+        "cargo_used_m3",
+        0.0,
+    )
+    cargo_available = ship_resource_usage.get(
+        "cargo_capacity_m3"
+    )
+    drone_used = ship_resource_usage.get(
+        "drone_bay_used_m3",
+        0.0,
+    )
+    drone_available = ship_resource_usage.get(
+        "drone_bay_capacity_m3"
+    )
+    drone_bw_used = ship_resource_usage.get(
+        "drone_bandwidth_used_mbps",
+        0.0,
+    )
+    drone_bw_available = ship_resource_usage.get(
+        "drone_bandwidth_available_mbps"
+    )
+    specialized_holds = ship_resource_usage.get(
+        "specialized_holds",
+        [],
+    ) or []
+
+    cargo_usage_pct = freeborn_usage_percent(
+        cargo_used,
+        cargo_available,
+    )
+    drone_usage_pct = freeborn_usage_percent(
+        drone_used,
+        drone_available,
+    )
+    drone_bw_pct = freeborn_usage_percent(
+        drone_bw_used,
+        drone_bw_available,
+    )
+
+    final_res = final_resistance_result.get(
+        "final",
+        {},
+    )
+    shield_res = final_res.get(
+        "shield",
+        {},
+    )
+    armor_res = final_res.get(
+        "armor",
+        {},
+    )
+    structure_res = final_res.get(
+        "structure",
+        {},
+    )
+
+    shield_ehp_display = escape(
+        format_ehp_value(
+            ehp_result.get("shield_ehp")
+        )
+    )
+    armor_ehp_display = escape(
+        format_ehp_value(
+            ehp_result.get("armor_ehp")
+        )
+    )
+    structure_ehp_display = escape(
+        format_ehp_value(
+            ehp_result.get("structure_ehp")
+        )
+    )
+    total_ehp_display = escape(
+        format_ehp_value(
+            ehp_result.get("total_ehp")
+        )
+    )
+
+    shield_rep_display = escape(
+        format_repairs_value(
+            active_repairs_result.get(
+                "shield_ehps"
+            )
+        )
+    )
+    armor_rep_display = escape(
+        format_repairs_value(
+            active_repairs_result.get(
+                "armor_ehps"
+            )
+        )
+    )
+
+    all_v_target_range_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "targeting_range_km"
+            ),
+            1,
+        )
+    )
+    all_v_scan_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "scan_resolution_mm"
+            ),
+            0,
+        )
+    )
+    all_v_targets_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "max_locked_targets"
+            ),
+            0,
+        )
+    )
+    signature_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "signature_radius_m"
+            ),
+            0,
+        )
+    )
+    warp_speed_display = escape(
+        freeborn_format_misc_number(
+            targeting_all_v.get(
+                "warp_speed_au_s"
+            ),
+            2,
+        )
+    )
+    align_all_v_display = escape(
+        freeborn_format_misc_number(
+            mobility_all_v.get(
+                "align_time_all_v_seconds"
+            ),
+            2,
+        )
+    )
+
+    speed_all_v_raw = all_v_velocity.get(
+        "propulsion_active_velocity_ms"
+    )
+
+    if speed_all_v_raw is None:
+        speed_all_v_raw = all_v_velocity.get(
+            "propulsion_off_velocity_ms"
+        )
+
+    # FREEBORN FITTINGS — 4S-N-C6
+    # If the propulsion engine has no usable speed, first reuse the BASE hull
+    # velocity already stored in the SAME technical snapshot. This is the exact
+    # value displayed successfully in "Targeting & Miscellaneous" and therefore
+    # avoids a redundant ESI/Dogma lookup.
+    #
+    # ALL V Navigation = +5% per level => +25% at level V.
+    speed_missing = (
+        speed_all_v_raw is None
+        or (
+            isinstance(speed_all_v_raw, (int, float))
+            and float(speed_all_v_raw) <= 0
+        )
+    )
+
+    if speed_missing:
+        snapshot_base_velocity = technical_snapshot.get(
+            "base_velocity"
+        )
+
+        try:
+            snapshot_base_velocity = float(
+                snapshot_base_velocity
+            )
+        except (TypeError, ValueError):
+            snapshot_base_velocity = None
+
+        if (
+            snapshot_base_velocity is not None
+            and snapshot_base_velocity > 0
+        ):
+            speed_all_v_raw = (
+                snapshot_base_velocity
+                * 1.25
+            )
+
+            print(
+                "Freeborn Speed snapshot-base fallback:",
+                format_fit_reference(
+                    fit.get("fit_id")
+                ),
+                "base=",
+                snapshot_base_velocity,
+                "all_v=",
+                speed_all_v_raw,
+            )
+
+    # Last-resort fallback only if even the snapshot BASE value is absent.
+    speed_missing = (
+        speed_all_v_raw is None
+        or (
+            isinstance(speed_all_v_raw, (int, float))
+            and float(speed_all_v_raw) <= 0
+        )
+    )
+
+    if speed_missing:
+        direct_base_velocity = get_ship_base_max_velocity(
+            fit.get("ship_type_id")
+        )
+
+        if (
+            direct_base_velocity is not None
+            and float(direct_base_velocity) > 0
+        ):
+            speed_all_v_raw = (
+                float(direct_base_velocity)
+                * 1.25
+            )
+
+            print(
+                "Freeborn Speed direct fallback:",
+                format_fit_reference(
+                    fit.get("fit_id")
+                ),
+                "base=",
+                direct_base_velocity,
+                "all_v=",
+                speed_all_v_raw,
+            )
+        else:
+            print(
+                "Freeborn Speed unresolved after all fallbacks:",
+                format_fit_reference(
+                    fit.get("fit_id")
+                ),
+                "ship_type_id=",
+                fit.get("ship_type_id"),
+                "snapshot_base=",
+                technical_snapshot.get(
+                    "base_velocity"
+                ),
+                "direct_base=",
+                direct_base_velocity,
+            )
+
+    speed_all_v_display = escape(
+        format_velocity(
+            speed_all_v_raw
+        )
+    )
+
+    cap_capacity_display = escape(
+        format_engine_number(
+            all_v_cap.get("capacity_gj"),
+            "GJ",
+        )
+    )
+    cap_recharge_display = escape(
+        format_engine_number(
+            all_v_cap.get("recharge_seconds"),
+            "s",
+        )
+    )
+    cap_drain_display = escape(
+        (
+            f'{all_v_cap.get("active_drain_gjs"):.2f} GJ/s'
+            if all_v_cap.get("active_drain_gjs") is not None
+            else "—"
+        )
+    )
+
+    low_html = format_eft_web_items(
+        eft_sections["low"], eft_type_ids
+    )
+    mid_html = format_eft_web_items(
+        eft_sections["mid"], eft_type_ids
+    )
+    high_html = format_eft_web_items(
+        eft_sections["high"], eft_type_ids
+    )
+    rigs_html = format_eft_web_items(
+        eft_sections["rigs"], eft_type_ids
+    )
+    drone_items, specialized_buckets, cargo_items, active_holds = (
+        split_eft_dynamic_bays(
+            eft_sections["extras"],
+            eft_type_ids,
+            fit.get("ship_type_id"),
+        )
+    )
+
+    drones_html = format_eft_bay_items(
+        drone_items,
+        eft_type_ids,
+    )
+    cargo_html = format_eft_bay_items(
+        cargo_items,
+        eft_type_ids,
+    )
+
+    specialized_center_panels = []
+    specialized_resource_rows = []
+
+    for hold in specialized_holds:
+        hold_items = specialized_buckets.get(
+            hold.get("key"),
+            [],
+        )
+        hold_items_html = format_eft_bay_items(
+            hold_items,
+            eft_type_ids,
+        )
+
+        hold_label = escape(
+            str(hold.get("label") or "Specialized Hold")
+        )
+        hold_code = escape(
+            str(hold.get("code") or "HOLD")
+        )
+        hold_icon = escape(
+            str(hold.get("icon") or "◇")
+        )
+        hold_value = escape(
+            format_resource_usage_value(
+                hold.get("used_m3"),
+                hold.get("capacity_m3"),
+                "m³",
+            )
+        )
+        hold_pct = freeborn_usage_percent(
+            hold.get("used_m3"),
+            hold.get("capacity_m3"),
+        )
+
+        specialized_center_panels.append(
+            f"""
+      <article class="hud-panel hold-panel specialized-hold-panel">
+        <div class="panel-title"><span class="slot-symbol">{hold_icon}</span>{hold_label}<span class="panel-code">{hold_code}</span></div>
+        <div class="slot-body bay-grid">{hold_items_html}</div>
+      </article>"""
+        )
+
+        specialized_resource_rows.append(
+            f"""
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">{hold_icon}</span>
+                <strong>{hold_label}</strong>
+              </div>
+              <div class="resource-values">
+                <b>{hold_value}</b>
+              </div>
+              <div class="resource-gauge"><i style="width:{hold_pct:.1f}%"></i></div>
+            </div>"""
+        )
+
+    specialized_center_html = "".join(
+        specialized_center_panels
+    )
+    specialized_resource_html = "".join(
+        specialized_resource_rows
+    )
+
+    return f'''<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#020812">
+<link rel="icon" type="image/png" href="/assets/favicon.png">
+<title>{safe_name} — Freeborn Fittings</title>
+<style>
+:root {{
+  color-scheme:dark;
+  --space:#020711;
+  --space2:#040d19;
+  --panel:rgba(3,12,24,.90);
+  --panel2:rgba(5,18,34,.84);
+  --blue:#159cff;
+  --cyan:#35c7ff;
+  --cyan2:#7ddcff;
+  --gold:#d6a83c;
+  --gold2:#f1cb67;
+  --green:#79dd73;
+  --red:#e45757;
+  --text:#edf5ff;
+  --muted:#91abc0;
+  --line:rgba(49,185,255,.72);
+  --line2:rgba(49,185,255,.30);
+  --status:{status_color};
+}}
+*{{box-sizing:border-box}}
+html{{scroll-behavior:smooth}}
+body{{
+  margin:0;
+  min-height:100vh;
+  color:var(--text);
+  font-family:"Segoe UI",Arial,sans-serif;
+  background:
+    radial-gradient(circle at 72% 15%,rgba(16,118,220,.20),transparent 30%),
+    radial-gradient(circle at 18% 82%,rgba(0,72,150,.17),transparent 32%),
+    linear-gradient(rgba(1,5,12,.40),rgba(1,5,12,.72)),
+    url('/assets/bg-space.jpg') center/cover fixed no-repeat,
+    #020711;
+  padding:5px;
+}}
+button{{font:inherit}}
+.app-shell{{
+  width:min(1680px,100%);
+  margin:auto;
+  position:relative;
+  overflow:hidden;
+  border:1px solid var(--line);
+  background:linear-gradient(135deg,rgba(3,12,24,.90),rgba(1,6,14,.96));
+  box-shadow:0 0 38px rgba(0,0,0,.78),0 0 34px rgba(21,156,255,.10),inset 0 0 70px rgba(21,156,255,.025);
+}}
+.app-shell:before,.app-shell:after{{
+  content:"";
+  position:absolute;
+  pointer-events:none;
+  width:76px;
+  height:76px;
+  z-index:5;
+}}
+.app-shell:before{{left:8px;top:8px;border-left:2px solid var(--cyan);border-top:2px solid var(--cyan)}}
+.app-shell:after{{right:8px;bottom:8px;border-right:2px solid var(--cyan);border-bottom:2px solid var(--cyan)}}
+.topbar{{
+  display:grid;
+  grid-template-columns:104px 1fr auto;
+  gap:20px;
+  align-items:center;
+  padding:9px 24px;
+  min-height:94px;
+  border-bottom:1px solid var(--line2);
+  background:linear-gradient(90deg,rgba(2,11,23,.94),rgba(5,21,40,.72),rgba(2,8,17,.92));
+}}
+.logo{{width:84px;filter:drop-shadow(0 0 14px rgba(44,187,255,.24))}}
+.brand h1{{margin:0;font-size:clamp(25px,2.8vw,39px);line-height:1;font-weight:560;letter-spacing:.08em;text-transform:uppercase;color:#eef6ff}}
+.brand h1 span{{color:var(--gold2);font-weight:640}}
+.brand p{{margin:6px 0 0;color:#c6d8e8;font-size:12.5px;letter-spacing:.16em;text-transform:uppercase}}
+.status-badge{{border:1px solid var(--status);color:var(--status);background:color-mix(in srgb,var(--status) 9%,rgba(2,8,16,.96));padding:10px 15px;font-size:11px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;white-space:nowrap;box-shadow:0 0 18px color-mix(in srgb,var(--status) 18%,transparent)}}
+.fit-ref-line{{padding:8px 18px 7px;color:var(--cyan2);border-bottom:1px solid rgba(49,185,255,.18);background:rgba(1,8,17,.74);font:11px/1.25 Consolas,monospace;letter-spacing:.16em;text-transform:uppercase}}
+.main-grid{{display:grid;grid-template-columns:minmax(300px,.88fr) minmax(390px,1.12fr) minmax(410px,1.20fr);gap:7px;padding:7px;align-items:start}}
+.stack{{display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}}
+.right-col > .hud-panel:last-child{{flex:0 0 auto}}
+.center-col{{align-self:start;height:auto}}
+.center-col > .hud-panel:last-child{{flex:0 0 auto}}
+.hud-panel{{position:relative;border:1px solid var(--line2);background:linear-gradient(180deg,rgba(5,20,38,.88),rgba(2,8,17,.94));box-shadow:inset 0 0 24px rgba(39,186,255,.025),0 0 10px rgba(0,0,0,.18)}}
+.hud-panel:before{{content:"";position:absolute;left:-1px;top:-1px;width:28px;height:2px;background:var(--cyan);box-shadow:0 0 8px rgba(53,199,255,.35)}}
+.panel-title{{display:flex;align-items:center;gap:9px;min-height:31px;padding:5px 9px;border-bottom:1px solid rgba(49,185,255,.22);color:#e9f6ff;font-size:13px;font-weight:760;letter-spacing:.12em;text-transform:uppercase}}
+.panel-code{{margin-left:auto;color:#6389a5;font:12px Consolas,monospace;letter-spacing:.12em}}
+.slot-symbol{{width:20px;height:20px;flex:0 0 20px;display:grid;place-items:center;border:1px solid var(--cyan);border-radius:50%;color:var(--cyan2);background:rgba(16,108,174,.20);font:800 11px Consolas,monospace;box-shadow:0 0 9px rgba(53,199,255,.12)}}
+.slot-symbol.low{{border-color:#9ab3c6;color:#d5e3ee}}
+.slot-symbol.rig{{border-radius:3px;border-color:#8bd9ff}}
+.slot-body{{padding:5px 9px 7px}}
+.slot-item{{display:grid;grid-template-columns:31px 31px 1fr;align-items:center;gap:5px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.035);color:#dcecf8;font-size:13px;line-height:1.34}}
+.slot-item,.panel-title,.panel-code,.info-cell,.notes-body,.metric,.resist,.action,.eft-head,pre,.fit-ref-line,.bay-item{{font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif}}
+.slot-item:last-child{{border-bottom:0}}
+.slot-qty{{color:var(--gold2);font-family:Consolas,monospace}}
+.item-icon{{width:28px;height:28px;object-fit:cover;border:1px solid rgba(49,185,255,.26);background:#07101a;box-shadow:0 0 7px rgba(53,199,255,.08)}}
+.item-icon-fallback{{display:grid;place-items:center;color:#55758c;font-size:9px}}
+.slot-label{{min-width:0;overflow:hidden;text-overflow:ellipsis}}
+.slot-empty{{color:#627c91;font-size:12px;font-style:italic;padding:5px 0}}
+.identity-panel{{padding:10px 13px 11px}}
+.eyebrow{{color:var(--cyan2);font:11px Consolas,monospace;letter-spacing:.14em;text-transform:uppercase}}
+.ship-name{{margin:5px 0 0;color:#eef6ff;font-size:clamp(17px,1.8vw,25px);font-weight:650;letter-spacing:.10em;text-transform:uppercase}}
+.fit-name{{margin:4px 0 9px;color:var(--gold2);font-size:clamp(16px,1.55vw,21px);line-height:1.12;font-weight:600;letter-spacing:.055em;text-transform:uppercase}}
+.info-grid{{display:grid;grid-template-columns:1fr 1fr;gap:7px}}
+.info-cell{{border:1px solid rgba(49,185,255,.24);background:rgba(2,10,20,.45);padding:8px 10px}}
+.info-cell small{{display:block;color:#6fcaff;margin-bottom:4px;font-size:11px;letter-spacing:.11em;text-transform:uppercase}}
+.info-cell strong{{font-size:14px;color:#eef6ff}}
+.notes-body{{min-height:86px;padding:13px 15px;color:#dbeaf5;white-space:pre-wrap;font-size:16px;line-height:1.58}}
+.hold-panel .slot-body{{overflow:visible}}
+.drone-bay-panel .panel-title{{color:#a9e7ff}}
+.specialized-hold-panel .panel-title{{color:#d8efff}}
+.cargo-bay-panel .panel-title{{color:#d8e8f3}}
+.bay-grid{{
+  display:flex;
+  flex-wrap:wrap;
+  align-content:flex-start;
+  gap:8px;
+  min-height:74px;
+  padding:10px 11px 12px;
+}}
+.bay-item{{
+  position:relative;
+  width:58px;
+  min-height:70px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:flex-start;
+  gap:4px;
+  outline:none;
+}}
+.bay-item-icon{{
+  width:44px;
+  height:44px;
+  object-fit:cover;
+  border:1px solid rgba(49,185,255,.30);
+  background:#07101a;
+  box-shadow:0 0 0 1px rgba(0,0,0,.55),0 0 8px rgba(53,199,255,.08);
+}}
+.bay-item:hover .bay-item-icon,
+.bay-item:focus .bay-item-icon{{
+  border-color:rgba(241,203,103,.70);
+  box-shadow:0 0 0 1px rgba(0,0,0,.55),0 0 12px rgba(241,203,103,.16);
+}}
+.bay-item-fallback{{
+  display:grid;
+  place-items:center;
+  color:#58788f;
+  font-size:15px;
+}}
+.bay-qty{{
+  color:#d9e7f3;
+  font-size:13px;
+  line-height:1;
+  font-weight:650;
+  letter-spacing:.02em;
+  white-space:nowrap;
+}}
+.bay-tooltip{{
+  position:absolute;
+  z-index:60;
+  left:50%;
+  bottom:calc(100% + 7px);
+  width:max-content;
+  max-width:360px;
+  transform:translate(-50%,4px);
+  padding:7px 9px;
+  border:1px solid rgba(180,194,207,.25);
+  border-radius:4px;
+  background:rgba(56,59,68,.97);
+  color:#f2f4f7;
+  box-shadow:0 8px 24px rgba(0,0,0,.45);
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-size:12px;
+  font-weight:650;
+  line-height:1.25;
+  text-align:center;
+  white-space:normal;
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+  transition:opacity .12s ease,transform .12s ease;
+}}
+.bay-tooltip:after{{
+  content:"";
+  position:absolute;
+  top:100%;
+  left:50%;
+  transform:translateX(-50%);
+  border:6px solid transparent;
+  border-top-color:rgba(56,59,68,.97);
+}}
+.bay-item:hover .bay-tooltip,
+.bay-item:focus .bay-tooltip{{
+  opacity:1;
+  visibility:visible;
+  transform:translate(-50%,0);
+}}
+.bay-empty{{
+  width:100%;
+  min-height:48px;
+  display:grid;
+  place-items:center start;
+  color:#627c91;
+  font-size:12px;
+  font-style:italic;
+}}
+.ship-panel{{min-height:270px;display:grid;grid-template-rows:auto 1fr}}
+.ship-stage{{position:relative;min-height:225px;display:grid;place-items:center;overflow:hidden;background:radial-gradient(circle at 50% 45%,rgba(20,145,255,.14),transparent 44%),linear-gradient(90deg,transparent 49.8%,rgba(49,185,255,.08) 50%,transparent 50.2%),linear-gradient(transparent 49.8%,rgba(49,185,255,.06) 50%,transparent 50.2%)}}
+.ship-stage:before{{content:"";position:absolute;width:64%;aspect-ratio:1;border:1px solid rgba(49,185,255,.09);border-radius:50%;box-shadow:0 0 0 45px rgba(49,185,255,.018),0 0 0 90px rgba(49,185,255,.012)}}
+.ship-render{{width:96%;height:225px;object-fit:contain;position:relative;z-index:1;filter:drop-shadow(0 18px 26px rgba(0,0,0,.84))}}
+.panel-title-spacer{{flex:1 1 auto}}
+.ship-panel-title .panel-code{{margin-left:7px;flex:0 0 auto}}
+.pilotability-badge{{
+  position:relative;
+  z-index:6;
+  display:inline-flex;
+  align-items:center;
+  flex:0 0 auto;
+  gap:5px;
+  min-height:23px;
+  padding:3px 7px;
+  border:1px solid rgba(41,169,255,.58);
+  background:rgba(1,13,24,.93);
+  font-family:"Rajdhani","Arial Narrow",Arial,sans-serif;
+  font-size:10px;
+  font-weight:800;
+  letter-spacing:.65px;
+  cursor:help;
+  outline:none;
+  box-shadow:0 5px 16px rgba(0,0,0,.32);
+}}
+.pilotability-mark{{font-size:12px;line-height:1}}
+.pilotability-ok{{border-color:rgba(121,221,115,.72);color:#8df187}}
+.pilotability-no{{border-color:rgba(255,174,52,.82);color:#ffc65b}}
+.pilotability-unknown{{border-color:rgba(137,150,163,.72);color:#a9b5bf}}
+.pilotability-tooltip{{
+  position:absolute;
+  display:none;
+  right:0;
+  top:calc(100% + 7px);
+  width:340px;
+  max-height:360px;
+  overflow:auto;
+  padding:12px;
+  border:1px solid rgba(41,169,255,.65);
+  background:rgba(2,12,22,.985);
+  color:#d9f2ff;
+  text-align:left;
+  font-family:"Rajdhani","Arial Narrow",Arial,sans-serif;
+  font-size:12px;
+  font-weight:500;
+  letter-spacing:.15px;
+  box-shadow:0 16px 42px rgba(0,0,0,.62);
+}}
+.pilotability-badge:hover .pilotability-tooltip,
+.pilotability-badge:focus .pilotability-tooltip,
+.pilotability-badge:focus-within .pilotability-tooltip{{display:block}}
+.pilotability-tooltip>strong{{
+  display:block;
+  margin-bottom:4px;
+  color:#62d8ff;
+  font-size:13px;
+  letter-spacing:.8px;
+}}
+.pilotability-summary{{
+  display:block;
+  margin-bottom:9px;
+  color:#9fb8c7;
+}}
+.pilotability-skill-row{{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:12px;
+  padding:4px 0;
+  border-top:1px solid rgba(49,185,255,.12);
+}}
+.pilotability-skill-row b{{font-variant-numeric:tabular-nums}}
+.pilotability-skill-row.ok span,
+.pilotability-skill-row.ok b{{color:#8df187}}
+.pilotability-skill-row.missing span,
+.pilotability-skill-row.missing b{{color:#ff796f}}
+.ship-placeholder{{color:#6d879b;letter-spacing:.15em;text-align:center}}
+.telemetry-reference{{margin:7px 7px 0;padding:9px 11px;border:1px solid rgba(214,168,60,.34);background:rgba(214,168,60,.045)}}
+.telemetry-reference strong{{display:block;color:var(--gold2);font-size:11px;letter-spacing:.09em;text-transform:uppercase}}
+.telemetry-reference span{{display:block;margin-top:4px;color:#9bb4c7;font-size:11px;line-height:1.35}}
+.pilot-panel{{
+  margin:9px 7px 10px;
+  padding:13px 14px;
+  border:1px solid rgba(49,185,255,.38);
+  background:
+    linear-gradient(180deg,rgba(13,61,96,.18),rgba(2,12,23,.66));
+  box-shadow:inset 0 0 18px rgba(53,199,255,.025);
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+}}
+.pilot-connected{{
+  border-color:rgba(121,221,115,.38);
+  background:
+    linear-gradient(180deg,rgba(42,105,61,.13),rgba(2,12,23,.66));
+}}
+.pilot-panel-head{{
+  display:flex;
+  align-items:center;
+  gap:10px;
+}}
+.pilot-icon{{
+  width:32px;
+  height:32px;
+  flex:0 0 32px;
+  display:grid;
+  place-items:center;
+  border:1px solid var(--cyan);
+  border-radius:50%;
+  color:var(--cyan2);
+  background:rgba(16,108,174,.18);
+  font-size:14px;
+}}
+.pilot-heading-copy{{min-width:0}}
+.pilot-panel-head strong{{
+  display:block;
+  color:#eef7ff;
+  font-size:16px;
+  line-height:1.15;
+  letter-spacing:.055em;
+}}
+.pilot-panel-head small{{
+  display:block;
+  margin-top:3px;
+  color:#7fc8ef;
+  font-size:13px;
+  line-height:1.25;
+}}
+.pilot-meta{{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:10px;
+}}
+.pilot-meta span{{
+  padding:6px 9px;
+  border:1px solid rgba(49,185,255,.22);
+  background:rgba(0,0,0,.16);
+  color:#aac2d2;
+  font-size:13px;
+}}
+.pilot-meta b{{color:#edf6ff}}
+.pilot-meta .pilot-ready{{
+  color:#9cec94;
+  border-color:rgba(121,221,115,.30);
+}}
+.pilot-note{{
+  margin-top:10px;
+  color:#bfd0dc;
+  font-size:14px;
+  line-height:1.42;
+}}
+.pilot-tech-grid{{
+  display:grid;
+  grid-template-columns:minmax(0,1.18fr) minmax(250px,.82fr);
+  gap:10px;
+  margin-top:11px;
+  align-items:stretch;
+}}
+.pilot-engine-core{{
+  margin:0;
+  padding:10px 11px;
+  border:1px solid rgba(49,185,255,.21);
+  background:rgba(0,0,0,.18);
+}}
+.pilot-engine-title{{
+  margin-bottom:8px;
+  color:#72d3ff;
+  font-size:13px;
+  font-weight:850;
+  line-height:1.2;
+  letter-spacing:.075em;
+}}
+.pilot-engine-row{{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:14px;
+  padding:5px 0;
+  border-bottom:1px solid rgba(255,255,255,.045);
+  color:#a9c2d3;
+  font-size:13px;
+  line-height:1.25;
+}}
+.pilot-engine-row:last-child{{border-bottom:0}}
+.pilot-engine-row b{{
+  color:#f0f6fb;
+  font-size:13px;
+  white-space:nowrap;
+}}
+.pilot-engine-separator{{
+  height:1px;
+  margin:7px 0;
+  background:rgba(49,185,255,.17);
+}}
+.pilot-engine-compat{{
+  margin-top:9px;
+  padding:9px 10px;
+  border:1px solid rgba(49,185,255,.20);
+  text-align:center;
+  color:#9fb7c8;
+  font-size:14px;
+  font-weight:900;
+  letter-spacing:.075em;
+}}
+.pilot-engine-compat.ok{{
+  color:#9cec94;
+  border-color:rgba(121,221,115,.38);
+  background:rgba(121,221,115,.055);
+}}
+.pilot-engine-compat.bad{{
+  color:#ff8686;
+  border-color:rgba(228,87,87,.40);
+  background:rgba(228,87,87,.055);
+}}
+.pilot-side{{
+  display:flex;
+  flex-direction:column;
+  gap:9px;
+  min-width:0;
+}}
+.pilot-compare{{
+  margin:0;
+  padding:10px 11px;
+  border:1px solid rgba(49,185,255,.21);
+  background:rgba(0,0,0,.16);
+}}
+.pilot-compare-title{{
+  margin-bottom:8px;
+  color:#72d3ff;
+  font-size:13px;
+  font-weight:850;
+  line-height:1.2;
+  letter-spacing:.075em;
+}}
+.pilot-compare-grid{{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:7px 12px;
+  align-items:center;
+  color:#a9c2d3;
+  font-size:13px;
+  line-height:1.25;
+}}
+.pilot-compare-grid b{{
+  color:#eef6fb;
+  text-align:right;
+  white-space:nowrap;
+  font-size:13px;
+}}
+.pilot-update{{
+  padding:9px 11px;
+  border:1px solid rgba(49,185,255,.14);
+  background:rgba(0,0,0,.12);
+}}
+.pilot-update small{{
+  display:block;
+  color:#7998ad;
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}}
+.pilot-update strong{{
+  display:block;
+  margin-top:3px;
+  color:#dbe8f1;
+  font-size:13px;
+}}
+.pilot-button{{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:42px;
+  margin-top:auto;
+  padding:9px 14px;
+  border:1px solid rgba(49,185,255,.78);
+  background:
+    linear-gradient(180deg,rgba(21,156,255,.16),rgba(21,156,255,.035));
+  color:#72d3ff;
+  text-decoration:none;
+  font-size:13px;
+  font-weight:850;
+  letter-spacing:.055em;
+  text-transform:uppercase;
+}}
+.pilot-button:hover{{
+  border-color:var(--cyan2);
+  box-shadow:0 0 14px rgba(53,199,255,.13);
+}}
+.pilot-refresh{{
+  border-color:rgba(121,221,115,.55);
+  color:#9cec94;
+  background:
+    linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.025));
+}}
+.allv-preview{{
+  margin:8px 7px 0;
+  padding:10px 11px;
+  border:1px solid rgba(214,168,60,.38);
+  background:
+    linear-gradient(180deg,rgba(214,168,60,.065),rgba(0,0,0,.13));
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+}}
+.allv-head{{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  align-items:baseline;
+}}
+.allv-head strong{{
+  color:var(--gold2);
+  font-size:13px;
+  letter-spacing:.08em;
+}}
+.allv-head span{{
+  color:#9eb0bd;
+  font-size:12px;
+}}
+.capacitor-audit .cap-audit-key{{
+  color:#7ed8ff;
+  font-weight:800;
+}}
+.capacitor-audit .cap-audit-verdict{{
+  color:#f1cc67;
+  font-weight:900;
+  letter-spacing:.05em;
+}}
+.capacitor-audit .cap-dogma-probe{{
+  color:#c8dce9;
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-size:11px;
+  line-height:1.35;
+}}
+.allv-warning{{
+  margin-top:7px;
+  padding:6px 7px;
+  border-left:2px solid rgba(214,168,60,.52);
+  background:rgba(214,168,60,.035);
+  color:#a79a72;
+  font-size:10px;
+  line-height:1.35;
+}}
+.allv-grid{{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:7px;
+  margin-top:8px;
+}}
+.allv-grid>div{{
+  padding:7px 8px;
+  border:1px solid rgba(214,168,60,.18);
+  background:rgba(0,0,0,.16);
+}}
+.allv-grid small{{
+  display:block;
+  color:#7fcfff;
+  font-size:9px;
+  letter-spacing:.09em;
+}}
+.allv-grid b{{
+  display:block;
+  margin-top:3px;
+  color:#f4f7fa;
+  font-size:13px;
+}}
+.allv-grid em{{
+  display:block;
+  margin-top:2px;
+  color:#a8c0d0;
+  font-size:10px;
+  font-style:normal;
+}}
+.allv-status{{
+  margin-top:7px;
+  padding-top:6px;
+  border-top:1px solid rgba(214,168,60,.16);
+  text-align:right;
+  color:#d7b95e;
+  font-size:13px;
+  font-weight:850;
+  letter-spacing:.06em;
+}}
+.pilot-engine-row:last-child{{border-bottom:0}}
+.pilot-engine-row b{{
+  color:#edf6ff;
+  font-size:11px;
+  white-space:nowrap;
+}}
+.pilot-refresh{{
+  border-color:rgba(121,221,115,.55);
+  color:#9cec94;
+  background:
+    linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.025));
+}}
+.telemetry{{display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:6px}}
+.metric{{min-height:43px;border:1px solid rgba(49,185,255,.25);background:rgba(1,9,18,.55);padding:6px 8px;display:grid;grid-template-columns:28px 1fr;grid-template-rows:auto auto;column-gap:8px;align-items:center}}
+.metric-icon{{grid-row:1/3;width:25px;height:25px;border:1px solid rgba(49,185,255,.40);display:grid;place-items:center;color:#6fd2ff;background:rgba(3,20,34,.72);font-size:16px;line-height:1;text-shadow:0 0 10px rgba(49,185,255,.35)}}
+.metric small{{display:block;color:#63c8ff;font-size:10px;letter-spacing:.10em;text-transform:uppercase;align-self:end}}
+.metric-mode{{font-style:normal;font-size:9px;color:#67859b;letter-spacing:.10em;margin-left:5px}}
+.metric strong{{display:block;margin-top:2px;color:#e8f4fc;font:700 14px Consolas,monospace;align-self:start}}
+.metric .pending{{color:#71899d;font-weight:500}}
+.resists{{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:6px}}
+.resist{{border:1px solid rgba(49,185,255,.18);background:rgba(2,10,19,.50);padding:5px;text-align:center}}
+.resist-icon{{display:block;font-size:14px;line-height:1;margin-bottom:3px}}
+.resist.em .resist-icon{{color:#36b8ff}}
+.resist.therm .resist-icon{{color:#ff7b32}}
+.resist.kin .resist-icon{{color:#c6d0d8}}
+.resist.exp .resist-icon{{color:#ffc13b}}
+.resist span{{display:block;color:#6b879d;font-size:10px;text-transform:uppercase;letter-spacing:.08em}}
+.resist b{{display:block;margin-top:3px;color:#aebfcd;font:12px Consolas,monospace}}
+.actionbar{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;padding:4px 7px 7px}}
+.action{{appearance:none;min-height:38px;border:1px solid rgba(214,168,60,.75);background:linear-gradient(180deg,rgba(214,168,60,.14),rgba(214,168,60,.025));color:#f4d576;padding:8px 8px;font-size:11.5px;font-weight:800;letter-spacing:.065em;text-transform:uppercase;white-space:nowrap;cursor:pointer;transition:.16s ease}}
+.action:hover{{transform:translateY(-1px);border-color:var(--gold2);box-shadow:0 0 15px rgba(214,168,60,.14)}}
+.action.blue{{border-color:rgba(49,185,255,.80);background:linear-gradient(180deg,rgba(21,156,255,.15),rgba(21,156,255,.025));color:#71d2ff}}
+.action.green{{border-color:rgba(121,221,115,.70);background:linear-gradient(180deg,rgba(121,221,115,.10),rgba(121,221,115,.02));color:#9cec94}}
+.action.red{{border-color:rgba(255,92,92,.55);color:#ff7777}}
+.action.red:hover{{border-color:#ff7777;color:#ffffff}}
+.action:disabled{{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}}
+.eft-wrap{{padding:0 9px 9px}}
+.eft-panel{{display:none;border:1px solid var(--line2);background:rgba(2,8,15,.96);padding:9px}}
+.eft-panel.open{{display:block}}
+.eft-head{{display:flex;justify-content:space-between;gap:10px;margin-bottom:7px;color:var(--gold2);font-size:11px;letter-spacing:.10em;text-transform:uppercase}}
+.eft-source{{color:#7290a8;font:12px Consolas,monospace}}
+pre{{margin:0;max-height:260px;overflow:auto;padding:10px;border:1px solid rgba(255,255,255,.05);background:#040914;color:#d9e8f5;font:13px/1.48 Consolas,"Courier New",monospace;white-space:pre-wrap}}
+.footer{{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:center;padding:7px 16px;border-top:1px solid var(--line2);color:#7fa4be;background:rgba(1,7,14,.70);font-size:10px;letter-spacing:.11em;text-transform:uppercase}}
+.footer .motto{{color:var(--cyan2)}}
+.footer .id{{color:var(--gold2);font-family:Consolas,monospace}}
+.footer .version{{text-align:right}}
+.toast{{position:fixed;right:18px;bottom:18px;z-index:30;padding:9px 13px;border:1px solid rgba(121,221,115,.70);background:#061109;color:#a7eea0;font-size:11px;font-weight:700;opacity:0;transform:translateY(8px);pointer-events:none;transition:.18s ease}}
+.toast.show{{opacity:1;transform:translateY(0)}}
+
+.telemetry-dashboard{{
+  display:grid;
+  gap:8px;
+  padding:7px;
+}}
+.telemetry-section{{
+  border:1px solid rgba(49,185,255,.24);
+  background:linear-gradient(180deg,rgba(5,18,31,.78),rgba(2,9,17,.72));
+  padding:9px 10px;
+}}
+.telemetry-section-title{{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+  margin-bottom:8px;
+  color:#edf6ff;
+  font-size:12px;
+  font-weight:850;
+  letter-spacing:.08em;
+}}
+.telemetry-section-title small{{
+  color:#6f91a8;
+  font-size:10px;
+  font-weight:500;
+  letter-spacing:.08em;
+}}
+.resource-row{{
+  display:grid;
+  grid-template-columns:minmax(120px,.9fr) minmax(150px,1fr);
+  gap:4px 10px;
+  align-items:center;
+  padding:6px 0;
+  border-bottom:1px solid rgba(255,255,255,.045);
+}}
+.resource-row:last-child{{border-bottom:0}}
+.resource-label{{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  color:#dcecf7;
+}}
+.resource-icon{{
+  width:23px;
+  height:23px;
+  display:grid;
+  place-items:center;
+  color:#69d1ff;
+  border:1px solid rgba(49,185,255,.28);
+  background:rgba(3,20,34,.65);
+}}
+.resource-values{{
+  text-align:right;
+}}
+.resource-values b{{
+  display:block;
+  color:#edf6ff;
+  font:700 12px Consolas,monospace;
+}}
+.resource-values small{{
+  display:block;
+  margin-top:2px;
+  color:#6f899b;
+  font:9px Consolas,monospace;
+}}
+.resource-gauge{{
+  grid-column:1/-1;
+  height:5px;
+  border:1px solid rgba(49,185,255,.16);
+  background:rgba(255,255,255,.035);
+  overflow:hidden;
+}}
+.resource-gauge i{{
+  display:block;
+  height:100%;
+  background:linear-gradient(90deg,rgba(36,143,213,.78),rgba(78,215,255,.95));
+  box-shadow:0 0 8px rgba(53,199,255,.26);
+}}
+.resistance-table{{
+  display:grid;
+  grid-template-columns:82px repeat(4,minmax(50px,1fr)) 70px;
+  gap:4px;
+  align-items:center;
+  text-align:center;
+  font-size:10px;
+}}
+.resistance-table>div{{
+  padding:5px 3px;
+  border:1px solid rgba(49,185,255,.14);
+  background:rgba(0,0,0,.15);
+  color:#c8d8e4;
+}}
+.resistance-head{{
+  color:#7895aa!important;
+  font-size:9px;
+  letter-spacing:.06em;
+}}
+.resistance-head.em{{color:#48c6ff!important}}
+.resistance-head.therm{{color:#ff7a3a!important}}
+.resistance-head.kin{{color:#d9e1e6!important}}
+.resistance-head.exp{{color:#ffc23b!important}}
+.resistance-layer{{
+  text-align:left;
+  color:#edf6ff!important;
+  font-weight:750;
+}}
+.ehp-cell{{
+  color:#f2cf70!important;
+  font-family:Consolas,monospace;
+}}
+.ehp-total{{
+  display:flex;
+  justify-content:flex-end;
+  gap:12px;
+  margin-top:7px;
+  padding-top:7px;
+  border-top:1px solid rgba(214,168,60,.24);
+  color:#98afc0;
+  font-size:10px;
+  letter-spacing:.07em;
+}}
+.ehp-total strong{{
+  color:#f2cf70;
+  font:700 13px Consolas,monospace;
+}}
+.telemetry-split{{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}}
+.stat-list{{
+  display:grid;
+  gap:5px;
+}}
+.stat-list>div,
+.misc-grid>div{{
+  display:flex;
+  justify-content:space-between;
+  gap:8px;
+  align-items:baseline;
+  padding:4px 0;
+  border-bottom:1px solid rgba(255,255,255,.04);
+}}
+.stat-list span,
+.misc-grid span{{
+  color:#8fa8bb;
+  font-size:10px;
+}}
+.stat-list b,
+.misc-grid b{{
+  color:#edf6ff;
+  font:700 11px Consolas,monospace;
+  text-align:right;
+}}
+.repair-grid{{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:5px;
+}}
+.repair-grid>div{{
+  padding:7px 4px;
+  text-align:center;
+  border:1px solid rgba(49,185,255,.14);
+  background:rgba(0,0,0,.13);
+}}
+.repair-icon{{
+  display:block;
+  color:#67d2ff;
+  font-size:15px;
+}}
+.repair-grid small{{
+  display:block;
+  margin-top:3px;
+  color:#7e9bae;
+  font-size:9px;
+}}
+.repair-grid b{{
+  display:block;
+  margin-top:4px;
+  color:#9cec94;
+  font:700 11px Consolas,monospace;
+}}
+.misc-grid{{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:0 14px;
+}}
+.telemetry-footnote{{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px 14px;
+  padding:2px 4px 4px;
+  color:#6f8da2;
+  font-size:9px;
+  line-height:1.35;
+}}
+.telemetry-footnote b{{color:#f0ca67}}
+.compare-delta{{
+  font-family:Consolas,monospace!important;
+}}
+.compare-good{{color:#8ff08a!important}}
+.compare-bad{{color:#ff7d70!important}}
+.compare-neutral{{color:#9db2c2!important}}
+.pilot-engine-title{{
+  text-transform:uppercase;
+}}
+.pilot-compare-title{{
+  text-transform:uppercase;
+}}
+
+@media(max-width:760px){{
+  .pilot-refresh-control{{
+    font-size:9px!important;
+    padding:0 6px!important;
+  }}
+  .pilot-intro-copy{{
+    font-size:9.5px!important;
+  }}
+}}
+
+/* =========================================================
+   4S-L2 — UI polish
+   ========================================================= */
+
+/* Blank resistance corner: exact same visual box as EM/THERM/KIN/EXP/EHP */
+.resistance-head{{
+  min-height:26px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  box-sizing:border-box;
+}}
+.resistance-corner{{
+  min-height:26px;
+  padding:5px 3px!important;
+  border:1px solid rgba(49,185,255,.14)!important;
+  background:rgba(0,0,0,.15)!important;
+}}
+
+/* Pilot intro text: present but less dominant */
+.pilot-intro-copy{{
+  font-size:10px!important;
+  line-height:1.42!important;
+  color:#bfd1dd!important;
+  letter-spacing:0!important;
+}}
+
+/* Cohesive typography in both pilot columns */
+.pilot-engine-core,
+.pilot-compare{{
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+}}
+
+.pilot-engine-title,
+.pilot-compare-title{{
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-size:12px!important;
+  line-height:1.08!important;
+  letter-spacing:.085em!important;
+}}
+
+.pilot-engine-row span,
+.pilot-compare-grid span{{
+  font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;
+  font-size:10px!important;
+  line-height:1.22!important;
+  letter-spacing:.01em!important;
+  color:#c7d9e5;
+}}
+
+.pilot-engine-row b,
+.pilot-compare-grid b{{
+  font-family:Consolas,"Roboto Mono",monospace!important;
+  font-size:10px!important;
+  line-height:1.22!important;
+  letter-spacing:0!important;
+  white-space:nowrap;
+}}
+
+.pilot-compare-grid{{
+  row-gap:6px!important;
+  column-gap:10px!important;
+}}
+
+.compare-delta{{
+  font-family:Consolas,"Roboto Mono",monospace!important;
+  font-size:10px!important;
+  font-weight:700!important;
+}}
+
+/* COMPATIBLE + Refresh: same visual weight and one-line label */
+.pilot-engine-compat,
+.pilot-refresh-control{{
+  min-height:38px!important;
+  height:38px;
+  box-sizing:border-box;
+  display:flex!important;
+  align-items:center!important;
+  justify-content:center!important;
+  text-align:center!important;
+  line-height:1!important;
+  font-size:10px!important;
+  font-weight:850!important;
+  letter-spacing:.035em!important;
+}}
+
+.pilot-refresh-control{{
+  width:100%;
+  padding:0 10px!important;
+  white-space:nowrap!important;
+  text-transform:uppercase;
+}}
+
+/* Slightly reduce surrounding pilot prose, not the identity/header itself */
+.pilot-note{{
+  max-width:96%;
+}}
+
+/* Keep all pilot value columns visually aligned */
+.pilot-engine-row,
+.pilot-compare-grid{{
+  font-variant-numeric:tabular-nums;
+}}
+
+@media(max-width:780px){{
+  .center-ship-panel .ship-stage{{
+    min-height:210px;
+  }}
+  .center-ship-panel .ship-render{{
+    height:210px;
+  }}
+  .compact-meta-value{{
+    font-size:13px;
+  }}
+}}
+
+/* =========================================================
+   4S-L3 — layout rebalance & readability
+   ========================================================= */
+
+.center-ship-panel .ship-stage{{
+  min-height:225px;
+}}
+.center-ship-panel .ship-render{{
+  height:225px;
+}}
+
+.compact-meta-panel .panel-title{{
+  min-height:27px;
+  padding-top:4px;
+  padding-bottom:4px;
+}}
+.compact-meta-panel .slot-symbol{{
+  width:18px;
+  height:18px;
+  flex-basis:18px;
+  font-size:9px;
+}}
+.compact-meta-value{{
+  padding:9px 12px 10px;
+  color:#eef6ff;
+  font-size:14px;
+  font-weight:700;
+  letter-spacing:.02em;
+}}
+.usage-meta-panel .compact-meta-value{{
+  color:#f1cb68;
+}}
+.creator-meta-panel .compact-meta-value{{
+  color:#e7f4fc;
+}}
+
+/* Telemetry readability — only the areas requested */
+.resistance-table{{
+  font-size:11px!important;
+}}
+.resistance-head{{
+  font-size:10px!important;
+}}
+.resistance-layer{{
+  font-size:11px!important;
+}}
+.ehp-cell{{
+  font-size:11px!important;
+}}
+.ehp-total{{
+  font-size:11px!important;
+}}
+.ehp-total strong{{
+  font-size:14px!important;
+}}
+
+.misc-grid span{{
+  font-size:11px!important;
+}}
+.misc-grid b{{
+  font-size:12px!important;
+}}
+.telemetry-section:has(.misc-grid) .telemetry-section-title{{
+  font-size:13px!important;
+}}
+.telemetry-section:has(.misc-grid) .telemetry-section-title small{{
+  font-size:10.5px!important;
+}}
+
+/* Corporate-reference footer was too small */
+.telemetry-footnote{{
+  font-size:10px!important;
+  line-height:1.42!important;
+  gap:6px 16px!important;
+}}
+
+/* Pilot readability: modest increase after L2 became too compact */
+.pilot-intro-copy{{
+  font-size:11px!important;
+  line-height:1.46!important;
+}}
+.pilot-engine-title,
+.pilot-compare-title{{
+  font-size:13px!important;
+  line-height:1.10!important;
+}}
+.pilot-engine-row span,
+.pilot-compare-grid span{{
+  font-size:11px!important;
+  line-height:1.26!important;
+}}
+.pilot-engine-row b,
+.pilot-compare-grid b,
+.compare-delta{{
+  font-size:11px!important;
+  line-height:1.26!important;
+}}
+
+/* Keep refresh on one line while restoring a little readability */
+.pilot-engine-compat,
+.pilot-refresh-control{{
+  font-size:11px!important;
+}}
+@media(max-width:1180px){{
+  .pilot-tech-grid{{grid-template-columns:1fr}}
+  .main-grid{{grid-template-columns:1fr 1fr}}
+  .right-col{{grid-column:1/-1;display:grid;grid-template-columns:1.2fr .8fr}}
+  .actionbar{{grid-template-columns:repeat(3,1fr)}}
+}}
+@media(max-width:780px){{
+  body{{padding:4px}}
+  .topbar{{grid-template-columns:64px 1fr;gap:10px;padding:9px 11px}}
+  .logo{{width:58px}}
+  .status-badge{{grid-column:1/-1;text-align:center}}
+  .main-grid{{grid-template-columns:1fr}}
+  .right-col{{grid-column:auto;display:flex}}
+  .info-grid{{grid-template-columns:1fr}}
+  .actionbar{{grid-template-columns:1fr 1fr}}
+  .footer{{grid-template-columns:1fr;text-align:center;line-height:1.7}}
+  .footer .version{{text-align:center}}
+}}
+</style>
+</head>
+<body>
+<main class="app-shell">
+  <header class="topbar">
+    <img class="logo" src="/assets/logo-freeborn-legacy.png" alt="Freeborn Legacy">
+    <div class="brand">
+      <h1>FREEBORN <span>FITTS</span></h1>
+      <p>Bibliothèque de fittings • par les FREE • pour les FREE</p>
+    </div>
+    <div class="status-badge">◉ {escape(status_label)}</div>
+  </header>
+
+  <div class="fit-ref-line">
+    {safe_ref} // FREEBORN LEGACY // CORPORATE FITTING DATABASE
+  </div>
+
+  <section class="main-grid">
+    <div class="stack left-col">
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol">▲</span>High Slots<span class="panel-code">HIGH</span></div>
+        <div class="slot-body">{high_html}</div>
+      </article>
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol">◆</span>Mid Slots<span class="panel-code">MID</span></div>
+        <div class="slot-body">{mid_html}</div>
+      </article>
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol low">▼</span>Low Slots<span class="panel-code">LOW</span></div>
+        <div class="slot-body">{low_html}</div>
+      </article>
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol rig">◇</span>Rigs<span class="panel-code">RIG</span></div>
+        <div class="slot-body">{rigs_html}</div>
+      </article>
+    </div>
+
+    <div class="stack center-col">
+      <article class="hud-panel identity-panel">
+        <div class="eyebrow">Fiche corporate // {safe_ref}</div>
+        <div class="ship-name">{safe_ship}</div>
+        <div class="fit-name">{safe_name}</div>
+      </article>
+
+      <article class="hud-panel ship-panel center-ship-panel">
+        <div class="panel-title ship-panel-title"><span class="slot-symbol">S</span>{safe_ship}<span class="panel-title-spacer"></span>{pilotability_html}<span class="panel-code">SHIP</span></div>
+        <div class="ship-stage">{ship_html}</div>
+      </article>
+
+      <article class="hud-panel compact-meta-panel usage-meta-panel">
+        <div class="panel-title"><span class="slot-symbol">U</span>Usage<span class="panel-code">ROLE</span></div>
+        <div class="compact-meta-value">{safe_usage}</div>
+      </article>
+
+      <article class="hud-panel compact-meta-panel creator-meta-panel">
+        <div class="panel-title"><span class="slot-symbol">C</span>Créé par<span class="panel-code">AUTHOR</span></div>
+        <div class="compact-meta-value">{safe_creator}</div>
+      </article>
+
+      <article class="hud-panel hold-panel drone-bay-panel">
+        <div class="panel-title"><span class="slot-symbol">◈</span>Drone Bay<span class="panel-code">DRONES</span></div>
+        <div class="slot-body bay-grid">{drones_html}</div>
+      </article>
+{specialized_center_html}
+
+      <article class="hud-panel hold-panel cargo-bay-panel">
+        <div class="panel-title"><span class="slot-symbol">▦</span>Cargo Bay<span class="panel-code">CARGO</span></div>
+        <div class="slot-body bay-grid">{cargo_html}</div>
+      </article>
+
+      <article class="hud-panel">
+        <div class="panel-title"><span class="slot-symbol">N</span>Notes du créateur<span class="panel-code">NOTES</span></div>
+        <div class="notes-body">{safe_notes}</div>
+      </article>
+    </div>
+
+    <div class="stack right-col">
+      <article class="hud-panel telemetry-master-panel">
+        <div class="panel-title"><span class="slot-symbol">T</span>Fitting Telemetry<span class="panel-code">STATS</span></div>
+        <div class="telemetry">
+          <div class="metric"><span class="metric-icon" aria-hidden="true">▣</span><small>CPU <em class="metric-mode">ALL V</em></small><strong>{all_v_cpu_pair}</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">ϟ</span><small>Powergrid <em class="metric-mode">ALL V</em></small><strong>{all_v_pg_pair}</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">◫</span><small>Capacitor <em class="metric-mode">ALL V</em></small><strong>{all_v_cap_capacity}</strong></div>
+          <div class="metric"><span class="metric-icon" aria-hidden="true">➤</span><small>Speed <em class="metric-mode">ALL V</em></small><strong>{speed_all_v_display}</strong></div>
+          <div class="metric" title="DPS volontairement non simulé par Freeborn Fittings. Utilise l'EFT dans EVE pour les statistiques exactes."><span class="metric-icon" aria-hidden="true">⌖</span><small>DPS</small><strong class="pending">----</strong></div>
+          <div class="metric" title="EHP OMNI 25/25/25/25"><span class="metric-icon" aria-hidden="true">⬡</span><small>EHP <em class="metric-mode">ALL V</em></small><strong>{ehp_value}</strong></div>
+          <div class="resists">
+            <div class="resist em"><i class="resist-icon" aria-hidden="true">✦</i><span>EM</span><b>{escape(format_tank_resistance(final_shield_resistance.get("em")))}</b></div>
+            <div class="resist therm"><i class="resist-icon" aria-hidden="true">♨</i><span>Therm</span><b>{escape(format_tank_resistance(final_shield_resistance.get("therm")))}</b></div>
+            <div class="resist kin"><i class="resist-icon" aria-hidden="true">◈</i><span>Kin</span><b>{escape(format_tank_resistance(final_shield_resistance.get("kin")))}</b></div>
+            <div class="resist exp"><i class="resist-icon" aria-hidden="true">✹</i><span>Exp</span><b>{escape(format_tank_resistance(final_shield_resistance.get("exp")))}</b></div>
+          </div>
+        </div>
+        <div class="telemetry-dashboard">
+
+          <section class="telemetry-section">
+            <div class="telemetry-section-title">
+              <span>RESOURCE USAGE</span>
+              <small>ALL V reference</small>
+            </div>
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">▣</span>
+                <strong>CPU</strong>
+              </div>
+              <div class="resource-values">
+                <b>{escape(format_engine_resource_pair(cpu_all_v_used, cpu_all_v_available, "tf"))}</b>
+                <small>BASE {cpu_value}</small>
+              </div>
+              <div class="resource-gauge"><i style="width:{cpu_usage_pct:.1f}%"></i></div>
+            </div>
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">ϟ</span>
+                <strong>Powergrid</strong>
+              </div>
+              <div class="resource-values">
+                <b>{escape(format_engine_resource_pair(pg_all_v_used, pg_all_v_available, "MW"))}</b>
+                <small>BASE {power_value}</small>
+              </div>
+              <div class="resource-gauge"><i style="width:{pg_usage_pct:.1f}%"></i></div>
+            </div>
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">◈</span>
+                <strong>Drone Bay</strong>
+              </div>
+              <div class="resource-values">
+                <b>{drone_bay_usage_value}</b>
+              </div>
+              <div class="resource-gauge"><i style="width:{drone_usage_pct:.1f}%"></i></div>
+            </div>
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">⌁</span>
+                <strong>Drone Bandwidth</strong>
+              </div>
+              <div class="resource-values">
+                <b>{drone_bandwidth_value}</b>
+              </div>
+              <div class="resource-gauge"><i style="width:{drone_bw_pct:.1f}%"></i></div>
+            </div>
+
+{specialized_resource_html}
+
+            <div class="resource-row">
+              <div class="resource-label">
+                <span class="resource-icon">▤</span>
+                <strong>Cargo Bay</strong>
+              </div>
+              <div class="resource-values">
+                <b>{cargo_usage_value}</b>
+              </div>
+              <div class="resource-gauge"><i style="width:{cargo_usage_pct:.1f}%"></i></div>
+            </div>
+          </section>
+
+          <section class="telemetry-section">
+            <div class="telemetry-section-title">
+              <span>RESISTANCES & EHP</span>
+              <small>OMNI 25 / 25 / 25 / 25</small>
+            </div>
+
+            <div class="resistance-table">
+              <div class="resistance-head resistance-corner">&nbsp;</div>
+              <div class="resistance-head em">EM</div>
+              <div class="resistance-head therm">THERM</div>
+              <div class="resistance-head kin">KIN</div>
+              <div class="resistance-head exp">EXP</div>
+              <div class="resistance-head">EHP</div>
+
+              <div class="resistance-layer">Shield</div>
+              <div>{escape(format_tank_resistance(shield_res.get("em")))}</div>
+              <div>{escape(format_tank_resistance(shield_res.get("therm")))}</div>
+              <div>{escape(format_tank_resistance(shield_res.get("kin")))}</div>
+              <div>{escape(format_tank_resistance(shield_res.get("exp")))}</div>
+              <div class="ehp-cell">{shield_ehp_display}</div>
+
+              <div class="resistance-layer">Armor</div>
+              <div>{escape(format_tank_resistance(armor_res.get("em")))}</div>
+              <div>{escape(format_tank_resistance(armor_res.get("therm")))}</div>
+              <div>{escape(format_tank_resistance(armor_res.get("kin")))}</div>
+              <div>{escape(format_tank_resistance(armor_res.get("exp")))}</div>
+              <div class="ehp-cell">{armor_ehp_display}</div>
+
+              <div class="resistance-layer">Structure</div>
+              <div>{escape(format_tank_resistance(structure_res.get("em")))}</div>
+              <div>{escape(format_tank_resistance(structure_res.get("therm")))}</div>
+              <div>{escape(format_tank_resistance(structure_res.get("kin")))}</div>
+              <div>{escape(format_tank_resistance(structure_res.get("exp")))}</div>
+              <div class="ehp-cell">{structure_ehp_display}</div>
+            </div>
+
+            <div class="ehp-total">
+              <span>TOTAL EHP</span>
+              <strong>{total_ehp_display}</strong>
+            </div>
+          </section>
+
+          <section class="telemetry-split">
+            <div class="telemetry-section">
+              <div class="telemetry-section-title">
+                <span>CAPACITOR</span>
+                <small>ALL V</small>
+              </div>
+              <div class="stat-list">
+                <div><span>Capacity</span><b>{cap_capacity_display}</b></div>
+                <div><span>Recharge</span><b>{cap_recharge_display}</b></div>
+                <div><span>Drain</span><b>{cap_drain_display}</b></div>
+                <div><span>State</span><b>{all_v_cap_state}</b></div>
+              </div>
+            </div>
+
+            <div class="telemetry-section">
+              <div class="telemetry-section-title">
+                <span>REPAIRS</span>
+                <small>OMNI EHP/s</small>
+              </div>
+              <div class="repair-grid">
+                <div>
+                  <span class="repair-icon">◫</span>
+                  <small>Shield</small>
+                  <b>{shield_rep_display}</b>
+                </div>
+                <div>
+                  <span class="repair-icon">◇</span>
+                  <small>Armor</small>
+                  <b>{armor_rep_display}</b>
+                </div>
+                <div>
+                  <span class="repair-icon">⬡</span>
+                  <small>Structure</small>
+                  <b>0,0</b>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="telemetry-section">
+            <div class="telemetry-section-title">
+              <span>TARGETING & MISCELLANEOUS</span>
+              <small>ALL V</small>
+            </div>
+            <div class="misc-grid">
+              <div><span>Targets</span><b>{all_v_targets_display}</b></div>
+              <div><span>Targeting Range</span><b>{all_v_target_range_display} km</b></div>
+              <div><span>Scan Resolution</span><b>{all_v_scan_display} mm</b></div>
+              <div><span>Signature Radius</span><b>{signature_display} m</b></div>
+              <div><span>Speed</span><b>{speed_all_v_display}</b></div>
+              <div><span>Warp Speed</span><b>{warp_speed_display} AU/s</b></div>
+              <div><span>Align Time</span><b>{align_all_v_display} s</b></div>
+              <div><span>Cargo Bay</span><b>{escape(freeborn_fmt_plain(cargo_available, 0))} m³</b></div>
+            </div>
+          </section>
+
+          <div class="telemetry-footnote">
+            <span>Référence corporate : <b>ALL V</b></span>
+            <span>Les valeurs BASE restent visibles lorsqu’elles sont utiles.</span>
+            <span>Le DPS n’est volontairement pas simulé par Freeborn Fittings.</span>
+          </div>
+        </div>
+        {pilot_panel_html}
+      </article>
+    </div>
+  </section>
+
+  <nav class="actionbar" aria-label="Actions du fitting">
+    <button class="action" type="button" onclick="toggleEft()">▣ Afficher EFT</button>
+    <button class="action" type="button" onclick="copyEft()">▤ Copier EFT</button>
+    <button class="action blue" type="button" onclick="exportEft()">⇩ Exporter EFT</button>
+    <button class="action blue" type="button" onclick="copyEditCommand()" title="Copier la commande Discord de modification">✎ Modifier</button>
+    <button class="action green" type="button" onclick="copyApproveCommand()" title="Copier la commande Discord CEO d'approbation">✓ Approuver</button>
+    <button class="action red" type="button" onclick="copyRejectCommand()" title="Copier la commande Discord CEO de refus">✕ Refuser</button>
+  </nav>
+
+  <section class="eft-wrap">
+    <div class="eft-panel" id="eftPanel">
+      <div class="eft-head">
+        <strong>EFT — {safe_ref} • {safe_ship}</strong>
+        <span class="eft-source">SOURCE NEON</span>
+      </div>
+      <pre id="eftText">{safe_eft}</pre>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <span class="motto">Libres par choix • Unis par volonté • Héritiers de notre propre avenir</span>
+    <span class="id">{safe_ref}</span>
+    <span class="version">Freeborn Legacy • Fittings AUTO-HOLDS V1</span>
+  </footer>
+</main>
+
+<div class="toast" id="toast">EFT copié</div>
+
+<script>
+const fitRef = "{safe_ref}";
+const shipName = "{safe_ship}";
+
+function getEft() {{
+  return document.getElementById('eftText').textContent;
+}}
+
+function colorPilotDeltas() {{
+  document.querySelectorAll('.compare-delta').forEach((node) => {{
+    const raw = (node.textContent || '').trim();
+    const better = node.dataset.better || 'higher';
+
+    node.classList.remove(
+      'compare-good',
+      'compare-bad',
+      'compare-neutral'
+    );
+
+    if (!raw || raw === '—' || raw.includes('Identique')) {{
+      node.classList.add(
+        raw.includes('Identique')
+          ? 'compare-good'
+          : 'compare-neutral'
+      );
+      return;
+    }}
+
+    const normalized = raw
+      .replace(',', '.')
+      .replace(/\\s/g, '');
+
+    const match = normalized.match(/^([+-]?\\d+(?:\\.\\d+)?)/);
+
+    if (!match) {{
+      node.classList.add('compare-neutral');
+      return;
+    }}
+
+    const delta = Number(match[1]);
+
+    if (!Number.isFinite(delta) || Math.abs(delta) < 0.0001) {{
+      node.classList.add('compare-good');
+      return;
+    }}
+
+    const favorable =
+      better === 'lower'
+        ? delta < 0
+        : delta > 0;
+
+    node.classList.add(
+      favorable
+        ? 'compare-good'
+        : 'compare-bad'
+    );
+  }});
+}}
+
+document.addEventListener(
+  'DOMContentLoaded',
+  colorPilotDeltas
+);
+
+function copyEditCommand() {{
+  const command = "/fit-modifier ref:{safe_ref}";
+
+  navigator.clipboard.writeText(command).then(() => {{
+    const toast = document.getElementById('toast');
+    toast.textContent = 'Commande /fit-modifier copiée';
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 1800);
+  }}).catch(() => {{
+    window.prompt(
+      'Copie cette commande dans Discord :',
+      command
+    );
+  }});
+}}
+
+function copyFitCommand(command, successMessage) {{
+  navigator.clipboard.writeText(command).then(() => {{
+    const toast = document.getElementById('toast');
+    toast.textContent = successMessage;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 1800);
+  }}).catch(() => {{
+    window.prompt(
+      'Copie cette commande dans Discord :',
+      command
+    );
+  }});
+}}
+
+function copyApproveCommand() {{
+  copyFitCommand(
+    `/fit-approuver ref:${{fitRef}}`,
+    'Commande /fit-approuver copiée — validation CEO requise dans Discord'
+  );
+}}
+
+function copyRejectCommand() {{
+  copyFitCommand(
+    `/fit-refuser ref:${{fitRef}}`,
+    'Commande /fit-refuser copiée — validation CEO requise dans Discord'
+  );
+}}
+
+function toggleEft() {{
+  document.getElementById('eftPanel').classList.toggle('open');
+}}
+async function copyEft() {{
+  const text = getEft();
+  try {{
+    await navigator.clipboard.writeText(text);
+    showToast('EFT copié dans le presse-papiers');
+  }} catch (e) {{
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    showToast('EFT copié dans le presse-papiers');
+  }}
+}}
+function exportEft() {{
+  const blob = new Blob([getEft()], {{type:'text/plain;charset=utf-8'}});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${{fitRef}}-${{shipName}}.txt`.replace(/[^a-z0-9._-]+/gi,'-');
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}}
+function showToast(message) {{
+  const toast = document.getElementById('toast');
+  toast.textContent = message;
+  toast.classList.add('show');
+  window.clearTimeout(window.__fbToast);
+  window.__fbToast = window.setTimeout(() => toast.classList.remove('show'),1800);
+}}
+</script>
+</body>
+</html>'''
+
+
+def freeborn_jita_check_page(token):
+    logo_url = "/assets/logo-freeborn-legacy.png"
+    bg_url = "/assets/bg-space.jpg"
+
+    return f"""<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Freeborn Jita Check</title>
+<link rel="icon" href="{logo_url}">
+<style>
+:root{{--cyan:#35c9ff;--line:#155a78;--gold:#ffc94d;--text:#eefaff}}
+*{{box-sizing:border-box}}
+body{{margin:0;color:var(--text);font-family:"Arial Narrow","Roboto Condensed","Segoe UI",Arial,sans-serif;background:#020912 url("{bg_url}") center/cover fixed;min-height:100vh}}
+.shell{{width:min(1500px,96vw);margin:14px auto;border:1px solid #167da5;background:rgba(1,12,21,.96)}}
+.header{{display:flex;align-items:center;gap:24px;padding:14px 24px;border-bottom:1px solid var(--line)}}
+.logo{{width:72px;height:72px;object-fit:contain}}
+.brand h1{{margin:0;font-size:31px;font-weight:500;letter-spacing:2.5px}} .brand h1 span{{color:var(--gold)}}
+.brand p{{margin:3px 0 0;color:#9adfff;letter-spacing:1.8px;font-size:12px;text-transform:uppercase}}
+.badge{{margin-left:auto;border:1px solid var(--gold);padding:10px 16px;color:var(--gold);font-size:12px;font-weight:600;letter-spacing:1px}}
+.bar{{padding:8px 18px;border-bottom:1px solid var(--line);font-size:10px;color:#55d6ff;letter-spacing:1.4px}}
+.panel{{margin:12px;border:1px solid var(--line);background:rgba(1,14,24,.9)}}
+.panel-title{{padding:9px 12px;border-bottom:1px solid var(--line);font-size:15px;font-weight:600;letter-spacing:1.1px}}
+.head,.row{{display:grid;grid-template-columns:42px minmax(300px,1fr) 200px 270px 42px;gap:8px;align-items:center}}
+.head{{padding:12px 14px 6px;color:#5ecfff;font-size:10px;letter-spacing:1.2px}} .row{{padding:6px 14px}}
+.num{{text-align:center;color:#54d9ff;font-weight:700}} .item-wrap{{position:relative}}
+.item-input{{width:100%;height:44px;padding:0 12px 0 54px;background:#020a12;border:1px solid #146586;color:#fff;font-size:14px;outline:none}}
+.icon{{position:absolute;left:7px;top:5px;width:34px;height:34px;object-fit:contain;display:none}}
+.suggestions{{position:absolute;left:0;right:0;top:45px;z-index:20;background:#03111d;border:1px solid #167da5;max-height:260px;overflow:auto;display:none}}
+.suggestion{{display:flex;align-items:center;gap:10px;padding:8px;cursor:pointer;border-bottom:1px solid rgba(22,125,165,.22)}} .suggestion:hover{{background:#082238}}
+.suggestion img{{width:30px;height:30px}}
+.value{{height:44px;border:1px solid #155a78;background:#020a12;display:flex;align-items:center;justify-content:flex-end;padding:0 12px;font-family:"Roboto Mono","Consolas",monospace;font-size:14px;font-variant-numeric:tabular-nums}}
+.price{{color:var(--gold)}} .remove{{height:44px;border:1px solid #9d3037;background:#13070a;color:#ff6d72;cursor:pointer}}
+.actions{{padding:12px 14px}} .add{{border:1px solid #c69d38;background:rgba(198,157,56,.08);color:#f6cc63;padding:9px 14px;cursor:pointer;font-weight:600}}
+.status{{margin:0 14px 14px;border-left:2px solid var(--cyan);padding:10px;background:#061b29;color:#92dffb;font-size:11px}}
+.footer{{display:flex;justify-content:space-between;padding:9px 14px;border-top:1px solid var(--line);font-size:9px;color:#5bd9ff;letter-spacing:1.1px}}
+</style>
+</head>
+<body>
+<div class="shell">
+<div class="header"><img class="logo" src="{logo_url}"><div class="brand"><h1>FREEBORN <span>JITA CHECK</span></h1><p>Outil CEO • Jita 4-4 • Sell</p></div><div class="badge">CEO ONLY</div></div>
+<div class="bar">FREEBORN LEGACY // OUTILS // JITA CHECK // JITA SELL</div>
+<div class="panel">
+<div class="panel-title">ⓙ CONSULTATION DES PRIX JITA</div>
+<div class="head"><div>#</div><div>ITEM EVE</div><div>VOLUME UNITAIRE</div><div>PRIX JITA SELL</div><div></div></div>
+<div id="rows"></div>
+<div class="actions"><button class="add" id="add">+ Ajouter un item</button></div>
+<div class="status" id="status">Recherche EVE prête • prix Jita 4-4 SELL • aucune donnée n'est enregistrée.</div>
+</div>
+<div class="footer"><span>LIBRES PAR CHOIX • UNIS PAR VOLONTÉ</span><span>FREEBORN JITA CHECK</span><span>CEO TOOL</span></div>
+</div>
+<script>
+const token={json.dumps(str(token))};
+const rows=document.getElementById('rows'),status=document.getElementById('status');
+let seq=0;
+const isk=v=>v==null?'—':Number(v).toLocaleString('fr-FR',{{minimumFractionDigits:2,maximumFractionDigits:2}})+' ISK';
+const vol=v=>v==null?'—':Number(v).toLocaleString('fr-FR',{{minimumFractionDigits:0,maximumFractionDigits:2}})+' m³';
+const icon=id=>'https://images.evetech.net/types/'+id+'/icon?size=64';
+function renumber(){{[...document.querySelectorAll('.row')].forEach((r,i)=>r.querySelector('.num').textContent=i+1)}}
+function addRow(){{
+ if(document.querySelectorAll('.row').length>=10)return;
+ seq++; const r=document.createElement('div'); r.className='row';
+ r.innerHTML=`<div class="num">${{seq}}</div><div class="item-wrap"><img class="icon"><input class="item-input" placeholder="Ex. Golem, Tritanium, Endurance..." autocomplete="off"><div class="suggestions"></div></div><div class="value volume">—</div><div class="value price">—</div><button class="remove">×</button>`;
+ rows.appendChild(r);
+ const input=r.querySelector('.item-input'),box=r.querySelector('.suggestions'),img=r.querySelector('.icon'),volume=r.querySelector('.volume'),price=r.querySelector('.price');
+ let timer;
+ input.oninput=()=>{{clearTimeout(timer);const q=input.value.trim();volume.textContent='—';price.textContent='—';img.style.display='none';if(q.length<2){{box.style.display='none';return}}timer=setTimeout(async()=>{{
+   try{{const rr=await fetch('/market/api/search?q='+encodeURIComponent(q)+'&token='+encodeURIComponent(token));const d=await rr.json();box.innerHTML='';
+   (d.items||[]).forEach(item=>{{const s=document.createElement('div');s.className='suggestion';s.innerHTML=`<img src="${{item.icon_url||icon(item.type_id)}}"><span>${{item.name}}</span>`;
+   s.onclick=async()=>{{input.value=item.name;box.style.display='none';img.src=item.icon_url||icon(item.type_id);img.style.display='block';volume.textContent=vol(item.volume_m3);price.textContent='Chargement…';
+   try{{const pr=await fetch('/market/api/price/'+item.type_id+'?token='+encodeURIComponent(token));const pd=await pr.json();if(!pr.ok)throw new Error();price.textContent=isk(pd.jita_sell);status.textContent=item.name+' • Jita SELL actualisé.'}}catch(e){{price.textContent='Erreur'}}}};box.appendChild(s)}});box.style.display=(d.items||[]).length?'block':'none'}}catch(e){{status.textContent='Recherche EVE indisponible.'}}}},180)}};
+ r.querySelector('.remove').onclick=()=>{{r.remove();renumber()}};
+}}
+document.getElementById('add').onclick=addRow;addRow();
+</script>
+</body></html>"""
+
+
+@app.route("/jita-check")
+def freeborn_jita_check():
+    token = request.args.get("token", "")
+
+    try:
+        freeborn_market_validate_token(token)
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return freeborn_web_page(
+            "Lien Freeborn Jita Check invalide",
+            "Ce lien est invalide ou a expiré. Relance /prix-jita sur Discord.",
+            status="error",
+        ), 403
+
+    try:
+        freeborn_jita_check_ensure_volumes()
+    except Exception as error:
+        print(
+            "Freeborn Jita Check SDE volume sync warning:",
+            repr(error),
+        )
+
+    return freeborn_jita_check_page(token)
+
+
+@app.route("/market/nouveau")
+def freeborn_market_new_page():
+    token = request.args.get(
+        "token",
+        "",
+    )
+
+    try:
+        market_context = (
+            freeborn_market_validate_token(
+                token
+            )
+        )
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return freeborn_web_page(
+            "Lien Freeborn Market invalide",
+            (
+                "Ce lien est invalide ou a expiré. "
+                "Relance /achat, /vente, /achat-corp ou /vente-corp sur Discord."
+            ),
+            status="error",
+        ), 403
+
+    return freeborn_market_phase2_page(
+        market_context,
+        token,
+    )
+
+
+@app.route("/market/api/search")
+def freeborn_market_api_search():
+    token = request.args.get(
+        "token",
+        "",
+    )
+
+    query = request.args.get(
+        "q",
+        "",
+    )
+
+    try:
+        freeborn_market_validate_token(
+            token
+        )
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return jsonify({
+            "error":
+                "invalid_token",
+        }), 403
+
+    try:
+        items = freeborn_market_search_types(
+            query
+        )
+    except Exception as error:
+        print(
+            "Freeborn Market SDE search error [P2D]:",
+            repr(error),
+        )
+
+        return jsonify({
+            "error":
+                "search_failed",
+            "items":
+                [],
+        }), 502
+
+    return jsonify({
+        "items":
+            items,
+    })
+
+
+@app.route("/market/api/price/<int:type_id>")
+def freeborn_market_api_price(type_id):
+    token = request.args.get(
+        "token",
+        "",
+    )
+
+    try:
+        freeborn_market_validate_token(
+            token
+        )
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return jsonify({
+            "error":
+                "invalid_token",
+        }), 403
+
+    try:
+        data = freeborn_market_jita_price(
+            type_id
+        )
+    except Exception as error:
+        print(
+            "Freeborn Market Jita price error:",
+            type_id,
+            repr(error),
+        )
+
+        return jsonify({
+            "error":
+                "jita_price_failed",
+        }), 502
+
+    return jsonify(
+        data
+    )
+
+
+@app.route(
+    "/market/api/validate",
+    methods=["POST"],
+)
+def freeborn_market_api_validate():
+    token = request.args.get(
+        "token",
+        "",
+    )
+
+    try:
+        market_context = (
+            freeborn_market_validate_token(
+                token
+            )
+        )
+    except (
+        BadSignature,
+        SignatureExpired,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return jsonify({
+            "ok":
+                False,
+            "error":
+                "invalid_token",
+            "message":
+                "Le lien Freeborn Market est invalide ou a expiré.",
+        }), 403
+
+    if not str(
+        DISCORD_MARKET_CHANNEL_ID
+        or ""
+    ).strip():
+        return jsonify({
+            "ok":
+                False,
+            "error":
+                "market_channel_not_configured",
+            "message":
+                (
+                    "DISCORD_MARKET_CHANNEL_ID n'est pas configuré dans Render."
+                ),
+        }), 503
+
+    payload = (
+        request.get_json(
+            silent=True
+        )
+        or {}
+    )
+
+    market_id = None
+    publication = None
+
+    try:
+        # 1. Freeze all Jita references at one common validation timestamp.
+        validated = (
+            freeborn_market_validate_submission(
+                market_context,
+                payload,
+            )
+        )
+
+        # 2. Persist Neon.
+        market_id = (
+            freeborn_market_insert_order(
+                market_context,
+                validated,
+            )
+        )
+
+        # 3. Create Discord forum post.
+        publication = (
+            freeborn_market_publish_discord(
+                market_id,
+                market_context,
+                validated,
+            )
+        )
+
+        # 4. Save the exact Discord linkage.
+        freeborn_market_save_publication(
+            market_context[
+                "guild_id"
+            ],
+            market_id,
+            publication[
+                "channel_id"
+            ],
+            publication[
+                "message_id"
+            ],
+            publication[
+                "thread_id"
+            ],
+        )
+
+        ref = format_market_reference(
+            market_id
+        )
+
+        print(
+            "Freeborn Market order created [P3]:",
+            ref,
+            market_context[
+                "order_type"
+            ],
+            market_context[
+                "owner_scope"
+            ],
+            "items=",
+            len(
+                validated[
+                    "items"
+                ]
+            ),
+            "total=",
+            validated[
+                "total_isk"
+            ],
+            "thread=",
+            publication[
+                "thread_id"
+            ],
+        )
+
+        return jsonify({
+            "ok":
+                True,
+            "reference":
+                ref,
+            "market_id":
+                market_id,
+            "total_isk_display":
+                freeborn_market_format_isk(
+                    validated[
+                        "total_isk"
+                    ]
+                ),
+            "jita_snapshot_at":
+                validated[
+                    "jita_snapshot_at"
+                ].isoformat(),
+            "discord_thread_id":
+                publication[
+                    "thread_id"
+                ],
+        })
+
+    except ValueError as error:
+        message = str(
+            error
+        )
+
+        if message.startswith(
+            "jita_price_missing:"
+        ):
+            missing_name = (
+                message.split(
+                    ":",
+                    1,
+                )[1]
+            )
+            friendly = (
+                f"Aucun prix Jita de référence disponible pour {missing_name}."
+            )
+        else:
+            friendly = (
+                "Annonce invalide. Vérifie les items, quantités, prix et l'ajustement."
+            )
+
+        print(
+            "Freeborn Market validation rejected [P3]:",
+            repr(error),
+        )
+
+        return jsonify({
+            "ok":
+                False,
+            "error":
+                "validation_failed",
+            "message":
+                friendly,
+        }), 400
+
+    except Exception as error:
+        print(
+            "Freeborn Market validation/publication failed [P3]:",
+            repr(error),
+        )
+
+        # Compensating rollback:
+        # If Discord publication failed after Neon insertion, remove the order
+        # so validation never leaves a database-only announcement.
+        if (
+            market_id is not None
+            and publication is None
+        ):
+            try:
+                freeborn_market_delete_order(
+                    market_context[
+                        "guild_id"
+                    ],
+                    market_id,
+                )
+            except Exception as rollback_error:
+                print(
+                    "Freeborn Market Neon rollback failed [P3]:",
+                    repr(
+                        rollback_error
+                    ),
+                )
+
+        # If publication existed but saving the linkage failed, delete the
+        # Discord thread as compensation before deleting Neon.
+        if (
+            market_id is not None
+            and publication is not None
+        ):
+            try:
+                requests.delete(
+                    (
+                        f"{DISCORD_API}/channels/"
+                        f"{publication['thread_id']}"
+                    ),
+                    headers=discord_bot_headers(),
+                    timeout=12,
+                )
+            except Exception as discord_rollback_error:
+                print(
+                    "Freeborn Market Discord rollback failed [P3]:",
+                    repr(
+                        discord_rollback_error
+                    ),
+                )
+
+            try:
+                freeborn_market_delete_order(
+                    market_context[
+                        "guild_id"
+                    ],
+                    market_id,
+                )
+            except Exception as rollback_error:
+                print(
+                    "Freeborn Market Neon rollback failed [P3]:",
+                    repr(
+                        rollback_error
+                    ),
+                )
+
+        return jsonify({
+            "ok":
+                False,
+            "error":
+                "market_creation_failed",
+            "message":
+                (
+                    "La création de l'annonce Freeborn Market a échoué. "
+                    "Aucune annonce incomplète ne doit être conservée."
+                ),
+        }), 500
+
+
+@app.route("/fittings/<fit_ref>")
+def fitting_web_card(fit_ref):
+    token = request.args.get("token", "")
+
+    try:
+        fit_id = parse_fit_reference(fit_ref)
+        token_guild_id, token_fit_id = read_fit_web_token(token)
+    except (ValueError, BadSignature, SignatureExpired, KeyError, TypeError):
+        return freeborn_web_page(
+            "Lien de fitting invalide",
+            "Ce lien Freeborn Fittings est invalide ou incomplet.",
+            status="error",
+        ), 403
+
+    if token_guild_id != str(DISCORD_GUILD_ID) or token_fit_id != fit_id:
+        return freeborn_web_page(
+            "Accès refusé",
+            "Ce lien ne correspond pas à ce fitting Freeborn.",
+            status="error",
+        ), 403
+
+    fit = get_fit(token_guild_id, fit_id)
+
+    if not fit:
+        return freeborn_web_page(
+            "Fitting introuvable",
+            f"{format_fit_reference(fit_id)} n'existe plus dans Freeborn.",
+            status="warning",
+        ), 404
+
+    pilot_profile = None
+    pilot_token = request.args.get("pilot", "")
+
+    if pilot_token:
+
+        try:
+
+            pilot_payload = fit_pilot_serializer.loads(
+                pilot_token,
+                max_age=1800,
+            )
+
+            if (
+                str(pilot_payload.get("guild_id"))
+                == str(token_guild_id)
+                and
+                int(pilot_payload.get("fit_id"))
+                == int(fit_id)
+            ):
+
+                pilot_profile = get_guild_main_by_character_id_v3(
+                    token_guild_id,
+                    int(pilot_payload["character_id"]),
+                )
+
+        except (
+            BadSignature,
+            SignatureExpired,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+
+            pilot_profile = None
+
+    return freeborn_fitting_web_page(
+        fit,
+        fit_web_token=token,
+        pilot_profile=pilot_profile,
+    )
+
+
+@app.route("/fittings/pilot/<fit_ref>")
+def fitting_pilot_start(fit_ref):
+    """
+    Start the voluntary EVE SSO flow used by
+    'Tester avec mon personnage'.
+    """
+    token = request.args.get("token", "")
+
+    try:
+        fit_id = parse_fit_reference(fit_ref)
+        token_guild_id, token_fit_id = read_fit_web_token(token)
+    except (ValueError, BadSignature, SignatureExpired, KeyError, TypeError):
+        return freeborn_web_page(
+            "Lien de fitting invalide",
+            "Ce lien Freeborn Fittings est invalide ou incomplet.",
+            status="error",
+        ), 403
+
+    if (
+        token_guild_id != str(DISCORD_GUILD_ID)
+        or token_fit_id != fit_id
+    ):
+        return freeborn_web_page(
+            "Accès refusé",
+            "Ce lien ne correspond pas à ce fitting Freeborn.",
+            status="error",
+        ), 403
+
+    if not get_fit(token_guild_id, fit_id):
+        return freeborn_web_page(
+            "Fitting introuvable",
+            f"{format_fit_reference(fit_id)} n'existe plus dans Freeborn.",
+            status="warning",
+        ), 404
+
+    state = state_serializer.dumps({
+        "guild_id": str(token_guild_id),
+        "verification_type": "fit_pilot",
+        "fit_id": int(fit_id),
+        "fit_web_token": str(token),
+    })
+
+    params = {
+        "response_type": "code",
+        "redirect_uri": EVE_CALLBACK_URL,
+        "client_id": EVE_CLIENT_ID,
+        "state": state,
+        "scope": " ".join(FREEBORN_EVE_SCOPES),
+    }
+
+    return redirect(
+        f"{EVE_AUTHORIZE_URL}?{urlencode(params)}"
+    )
+
+
+# ============================================================
 # HOME
 # ============================================================
 
 @app.route("/")
 def home():
 
-    return """
-    <h1>Freeborn Verify</h1>
-
-    <p>
-    Service de vérification EVE Online
-    pour Freeborn Legacy.
-    </p>
-
-    <p>
-    Freeborn Verify est opérationnel.
-    </p>
-    """
+    return freeborn_web_page(
+        "Service opérationnel",
+        "Freeborn assure la vérification EVE Online et le parcours d'intégration de Freeborn Legacy.",
+        status="success",
+    )
 
 
 # ============================================================
@@ -3415,11 +28813,11 @@ def health():
             "ok",
 
         "service":
-            "freeborn-verify",
+            "freeborn",
     }
 
 
-@app.route("/db-health")
+@app.route("/base-statut")
 def db_health():
 
     try:
@@ -3531,6 +28929,48 @@ def interactions():
         )
 
     # ========================================================
+    # MODAL SUBMIT — FREEBORN FITTINGS
+    # ========================================================
+
+    if (
+        data["type"]
+        ==
+        5
+    ):
+        modal_custom_id = str(
+            (
+                data.get(
+                    "data"
+                )
+                or {}
+            ).get(
+                "custom_id"
+            )
+            or ""
+        )
+
+        if modal_custom_id == "freeborn_srp_create":
+            return handle_srp_modal_submit(
+                data
+            )
+
+        if (
+            modal_custom_id.startswith(
+                "freeborn_op_create:"
+            )
+            or modal_custom_id.startswith(
+                "freeborn_op_edit:"
+            )
+        ):
+            return handle_op_corp_modal_submit(
+                data
+            )
+
+        return handle_fit_modal_submit(
+            data
+        )
+
+    # ========================================================
     # AUTOCOMPLETE
     # ========================================================
 
@@ -3612,17 +29052,1106 @@ def interactions():
             },
         })
 
+    # Load the V3 guild configuration once for all command handlers
+    # that need dedicated channels / per-guild settings.
+    guild_config = get_guild_config(
+        guild_id
+    )
+
+    if (
+        not guild_config
+        or
+        not guild_config[6]
+    ):
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "⛔ Ce serveur n'est pas "
+                    "configuré pour Freeborn.",
+
+                **interaction_response_flags_payload(data),
+            },
+        })
+
+    # ========================================================
+    # FREEBORN SRP
+    # ========================================================
+
+    if command_name == "srp":
+        # Accessible to members through normal Discord command permissions.
+        # The bot only blocks obvious pre-member states.
+        actor_roles = interaction_member_role_ids(
+            data
+        )
+
+        srp_member_role_ids = configured_role_ids(
+            DISCORD_MEMBER_ROLE_ID,
+            DISCORD_VETERAN_ROLE_ID,
+            DISCORD_FLEET_COMMANDER_ROLE_ID,
+            DISCORD_OFFICER_ROLE_ID,
+            DISCORD_HR_ROLE_ID,
+            DISCORD_DIRECTION_ROLE_ID,
+            DISCORD_HIGH_COUNCIL_ROLE_ID,
+            DISCORD_CEO_ROLE_ID,
+        )
+
+        if not (
+            actor_roles
+            & srp_member_role_ids
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **Accès refusé.**\n"
+                            "La commande `/srp` est réservée aux membres de la corporation."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                9,
+            "data": {
+                "custom_id":
+                    "freeborn_srp_create",
+                "title":
+                    "Freeborn — Demande SRP",
+                "components": [
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Vaisseau perdu / Nom du fit Corpo",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_ship_fit",
+                            "style":
+                                1,
+                            "min_length":
+                                2,
+                            "max_length":
+                                120,
+                            "required":
+                                True,
+                            "placeholder":
+                                "Ex. Golem — Ironclad / Doctrine PvP...",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Lien zKillboard",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_zkill",
+                            "style":
+                                1,
+                            "min_length":
+                                20,
+                            "max_length":
+                                300,
+                            "required":
+                                True,
+                            "placeholder":
+                                "https://zkillboard.com/kill/...",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Opération / Fleet Commander",
+                        "description":
+                            "Facultatif",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_operation_fc",
+                            "style":
+                                1,
+                            "max_length":
+                                120,
+                            "required":
+                                False,
+                            "placeholder":
+                                "Ex. OP C3 / FC Le Gardien",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Circonstances",
+                        "description":
+                            "Quelques lignes maximum",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_circumstances",
+                            "style":
+                                2,
+                            "min_length":
+                                5,
+                            "max_length":
+                                1000,
+                            "required":
+                                True,
+                            "placeholder":
+                                "Explique brièvement les circonstances de la perte...",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Informations complémentaires",
+                        "description":
+                            "Facultatif",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "srp_extra",
+                            "style":
+                                2,
+                            "max_length":
+                                1000,
+                            "required":
+                                False,
+                            "placeholder":
+                                "Informations utiles si nécessaire...",
+                        },
+                    },
+                ],
+            },
+        })
+
+    # ========================================================
+    # FREEBORN OP CORP
+    # ========================================================
+
+    if command_name == "op-corp":
+        if str(
+            data.get(
+                "channel_id",
+                "",
+            )
+        ) != str(
+            DISCORD_OP_CORP_COMMAND_CHANNEL_ID
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **/op-corp doit être lancée dans le "
+                            "salon de gestion dédié.**\n"
+                            f"Utilise <#{DISCORD_OP_CORP_COMMAND_CHANNEL_ID}>."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        if not (
+            interaction_member_role_ids(
+                data
+            )
+            & OP_CORP_CREATOR_ROLE_IDS
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **Accès refusé**\n\n"
+                            "La création d'OP Corp est réservée aux rôles "
+                            "**CEO**, **Direction**, **Officier** et "
+                            "**Fleet Commander**."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        op_type = None
+
+        for option in (
+            (
+                data.get(
+                    "data"
+                )
+                or {}
+            ).get(
+                "options",
+                [],
+            )
+            or []
+        ):
+            if option.get(
+                "name"
+            ) == "type":
+                op_type = str(
+                    option.get(
+                        "value"
+                    )
+                    or ""
+                ).strip()
+
+                break
+
+        if op_type not in {
+            "mining",
+            "pve",
+            "pvp",
+            "other",
+        }:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "❌ Type d'OP invalide ou manquant.",
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                9,
+            "data": {
+                "custom_id":
+                    f"freeborn_op_create:{op_type}",
+                "title":
+                    "Freeborn — Nouvelle OP Corp",
+                "components": [
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Nom de l'OP",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_title",
+                            "style":
+                                1,
+                            "min_length":
+                                2,
+                            "max_length":
+                                80,
+                            "required":
+                                True,
+                            "placeholder":
+                                "Ex. Mining Night, C3 PvE, Roam PvP...",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Date",
+                        "description":
+                            "Format JJ/MM/AAAA",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_date",
+                            "style":
+                                1,
+                            "min_length":
+                                10,
+                            "max_length":
+                                10,
+                            "required":
+                                True,
+                            "placeholder":
+                                "16/08/2026",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Début de l'OP",
+                        "description":
+                            "Format HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_start",
+                            "style":
+                                1,
+                            "min_length":
+                                5,
+                            "max_length":
+                                5,
+                            "required":
+                                True,
+                            "placeholder":
+                                "20:30",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Fin de l'OP",
+                        "description":
+                            "Format HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_end",
+                            "style":
+                                1,
+                            "min_length":
+                                5,
+                            "max_length":
+                                5,
+                            "required":
+                                True,
+                            "placeholder":
+                                "22:30",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "FC / Doctrine / Consignes",
+                        "description":
+                            "Facultatif — utilise FC:, Doctrine: et Consignes:",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "op_details",
+                            "style":
+                                2,
+                            "required":
+                                False,
+                            "max_length":
+                                1000,
+                            "placeholder":
+                                (
+                                    "FC: Le Gardien\n"
+                                    "Doctrine: Golem / Logi\n"
+                                    "Consignes: rendez-vous 20:20..."
+                                ),
+                        },
+                    },
+                ],
+            },
+        })
+
+    # ========================================================
+    # FREEBORN JITA CHECK — CEO ONLY
+    # ========================================================
+
+    if command_name == "prix-jita":
+        if not interaction_has_any_role(
+            data,
+            configured_role_ids(DISCORD_CEO_ROLE_ID),
+        ):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Freeborn Jita Check — accès refusé**\n\n"
+                        "Cet outil est exclusivement réservé au **CEO**."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        token = create_market_web_token(
+            guild_id,
+            discord_user_id,
+            "sell",
+            "member",
+        )
+
+        url = (
+            f"{PUBLIC_BASE_URL}/jita-check?"
+            + urlencode({"token": token})
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    "📊 **FREEBORN JITA CHECK — CEO**\n\n"
+                    "Prix **Jita SELL** + **volume unitaire** des items EVE.\n"
+                    "Aucun calcul, aucune annonce Neon et aucune publication Discord."
+                ),
+                "flags": 64,
+                "components": [{
+                    "type": 1,
+                    "components": [{
+                        "type": 2,
+                        "style": 5,
+                        "label": "Ouvrir Jita Check",
+                        "emoji": {"name": "📊"},
+                        "url": url,
+                    }],
+                }],
+            },
+        })
+
+    # ========================================================
+    # FREEBORN MARKET
+    # /achat, /vente, /achat-corp, /vente-corp
+    # ========================================================
+
+    if command_name in {
+        "achat",
+        "vente",
+        "achat-corp",
+        "vente-corp",
+    }:
+        is_corp = command_name.endswith(
+            "-corp"
+        )
+
+        if is_corp:
+            allowed = interaction_has_any_role(
+                data,
+                MARKET_CORP_ROLE_IDS,
+            )
+
+            if not allowed:
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": (
+                            "⛔ **Freeborn Market — accès refusé**\n\n"
+                            "Les annonces officielles de corporation sont "
+                            "réservées à la **Direction**, au **Haut Conseil** "
+                            "et au **CEO**."
+                        ),
+                        "flags": 64,
+                    },
+                })
+        else:
+            allowed = interaction_has_any_role(
+                data,
+                MARKET_MEMBER_ROLE_IDS,
+            )
+
+            if not allowed:
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content": (
+                            "⛔ **Freeborn Market — accès refusé**\n\n"
+                            "Les annonces personnelles sont réservées "
+                            "aux membres Freeborn."
+                        ),
+                        "flags": 64,
+                    },
+                })
+
+        order_type = (
+            "buy"
+            if command_name.startswith(
+                "achat"
+            )
+            else "sell"
+        )
+
+        owner_scope = (
+            "corporation"
+            if is_corp
+            else "member"
+        )
+
+        market_url = build_market_web_url(
+            guild_id,
+            discord_user_id,
+            order_type,
+            owner_scope,
+        )
+
+        operation_label = (
+            "ACHAT"
+            if order_type == "buy"
+            else "VENTE"
+        )
+
+        scope_label = (
+            "CORPORATION"
+            if owner_scope == "corporation"
+            else "MEMBRE"
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"🛒 **FREEBORN MARKET — {operation_label} {scope_label}**\n\n"
+                    "Ouvre la page Freeborn Market pour préparer ton annonce.\n"
+                    f"Limite actuelle : **{FREEBORN_MARKET_MAX_LINES} lignes maximum**.\n"
+                    "L'ajustement de prix sera **global à toute l'annonce**."
+                ),
+                "flags": 64,
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 2,
+                                "style": 5,
+                                "label": "Ouvrir Freeborn Market",
+                                "emoji": {
+                                    "name": "🛒"
+                                },
+                                "url": market_url,
+                            },
+                        ],
+                    },
+                ],
+            },
+        })
+
+    # ========================================================
+    # FREEBORN FITTINGS — CATEGORY SECURITY GATE
+    # All /fit-* commands are forbidden inside Diplomatie.
+    # This applies even to the CEO / Discord administrators.
+    # ========================================================
+
+    if str(command_name).lower().startswith("fit-"):
+        diplomacy_denial = ensure_fitting_channel_allowed(
+            data
+        )
+
+        if diplomacy_denial is not None:
+            return diplomacy_denial
+
+    # ========================================================
+    # /fit-liste — FREEBORN FITTINGS
+    # ========================================================
+
+    if command_name == "fit-liste":
+        if not interaction_has_any_role(data, FITTING_VIEWER_ROLE_IDS):
+            return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": build_fit_list_message(guild_id),
+                "flags": 64,
+            },
+        })
+
+    # ========================================================
+    # /fit-afficher — FREEBORN FITTINGS
+    # Public corporation card in the current channel.
+    # ========================================================
+
+    if command_name == "fit-afficher":
+        if not interaction_has_any_role(data, FITTING_VIEWER_ROLE_IDS):
+            return jsonify({"type": 4, "data": {"content": "⛔ Accès réservé aux membres Freeborn.", "flags": 64}})
+
+        fit_ref = None
+        for option in data["data"].get("options", []):
+            if option.get("name") == "ref":
+                fit_ref = option.get("value")
+                break
+
+        try:
+            fit_id = parse_fit_reference(fit_ref)
+        except ValueError as error:
+            return jsonify({"type": 4, "data": {"content": f"❌ {error}", "flags": 64}})
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({"type": 4, "data": {"content": f"❌ {format_fit_reference(fit_id)} n'existe pas dans Freeborn.", "flags": 64}})
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "embeds": [build_fit_embed(fit)],
+                "components": build_fit_components(fit["fit_id"], guild_id),
+                "flags": 64,
+            },
+        })
+
+    # ========================================================
+    # /fit-approuver + /fit-refuser — FREEBORN FITTINGS
+    # 4T-C: CEO only + explicit confirmation.
+    # PROPOSÉ -> APPROUVÉ or PROPOSÉ -> REFUSÉ.
+    # ========================================================
+
+    if command_name in {"fit-approuver", "fit-refuser"}:
+        if not interaction_has_any_role(data, FITTING_MANAGER_ROLE_IDS):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Accès refusé**\n\n"
+                        "Approuver ou refuser un fitting est réservé au **CEO**."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        fit_ref = None
+        for option in data["data"].get("options", []):
+            if option.get("name") == "ref":
+                fit_ref = option.get("value")
+                break
+
+        try:
+            fit_id = parse_fit_reference(fit_ref)
+        except ValueError as error:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": f"❌ {error}",
+                    "flags": 64,
+                },
+            })
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": f"❌ {format_fit_reference(fit_id)} n'existe pas dans Freeborn.",
+                    "flags": 64,
+                },
+            })
+
+        current_status = str(fit.get("status") or "").lower()
+        if current_status != "proposed":
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"ℹ️ **Aucune modification**\n\n"
+                        f"{format_fit_reference(fit_id)} est déjà au statut "
+                        f"{fit_status_label(current_status)}.\n"
+                        "Seul un fit **PROPOSÉ** peut être approuvé ou refusé."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        actor_user_id = str(data["member"]["user"]["id"])
+        new_status = "approved" if command_name == "fit-approuver" else "rejected"
+        token = create_fit_status_token(fit_id, actor_user_id, new_status)
+
+        action_label = "APPROUVER" if new_status == "approved" else "REFUSER"
+        action_emoji = "🟢" if new_status == "approved" else "🔴"
+        confirm_style = 3 if new_status == "approved" else 4
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"⚠️ **CONFIRMATION — {action_label} {format_fit_reference(fit_id)} ?**\n\n"
+                    f"**{fit['ship_name']} — {fit['name']}**\n"
+                    f"Statut actuel : {fit_status_label(fit['status'])}\n\n"
+                    f"{action_emoji} Cette action fera passer ce fit de **PROPOSÉ** à "
+                    f"**{'FREEBORN APPROVED' if new_status == 'approved' else 'REFUSÉ'}**.\n"
+                    f"L'identifiant {format_fit_reference(fit_id)} sera conservé."
+                ),
+                "flags": 64,
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 2,
+                                "style": confirm_style,
+                                "label": f"Confirmer : {action_label}",
+                                "custom_id": f"fit_status_yes:{token}",
+                            },
+                            {
+                                "type": 2,
+                                "style": 2,
+                                "label": "Annuler",
+                                "custom_id": f"fit_status_no:{token}",
+                            },
+                        ],
+                    },
+                ],
+            },
+        })
+
+    # ========================================================
+    # /fit-modifier — FREEBORN FITTINGS
+    # Update the SAME database record / SAME FREE-xxxx.
+    # ========================================================
+
+    if command_name == "fit-modifier":
+        fit_ref = None
+
+        for option in data["data"].get(
+            "options",
+            [],
+        ):
+            if option.get("name") == "ref":
+                fit_ref = option.get("value")
+                break
+
+        try:
+            fit_id = parse_fit_reference(
+                fit_ref
+            )
+        except ValueError as error:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        f"❌ {error}",
+                    "flags": 64,
+                },
+            })
+
+        fit = get_fit(
+            guild_id,
+            fit_id,
+        )
+
+        if not fit:
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        f"❌ {format_fit_reference(fit_id)} "
+                        "n'existe pas dans Freeborn."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        if not can_edit_fit(
+            data,
+            fit,
+        ):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Modification refusée**\n\n"
+                        "Fleet Commander / Direction / Haut Conseil : "
+                        "uniquement leur propre fit encore PROPOSÉ.\n"
+                        "CEO : modification autorisée sur tous les fits."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        return jsonify(
+            build_fit_edit_modal(
+                fit
+            )
+        )
+
+    # ========================================================
+    # /fit-supprimer — FREEBORN FITTINGS
+    # Real deletion from Neon after confirmation.
+    # ========================================================
+
+    if command_name == "fit-supprimer":
+        fit_ref = None
+        for option in data["data"].get("options", []):
+            if option.get("name") == "ref":
+                fit_ref = option.get("value")
+                break
+
+        try:
+            fit_id = parse_fit_reference(fit_ref)
+        except ValueError as error:
+            return jsonify({"type": 4, "data": {"content": f"❌ {error}", "flags": 64}})
+
+        fit = get_fit(guild_id, fit_id)
+        if not fit:
+            return jsonify({"type": 4, "data": {"content": f"❌ {format_fit_reference(fit_id)} n'existe pas dans Freeborn.", "flags": 64}})
+
+        if not can_delete_fit(data, fit):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Suppression refusée**\n\n"
+                        "La suppression définitive d’un fitting est réservée exclusivement au CEO."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        token = create_fit_delete_token(fit["fit_id"], discord_user_id)
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    f"⚠️ **Supprimer définitivement {format_fit_reference(fit['fit_id'])} ?**\n\n"
+                    f"Vaisseau : **{fit['ship_name']}**\n"
+                    f"Fit : **{fit['name']}**\n\n"
+                    "Cette action supprimera d'abord le post Discord lié, "
+                    "puis supprimera réellement le fitting de Neon."
+                ),
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 2,
+                                "style": 4,
+                                "label": "Supprimer définitivement",
+                                "custom_id": f"fit_del_yes:{token}",
+                            },
+                            {
+                                "type": 2,
+                                "style": 2,
+                                "label": "Annuler",
+                                "custom_id": f"fit_del_no:{token}",
+                            },
+                        ],
+                    },
+                ],
+                "flags": 64,
+            },
+        })
+
+    # ========================================================
+    # /fit-creer — FREEBORN FITTINGS
+    # ========================================================
+
+    if command_name == "fit-creer":
+
+        if not interaction_has_any_role(
+            data,
+            FITTING_CREATOR_ROLE_IDS,
+        ):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Accès refusé**\n\n"
+                        "La proposition de fittings est réservée aux Fleet Commanders, à la Direction, au Haut Conseil et au CEO."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        return jsonify({
+            "type": 9,
+            "data": {
+                "custom_id": "freeborn_fit_create_v1",
+                "title": "Freeborn Fittings — Nouveau fit",
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 4,
+                                "custom_id": "fit_name",
+                                "label": "Nom du fit",
+                                "style": 1,
+                                "min_length": 1,
+                                "max_length": 80,
+                                "required": True,
+                                "placeholder": "Ex. Retribution — Abyssal T1",
+                            }
+                        ],
+                    },
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 4,
+                                "custom_id": "fit_usage",
+                                "label": "Usage",
+                                "style": 1,
+                                "min_length": 1,
+                                "max_length": 40,
+                                "required": True,
+                                "placeholder": "PvE, PvP, Wormhole, Exploration...",
+                            }
+                        ],
+                    },
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 4,
+                                "custom_id": "fit_eft",
+                                "label": "Copier-coller EFT",
+                                "style": 2,
+                                "min_length": 3,
+                                "max_length": 4000,
+                                "required": True,
+                                "placeholder": "[Retribution, Nom du fit]\n...",
+                            }
+                        ],
+                    },
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 4,
+                                "custom_id": "fit_notes",
+                                "label": "Notes du créateur (facultatif)",
+                                "style": 2,
+                                "max_length": 500,
+                                "required": False,
+                                "placeholder": "Ex. Capacitor Management V recommandé...",
+                            }
+                        ],
+                    },
+                ],
+            },
+        })
+
+    # ========================================================
+    # /guide-membre + /guide-staff
+    # V3 — private visual command guides
+    # Both responses are always ephemeral (visible only to caller).
+    # ========================================================
+
+    if command_name == "guide-membre":
+
+        guide_member_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/guide-membre.png"
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "embeds": [
+                    {
+                        "title": "📘 GUIDE MEMBRE — FREEBORN",
+                        "description": (
+                            "Guide personnel des commandes et du parcours "
+                            "Freeborn Legacy."
+                        ),
+                        "image": {"url": guide_member_image_url},
+                        "color": 0xD9A21B,
+                        "footer": {
+                            "text": "Freeborn Legacy • Guide Membre"
+                        },
+                    }
+                ],
+                "flags": 64,
+            },
+        })
+
+    if command_name == "guide-staff":
+
+        try:
+            member_roles = {
+                str(role_id)
+                for role_id in data["member"]["roles"]
+            }
+        except (KeyError, TypeError):
+            member_roles = set()
+
+        if not (member_roles & MODERATION_ROLE_IDS):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Accès refusé**\n\n"
+                        "Le Guide Staff est réservé aux rôles **CEO**, "
+                        "**Haut Conseil**, **Direction**, "
+                        "**Ressources Humaines** et **Officier**."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        guide_staff_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/guide-staff.png"
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "embeds": [
+                    {
+                        "title": "🛡️ GUIDE STAFF — FREEBORN",
+                        "description": (
+                            "Référence privée des commandes de gestion "
+                            "et du parcours de recrutement."
+                        ),
+                        "image": {"url": guide_staff_image_url},
+                        "color": 0xD9A21B,
+                        "footer": {
+                            "text": "Freeborn Legacy • Guide Staff"
+                        },
+                    }
+                ],
+                "flags": 64,
+            },
+        })
+
     # ========================================================
     # STAFF-ONLY COMMANDS
     # ========================================================
 
     STAFF_ONLY_COMMANDS = {
-        "member-remove",
-        "member-list",
-        "db-health",
-        "sync-status",
-        "sync-check",
-        "sync-apply",
+        "bienvenue-panneau",
+        "orientation-panneau",
+        "reglement-discord-panneau",
+        "reglement-corp-panneau",
+        "charte-panneau",
+        "membre-supprimer",
+        "synchro-appliquer",
+    }
+
+    AUDIT_VIEWER_COMMANDS = {
+        "membre-liste",
+        "base-statut",
+        "synchro-statut",
+        "synchro-verifier",
+    }
+
+    TECHNICAL_CHANNEL_COMMANDS = {
+        "membre-supprimer",
+        "membre-liste",
+        "base-statut",
+        "synchro-statut",
+        "synchro-verifier",
+        "synchro-appliquer",
+    }
+
+    RECRUITMENT_MANAGER_COMMANDS = {
+        "candidat-accepter",
+        "membre-promouvoir",
+    }
+
+    RECRUITMENT_REVIEWER_COMMANDS = {
+        "verification",
     }
 
     if (
@@ -3640,15 +30169,54 @@ def interactions():
             staff_access_denied(data)
         )
 
+
     if (
         command_name
-        in STAFF_ONLY_COMMANDS
+        in AUDIT_VIEWER_COMMANDS
 
         and
 
-        str(data.get("channel_id", ""))
-        !=
-        DISCORD_CHARACTER_MANAGEMENT_CHANNEL_ID
+        not interaction_is_audit_viewer(
+            data
+        )
+    ):
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "⛔ **Accès refusé**\n\n"
+                    "Cette commande de consultation est réservée aux rôles "
+                    "**CEO**, **Haut Conseil**, **Direction** et "
+                    "**Ressources Humaines**.",
+                "flags": 64,
+            },
+        })
+
+
+    if (
+        command_name
+        in RECRUITMENT_MANAGER_COMMANDS
+
+        and
+
+        not interaction_is_recruitment_manager(
+            data
+        )
+    ):
+
+        return recruitment_access_denied()
+
+
+    if (
+        command_name
+        in RECRUITMENT_REVIEWER_COMMANDS
+
+        and
+
+        not interaction_is_recruitment_reviewer(
+            data
+        )
     ):
 
         return jsonify({
@@ -3657,24 +30225,1038 @@ def interactions():
 
             "data": {
                 "content":
-                    "📍 **Commande staff réservée**\n\n"
-                    "Utilise cette commande dans "
-                    "<#1535497895929708648> "
-                    "(**character-management**).",
+                    "⛔ **Accès refusé**\n\n"
+                    "La commande **/verification** est réservée aux rôles "
+                    "**CEO**, **Haut Conseil**, **Direction** et "
+                    "**Ressources Humaines**.",
 
-                **interaction_response_flags_payload(data),
+                "flags":
+                    64,
+            },
+        })
+
+    if (
+        command_name
+        in TECHNICAL_CHANNEL_COMMANDS
+    ):
+
+        staff_channel_id = (
+            str(guild_config[4])
+            if guild_config and guild_config[4]
+            else None
+        )
+
+        if (
+            not staff_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            staff_channel_id
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "📍 **Commande staff réservée**\n\n"
+                        "Utilise cette commande dans "
+                        + (
+                            f"<#{staff_channel_id}>."
+                            if staff_channel_id
+                            else
+                            "le salon de gestion du bot configuré pour ce serveur."
+                        ),
+
+                    **interaction_response_flags_payload(data),
+                },
+            })
+
+    # ========================================================
+    # /reglement-discord-panneau
+    # V3 STAFF SETUP — informational panel only
+    # The official acceptance remains managed natively by Discord.
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "reglement-discord-panneau"
+    ):
+
+        rules_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/reglement-discord.png"
+        )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "embeds": [
+                    {
+                        "image": {
+                            "url":
+                                rules_image_url
+                        },
+
+                        "color":
+                            0x2F81F7,
+                    },
+
+                    {
+                        "title":
+                            "🛡️ RÈGLEMENT DISCORD — FREEBORN LEGACY",
+
+                        "description":
+                            "📜 L'acceptation du règlement est gérée "
+                            "directement par **Discord** lors de l'arrivée "
+                            "sur le serveur.\n\n"
+                            "Le visuel ci-dessus en présente les principes "
+                            "essentiels. **Son respect reste obligatoire "
+                            "pendant toute ta présence sur Freeborn Legacy.**",
+
+                        "color":
+                            0x2F81F7,
+
+                        "fields": [
+                            {
+                                "name":
+                                    "📌 Informations",
+
+                                "value":
+                                    "• Acceptation : **système natif Discord**\n"
+                                    "• Version : **11 août 2026**\n"
+                                    "• Application : membres, candidats, "
+                                    "invités et partenaires",
+
+                                "inline":
+                                    False,
+                            },
+                        ],
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Règlement Discord"
+                        },
+                    },
+                ],
+            },
+        })
+
+
+    # ========================================================
+    # /bienvenue-panneau
+    # V3 STAFF SETUP — visual onboarding panel
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "bienvenue-panneau"
+    ):
+
+        welcome_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/bienvenue-v2.png"
+        )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "embeds": [
+                    {
+                        "image": {
+                            "url":
+                                welcome_image_url
+                        },
+
+                        "color":
+                            0x2F81F7,
+                    },
+
+                    {
+                        "title":
+                            "🧭 PROCHAINE ÉTAPE : ORIENTATION",
+
+                        "description":
+                            "Rends-toi dans le salon **Orientation** "
+                            "pour choisir ton parcours.\n\n"
+                            "🔵 **Invité** → accès aux espaces diplomatiques "
+                            "et communautaires prévus pour les visiteurs.\n"
+                            "🟢 **Candidat** → accès au parcours de "
+                            "recrutement Freeborn Legacy.\n\n"
+                            "📌 **Suis les étapes dans l'ordre : "
+                            "Freeborn s'occupe automatiquement "
+                            "de la suite.**",
+
+                        "color":
+                            0x2F81F7,
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Bienvenue • "
+                                "Orientation → Invité ou Candidat"
+                        },
+                    },
+                ],
+            },
+        })
+
+
+    # ========================================================
+    # /orientation-panneau
+    # V3 STAFF SETUP
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "orientation-panneau"
+    ):
+
+        orientation_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                "orientation",
+            )
+        )
+
+        if (
+            not orientation_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            orientation_channel_id
+        ):
+
+            return dedicated_channel_error(
+                orientation_channel_id,
+                "orientation",
+            )
+
+        guest_role_id = (
+            resolve_guild_role_id(
+                guild_id,
+                "guest",
+            )
+        )
+
+        candidate_role_id = (
+            resolve_guild_role_id(
+                guild_id,
+                "candidate",
+            )
+        )
+
+        if (
+            not guest_role_id
+            or
+            not candidate_role_id
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ **Orientation non configurée**\n\n"
+                        "Les rôles **Invité** et **Candidat** "
+                        "doivent être configurés avant de "
+                        "publier le panneau.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        orientation_image_url = (
+            f"{PUBLIC_BASE_URL}"
+            "/assets/orientation-v2.png"
+        )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "embeds": [
+                    {
+                        "image": {
+                            "url":
+                                orientation_image_url
+                        },
+
+                        "color":
+                            0x2F81F7,
+                    },
+
+                    {
+                        "title":
+                            "🧭 CHOISIS TON ORIENTATION",
+
+                        "description":
+                            "Sélectionne le parcours correspondant à "
+                            "ta présence sur Freeborn Legacy.\n\n"
+                            "🔵 **Invité** → accès aux espaces "
+                            "diplomatiques et communautaires prévus "
+                            "pour les visiteurs.\n"
+                            "🟢 **Candidat** → commencer le parcours "
+                            "de recrutement Freeborn Legacy.\n\n"
+                            "📌 **Ton choix est enregistré par "
+                            "Freeborn et le serveur adapte "
+                            "automatiquement tes accès.**",
+
+                        "color":
+                            0x2F81F7,
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Orientation • "
+                                "Invité ou Candidat"
+                        },
+                    },
+                ],
+
+                "components": [
+                    {
+                        "type":
+                            1,
+
+                        "components": [
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    1,
+
+                                "label":
+                                    "Invité",
+
+                                "custom_id":
+                                    "v3_orientation_guest",
+                            },
+
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    3,
+
+                                "label":
+                                    "Candidat",
+
+                                "custom_id":
+                                    "v3_orientation_candidate",
+                            },
+                        ],
+                    }
+                ],
             },
         })
 
     # ========================================================
-    # /member-remove
+    # /reglement-corp-panneau
+    # V3 STAFF SETUP — official 3-part visual publication
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "reglement-corp-panneau"
+    ):
+
+        corp_rules_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                "corp_rules",
+            )
+        )
+
+        if (
+            not corp_rules_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            corp_rules_channel_id
+        ):
+
+            return dedicated_channel_error(
+                corp_rules_channel_id,
+                "règlement-corp",
+            )
+
+        corp_rules_image_urls = [
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/reglement-corp-part1.png"
+            ),
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/reglement-corp-part2.png"
+            ),
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/reglement-corp-part3.png"
+            ),
+        ]
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "embeds": [
+                    {
+                        "image": {
+                            "url":
+                                corp_rules_image_urls[0]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "image": {
+                            "url":
+                                corp_rules_image_urls[1]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "image": {
+                            "url":
+                                corp_rules_image_urls[2]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "title":
+                            "📕 RÈGLEMENT CORPORATION — FREEBORN LEGACY",
+
+                        "description":
+                            "Lis attentivement les **3 parties** du "
+                            "Règlement Corporation ci-dessus.\n\n"
+                            "En validant, tu confirmes avoir lu et "
+                            "accepté **l'intégralité du règlement**. "
+                            "Freeborn enregistre une preuve "
+                            "horodatée de ton acceptation.",
+
+                        "color":
+                            0x0A84FF,
+
+                        "fields": [
+                            {
+                                "name":
+                                    "📌 Version en vigueur",
+
+                                "value":
+                                    f"`{CORP_RULES_VERSION}` "
+                                    "— 11 août 2026",
+
+                                "inline":
+                                    False,
+                            },
+                            {
+                                "name":
+                                    "➡️ Étape suivante",
+
+                                "value":
+                                    "Après le Règlement Corporation, "
+                                    "poursuis avec la **Charte Freeborn**.",
+
+                                "inline":
+                                    False,
+                            },
+                        ],
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Règlement Corporation"
+                        },
+                    },
+                ],
+
+                "components": [
+                    {
+                        "type":
+                            1,
+
+                        "components": [
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    3,
+
+                                "label":
+                                    "J'accepte le Règlement Corporation",
+
+                                "custom_id":
+                                    "v3_accept_corp_rules",
+                            }
+                        ],
+                    }
+                ],
+            },
+        })
+
+    # ========================================================
+    # /charte-panneau
+    # V3 STAFF SETUP — official 3-part visual publication
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "charte-panneau"
+    ):
+
+        charter_channel_id = (
+            guild_dedicated_channel_id(
+                guild_config,
+                "charter",
+            )
+        )
+
+        if (
+            not charter_channel_id
+            or
+            str(data.get("channel_id", ""))
+            !=
+            charter_channel_id
+        ):
+
+            return dedicated_channel_error(
+                charter_channel_id,
+                "charte-freeborn",
+            )
+
+        charter_image_urls = [
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/charte-corp-part1.png"
+            ),
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/charte-corp-part2.png"
+            ),
+            (
+                f"{PUBLIC_BASE_URL}"
+                "/assets/charte-corp-part3.png"
+            ),
+        ]
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "embeds": [
+                    {
+                        "image": {
+                            "url":
+                                charter_image_urls[0]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "image": {
+                            "url":
+                                charter_image_urls[1]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "image": {
+                            "url":
+                                charter_image_urls[2]
+                        },
+                        "color":
+                            0x0A84FF,
+                    },
+                    {
+                        "title":
+                            "📜 CHARTE DE FREEBORN LEGACY",
+
+                        "description":
+                            "Lis attentivement les **3 parties** de "
+                            "la Charte Freeborn Legacy ci-dessus.\n\n"
+                            "En validant, tu confirmes avoir lu et "
+                            "accepté **l'intégralité de la Charte**. "
+                            "Freeborn enregistre une preuve "
+                            "horodatée de ton acceptation.",
+
+                        "color":
+                            0x0A84FF,
+
+                        "fields": [
+                            {
+                                "name":
+                                    "📌 Version en vigueur",
+
+                                "value":
+                                    f"`{FREEBORN_CHARTER_VERSION}` "
+                                    "— 11 août 2026",
+
+                                "inline":
+                                    False,
+                            },
+                            {
+                                "name":
+                                    "✅ Validation documentaire",
+
+                                "value":
+                                    "Le parcours documentaire n'est "
+                                    "considéré comme terminé que lorsque "
+                                    "le **Règlement Corporation** et la "
+                                    "**Charte Freeborn Legacy** sont tous "
+                                    "les deux acceptés.",
+
+                                "inline":
+                                    False,
+                            },
+                        ],
+
+                        "footer": {
+                            "text":
+                                "Freeborn Legacy • Charte Corporation"
+                        },
+                    },
+                ],
+
+                "components": [
+                    {
+                        "type":
+                            1,
+
+                        "components": [
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    3,
+
+                                "label":
+                                    "J'accepte la Charte Freeborn Legacy",
+
+                                "custom_id":
+                                    "v3_accept_charter",
+                            }
+                        ],
+                    }
+                ],
+            },
+        })
+
+    # ========================================================
+    # /candidat-accepter
+    # V3 RECRUITMENT MANAGEMENT
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "candidat-accepter"
+    ):
+
+        options = (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        )
+
+        target_user_id = None
+
+        for option in options:
+
+            if option.get("name") == "membre":
+
+                target_user_id = str(
+                    option["value"]
+                )
+
+                break
+
+        if not target_user_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun candidat sélectionné.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        current_status = get_member_status_v3(
+            guild_id,
+            target_user_id,
+        )
+
+        if (
+            not current_status
+            or
+            current_status[0]
+            !=
+            "candidate"
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "ℹ️ Cette personne n'a pas "
+                        "le statut V3 **Candidat**. "
+                        "Aucune modification effectuée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                target_user_id,
+            )
+        )
+
+        if not policy_state["complete"]:
+
+            missing_documents = []
+
+            if not policy_state["corp_rules"]:
+
+                missing_documents.append(
+                    "Règlement Corp"
+                )
+
+            if not policy_state["charter"]:
+
+                missing_documents.append(
+                    "Charte Freeborn"
+                )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Validation impossible**\n\n"
+                        "Le candidat doit encore accepter : "
+                        + ", ".join(missing_documents)
+                        + ".",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        try:
+
+            role_result = (
+                apply_recruitment_status_role(
+                    guild_id,
+                    target_user_id,
+                    "candidate_accepted",
+                )
+            )
+
+            if (
+                role_result["add_status_code"]
+                not in
+                (200, 204)
+            ):
+
+                raise RuntimeError(
+                    "Candidate Accepted role assignment failed: "
+                    f"{role_result['add_status_code']}"
+                )
+
+            set_member_status_v3(
+                guild_id,
+                target_user_id,
+                "candidate_accepted",
+                discord_user_id,
+            )
+
+            add_audit_event_v3(
+                guild_id,
+                "candidate_accepted",
+                target_discord_user_id=
+                    target_user_id,
+                actor_discord_user_id=
+                    discord_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "V3 candidate acceptance failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Le passage vers "
+                        "**Candidat Accepté** a échoué. "
+                        "Aucune validation n'est confirmée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "✅ **Candidat validé**\n\n"
+                    f"<@{target_user_id}> est maintenant "
+                    "**Candidat Accepté**.\n"
+                    "Les anciens rôles transitoires ont été "
+                    "retirés automatiquement.",
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # /membre-promouvoir
+    # V3 RECRUITMENT MANAGEMENT
+    # ========================================================
+
+    if (
+        command_name
+        ==
+        "membre-promouvoir"
+    ):
+
+        options = (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        )
+
+        target_user_id = None
+
+        for option in options:
+
+            if option.get("name") == "membre":
+
+                target_user_id = str(
+                    option["value"]
+                )
+
+                break
+
+        if not target_user_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun candidat accepté sélectionné.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        current_status = get_member_status_v3(
+            guild_id,
+            target_user_id,
+        )
+
+        if (
+            not current_status
+            or
+            current_status[0]
+            !=
+            "candidate_accepted"
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "ℹ️ Cette personne n'a pas "
+                        "le statut **Candidat Accepté**. "
+                        "Aucune modification effectuée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                target_user_id,
+            )
+        )
+
+        if not policy_state["complete"]:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Promotion impossible**\n\n"
+                        "Les deux acceptations actuelles "
+                        "(Règlement Corp et Charte Freeborn) "
+                        "sont obligatoires.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        if not has_verified_main_v3(
+            guild_id,
+            target_user_id,
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Promotion impossible**\n\n"
+                        "Aucun Main EVE valide n'est enregistré "
+                        "pour ce candidat. Le candidat doit d'abord "
+                        "finaliser son intégration avec **/freeborn**.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        try:
+
+            role_result = (
+                apply_recruitment_status_role(
+                    guild_id,
+                    target_user_id,
+                    "member",
+                )
+            )
+
+            if (
+                role_result["add_status_code"]
+                not in
+                (200, 204)
+            ):
+
+                raise RuntimeError(
+                    "Member role assignment failed: "
+                    f"{role_result['add_status_code']}"
+                )
+
+            set_member_status_v3(
+                guild_id,
+                target_user_id,
+                "member",
+                discord_user_id,
+            )
+
+            add_audit_event_v3(
+                guild_id,
+                "member_promoted",
+                target_discord_user_id=
+                    target_user_id,
+                actor_discord_user_id=
+                    discord_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "V3 member promotion failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⚠️ Le passage vers **Membre** "
+                        "a échoué. Aucune promotion "
+                        "n'est confirmée.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "✅ **Recrutement terminé**\n\n"
+                    f"<@{target_user_id}> est maintenant "
+                    "**Membre**.\n"
+                    "Les rôles transitoires précédents ont "
+                    "été retirés automatiquement.",
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # /membre-supprimer
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "member-remove"
+        "membre-supprimer"
     ):
 
         options = (
@@ -3737,7 +31319,7 @@ def interactions():
                         "⛔ **Suppression refusée**\n\n"
                         "Tu ne peux pas supprimer "
                         "ton propre profil avec "
-                        "**/member-remove**.",
+                        "**/membre-supprimer**.",
 
                     **interaction_response_flags_payload(data),
                 },
@@ -3747,63 +31329,33 @@ def interactions():
         # Discord target information
         # ----------------------------------------------------
 
-        resolved = (
-            data[
-                "data"
-            ].get(
-                "resolved",
-                {},
-            )
+        target_member = get_discord_member(
+            guild_id,
+            target_user_id,
+        ) or {}
+
+        target_user = target_member.get(
+            "user",
+            {},
         )
 
-        target_users = (
-            resolved.get(
-                "users",
-                {},
-            )
-        )
-
-        target_members = (
-            resolved.get(
-                "members",
-                {},
-            )
-        )
-
-        target_user = (
-            target_users.get(
-                target_user_id,
-                {},
-            )
-        )
-
-        target_member = (
-            target_members.get(
-                target_user_id,
-                {},
-            )
-        )
+        if target_user.get("bot", False):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        "⛔ **Suppression refusée**\n\n"
+                        "Un bot Discord ne peut pas être sélectionné "
+                        "comme profil Freeborn à supprimer.",
+                    **interaction_response_flags_payload(data),
+                },
+            })
 
         target_display_name = (
-            target_member.get(
-                "nick"
-            )
-
-            or
-
-            target_user.get(
-                "global_name"
-            )
-
-            or
-
-            target_user.get(
-                "username"
-            )
-
-            or
-
-            target_user_id
+            target_member.get("nick")
+            or target_user.get("global_name")
+            or target_user.get("username")
+            or target_user_id
         )
 
         # ----------------------------------------------------
@@ -3849,7 +31401,7 @@ def interactions():
                         "ℹ️ **Aucun profil EVE enregistré**\n\n"
                         f"**{target_display_name}** "
                         "ne possède aucun personnage "
-                        "dans Freeborn Verify.\n\n"
+                        "dans Freeborn.\n\n"
                         "Aucune modification effectuée.",
 
                     **interaction_response_flags_payload(data),
@@ -3869,7 +31421,7 @@ def interactions():
         ]
 
         preview_lines = [
-            "⚠️ **CONFIRMATION — MEMBER REMOVE**",
+            "⚠️ **CONFIRMATION — SUPPRESSION DU PROFIL**",
             "",
             f"Membre : **{target_display_name}**",
             f"Discord ID : `{target_user_id}`",
@@ -4000,265 +31552,101 @@ def interactions():
         })
 
     # ========================================================
-    # /alt-remove
-    # MEMBER COMMAND
+    # /alt-supprimer
+    # MEMBER COMMAND - CONFIRMATION REQUIRED
     # ========================================================
 
-    if (
-        command_name
-        ==
-        "alt-remove"
-    ):
-
-        options = (
-            data[
-                "data"
-            ].get(
-                "options",
-                [],
-            )
-        )
+    if command_name == "alt-supprimer":
 
         selected_character_id = None
 
-        for option in options:
-
-            if (
-                option.get("name")
-                ==
-                "personnage"
-            ):
-
-                selected_character_id = (
-                    option.get(
-                        "value"
-                    )
-                )
-
+        for option in data["data"].get("options", []):
+            if option.get("name") == "personnage":
+                selected_character_id = option.get("value")
                 break
 
         if not selected_character_id:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
-                    "content":
-                        "❌ Aucun Alt Character "
-                        "n'a été sélectionné.",
-
+                    "content": "❌ Aucun personnage secondaire n'a été sélectionné.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
         try:
-
-            alts = (
-                get_member_alts(
-                    discord_user_id
-                )
-            )
-
+            alts = get_member_alts(discord_user_id)
         except Exception as error:
-
-            print(
-                "Alt remove lookup failed:",
-                repr(error),
-            )
-
+            print("Alt remove lookup failed:", repr(error))
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
-                    "content":
-                        "⚠️ Impossible de lire "
-                        "tes Alt Characters.",
-
+                    "content": "⚠️ Impossible de lire tes personnages secondaires.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
-        selected_alt = None
-
-        for alt in alts:
-
-            if (
-                str(alt[0])
-                ==
-                str(selected_character_id)
-            ):
-
-                selected_alt = alt
-
-                break
+        selected_alt = next(
+            (alt for alt in alts if str(alt[0]) == str(selected_character_id)),
+            None,
+        )
 
         if not selected_alt:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
                     "content":
-                        "❌ Ce personnage n'est pas "
-                        "un Alt Character enregistré "
-                        "sur ton compte.\n\n"
-                        "Ton Main ne peut jamais être "
-                        "supprimé avec **/alt-remove**.",
-
+                        "❌ Ce personnage n'est pas un personnage secondaire enregistré "
+                        "sur ton compte. Ton Main ne peut jamais être supprimé "
+                        "avec **/alt-supprimer**.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
-        try:
-
-            result = (
-                remove_alt_character(
-                    discord_user_id,
-                    selected_character_id,
-                )
-            )
-
-        except ValueError as error:
-
-            print(
-                "Alt remove refused:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "❌ **Suppression refusée**\n\n"
-                        f"{str(error)}",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        except Exception as error:
-
-            print(
-                "Alt remove database error:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "⚠️ **Erreur base de données**\n\n"
-                        "L'Alt n'a pas été supprimé.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        remaining_alts = (
-            result[
-                "remaining_alts"
-            ]
-        )
-
-        if (
-            remaining_alts
-            ==
-            0
-        ):
-
-            role_response = (
-                remove_discord_role(
-                    guild_id,
-                    discord_user_id,
-                    DISCORD_ALT_CHARACTER_ROLE_ID,
-                )
-            )
-
-            role_removed = (
-                role_response.status_code
-                in
-                (200, 204)
-            )
-
-            if role_removed:
-
-                role_text = (
-                    "🔹 Aucun Alt restant : "
-                    "rôle **Alt Character** retiré."
-                )
-
-            else:
-
-                role_text = (
-                    "⚠️ Aucun Alt restant, mais "
-                    "le rôle **Alt Character** "
-                    "n'a pas pu être retiré."
-                )
-
-        else:
-
-            role_text = (
-                f"🔹 Alts restants : "
-                f"**{remaining_alts}** — "
-                "rôle **Alt Character** conservé."
-            )
-
-        current_main = (
-            get_main_character(
-                discord_user_id
-            )
-        )
-
-        current_main_name = (
-            current_main[1]
-
-            if current_main
-
-            else
-
-            "Inconnu"
+        token = create_alt_remove_token(
+            selected_character_id,
+            discord_user_id,
         )
 
         return jsonify({
-            "type":
-                4,
-
+            "type": 4,
             "data": {
                 "content":
-                    "🗑️ **Freeborn Alt Remove**\n\n"
-
-                    f"Alt supprimé : "
-                    f"**{result['character_name']}**\n\n"
-
-                    "✅ Le personnage a été retiré "
-                    "de ton profil Freeborn.\n"
-
-                    f"✅ Ton Main "
-                    f"**{current_main_name}** "
-                    "reste inchangé.\n"
-
-                    f"{role_text}",
-
+                    "⚠️ **Confirmer la suppression de l'Alt ?**\n\n"
+                    f"Personnage : **{selected_alt[1]}**\n"
+                    "Cette action retirera ce personnage de ton profil Freeborn.\n"
+                    "Ton Main restera inchangé.\n\n"
+                    "La confirmation expire dans 5 minutes.",
                 **interaction_response_flags_payload(data),
+                "components": [{
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 2,
+                            "style": 4,
+                            "label": "Confirmer la suppression",
+                            "custom_id": f"ar_yes:{token}",
+                        },
+                        {
+                            "type": 2,
+                            "style": 2,
+                            "label": "Annuler",
+                            "custom_id": f"ar_no:{token}",
+                        },
+                    ],
+                }],
             },
         })
 
     # ========================================================
-    # /member-list
+    # /membre-liste
     # STAFF ONLY - READ ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "member-list"
+        "membre-liste"
     ):
 
         try:
@@ -4280,7 +31668,7 @@ def interactions():
 
                 "data": {
                     "content":
-                        "👥 **Freeborn Member List**\n\n"
+                        "👥 **Liste des membres Freeborn**\n\n"
                         "⚠️ Impossible de lire "
                         "la liste des membres actuellement.\n\n"
                         "Aucune modification "
@@ -4303,14 +31691,14 @@ def interactions():
         })
 
     # ========================================================
-    # /sync-status
+    # /synchro-statut
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "sync-status"
+        "synchro-statut"
     ):
 
         try:
@@ -4332,7 +31720,7 @@ def interactions():
 
                 "data": {
                     "content":
-                        "📡 **Freeborn Sync Status**\n\n"
+                        "📡 **État de la synchronisation Freeborn**\n\n"
                         "⚠️ Impossible de générer "
                         "l'état global actuellement.\n\n"
                         "Aucune modification "
@@ -4355,358 +31743,113 @@ def interactions():
         })
 
     # ========================================================
-    # /main-change
-    # MEMBER COMMAND
+    # /main-changer
+    # MEMBER COMMAND - CONFIRMATION REQUIRED
     # ========================================================
 
-    if (
-        command_name
-        ==
-        "main-change"
-    ):
+    if command_name == "main-changer":
 
-        try:
-
-            current_main = (
-                get_main_character(
-                    discord_user_id
-                )
-            )
-
-        except Exception as error:
-
-            print(
-                "Main change lookup failed:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "⚠️ Impossible de lire "
-                        "ton Main Character.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
+        current_main = get_main_character(discord_user_id)
 
         if not current_main:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
                     "content":
-                        "❌ Aucun Main Character "
-                        "n'est enregistré.\n\n"
-                        "Utilise d'abord **/verify**.",
-
+                        "❌ Aucun personnage principal n'est enregistré. "
+                        "Finalise d'abord ton identité EVE avec **/freeborn**.",
                     **interaction_response_flags_payload(data),
                 },
             })
-
-        options = (
-            data[
-                "data"
-            ].get(
-                "options",
-                [],
-            )
-        )
 
         selected_character_id = None
 
-        for option in options:
-
-            if (
-                option.get("name")
-                ==
-                "personnage"
-            ):
-
-                selected_character_id = (
-                    option.get(
-                        "value"
-                    )
-                )
-
+        for option in data["data"].get("options", []):
+            if option.get("name") == "personnage":
+                selected_character_id = option.get("value")
                 break
 
         if not selected_character_id:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
-                    "content":
-                        "❌ Aucun Alt Character "
-                        "n'a été sélectionné.",
-
+                    "content": "❌ Aucun personnage secondaire n'a été sélectionné.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
         try:
-
-            alts = (
-                get_member_alts(
-                    discord_user_id
-                )
-            )
-
+            alts = get_member_alts(discord_user_id)
         except Exception as error:
-
-            print(
-                "Main change alt lookup failed:",
-                repr(error),
-            )
-
+            print("Main change alt lookup failed:", repr(error))
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
-                    "content":
-                        "⚠️ Impossible de lire "
-                        "tes Alt Characters.",
-
+                    "content": "⚠️ Impossible de lire tes personnages secondaires.",
                     **interaction_response_flags_payload(data),
                 },
             })
 
-        selected_alt = None
-
-        for alt in alts:
-
-            if (
-                str(alt[0])
-                ==
-                str(selected_character_id)
-            ):
-
-                selected_alt = alt
-
-                break
+        selected_alt = next(
+            (alt for alt in alts if str(alt[0]) == str(selected_character_id)),
+            None,
+        )
 
         if not selected_alt:
-
             return jsonify({
-                "type":
-                    4,
-
+                "type": 4,
                 "data": {
                     "content":
-                        "❌ Ce personnage n'est pas "
-                        "un Alt Character enregistré "
+                        "❌ Ce personnage n'est pas un personnage secondaire enregistré "
                         "sur ton compte.",
-
                     **interaction_response_flags_payload(data),
                 },
             })
 
-        (
-            new_main_id,
-            new_main_name,
-            stored_corporation_id,
-            stored_in_corporation,
-        ) = selected_alt
-
-        eve_data = (
-            get_current_eve_character(
-                new_main_id
-            )
-        )
-
-        if eve_data is None:
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "⚠️ **Changement annulé**\n\n"
-                        "EVE ESI n'a pas pu confirmer "
-                        "l'état actuel du personnage.\n\n"
-                        "Aucune donnée n'a été modifiée.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        current_corporation_id = int(
-            eve_data[
-                "corporation_id"
-            ]
-        )
-
-        if (
-            current_corporation_id
-            !=
-            FREEBORN_CORPORATION_ID
-        ):
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "❌ **Changement refusé**\n\n"
-                        f"**{new_main_name}** "
-                        "n'appartient actuellement "
-                        "pas à **Freeborn Legacy**.\n\n"
-                        "Ton Main actuel reste inchangé.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        try:
-
-            result = (
-                change_main_character(
-                    discord_user_id,
-                    new_main_id,
-                    current_corporation_id,
-                )
-            )
-
-        except ValueError as error:
-
-            print(
-                "Main change refused:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "❌ **Changement impossible**\n\n"
-                        f"{str(error)}",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        except Exception as error:
-
-            print(
-                "Main change database error:",
-                repr(error),
-            )
-
-            return jsonify({
-                "type":
-                    4,
-
-                "data": {
-                    "content":
-                        "⚠️ **Erreur base de données**\n\n"
-                        "Le changement de Main "
-                        "n'a pas été effectué.",
-
-                    **interaction_response_flags_payload(data),
-                },
-            })
-
-        add_discord_role(
-            guild_id,
+        token = create_main_change_token(
+            selected_character_id,
             discord_user_id,
-            DISCORD_MEMBER_ROLE_ID,
-        )
-
-        add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_EVE_VERIFIED_ROLE_ID,
-        )
-
-        add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_MAIN_CHARACTER_ROLE_ID,
-        )
-
-        add_discord_role(
-            guild_id,
-            discord_user_id,
-            DISCORD_ALT_CHARACTER_ROLE_ID,
-        )
-
-        nickname_response = (
-            sync_discord_nickname(
-                guild_id,
-                discord_user_id,
-                result[
-                    "new_main_name"
-                ],
-            )
-        )
-
-        nickname_changed = (
-            nickname_response.status_code
-            in
-            (200, 204)
-        )
-
-        nickname_text = (
-            "✅ Pseudo Discord synchronisé "
-            f"sur **{result['new_main_name']}**."
-
-            if nickname_changed
-
-            else
-
-            "⚠️ Le changement de Main est validé, "
-            "mais le pseudo Discord n'a pas pu "
-            "être modifié."
         )
 
         return jsonify({
-            "type":
-                4,
-
+            "type": 4,
             "data": {
                 "content":
-                    "🔄 **Freeborn Main Change**\n\n"
-
-                    f"Ancien Main : "
-                    f"**{result['old_main_name']}** "
-                    "→ Alt Character\n"
-
-                    f"Nouveau Main : "
-                    f"**{result['new_main_name']}** "
-                    "→ Main Character\n\n"
-
-                    "✅ Changement enregistré "
-                    "dans Freeborn Verify.\n"
-
-                    f"{nickname_text}\n\n"
-
-                    "Aucun personnage EVE "
-                    "n'a été supprimé.",
-
+                    "🔄 **Confirmer le changement de Main ?**\n\n"
+                    f"Personnage principal actuel : **{current_main[1]}**\n"
+                    f"Nouveau personnage principal : **{selected_alt[1]}**\n\n"
+                    "L'ancien personnage principal deviendra automatiquement un personnage secondaire. "
+                    "Aucun personnage ne sera supprimé.\n\n"
+                    "La confirmation expire dans 5 minutes.",
                 **interaction_response_flags_payload(data),
+                "components": [{
+                    "type": 1,
+                    "components": [
+                        {
+                            "type": 2,
+                            "style": 3,
+                            "label": "Confirmer le changement",
+                            "custom_id": f"mc_yes:{token}",
+                        },
+                        {
+                            "type": 2,
+                            "style": 2,
+                            "label": "Annuler",
+                            "custom_id": f"mc_no:{token}",
+                        },
+                    ],
+                }],
             },
         })
 
     # ========================================================
-    # /member-info
+    # /membre-info
     # ========================================================
 
     if (
         command_name
         ==
-        "member-info"
+        "membre-info"
     ):
 
         caller_user = (
@@ -4881,7 +32024,7 @@ def interactions():
 
                 "data": {
                     "content":
-                        "👤 **Freeborn Member Info**\n\n"
+                        "👤 **Profil membre Freeborn**\n\n"
                         "⚠️ Impossible de lire "
                         "ce profil actuellement.",
 
@@ -4902,14 +32045,14 @@ def interactions():
         })
 
     # ========================================================
-    # /db-health
+    # /base-statut
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "db-health"
+        "base-statut"
     ):
 
         try:
@@ -4931,7 +32074,7 @@ def interactions():
 
                 "data": {
                     "content":
-                        "🗄️ **Freeborn Database**\n\n"
+                        "🗄️ **Base de données Freeborn**\n\n"
                         "❌ Base de données "
                         "indisponible.",
 
@@ -4940,7 +32083,7 @@ def interactions():
             })
 
         message = (
-            "🗄️ **Freeborn Database Health**\n\n"
+            "🗄️ **État de la base de données Freeborn**\n\n"
 
             "✅ Statut : **Connectée**\n"
 
@@ -4950,10 +32093,10 @@ def interactions():
             f"👥 Personnages : "
             f"**{stats['characters']}**\n"
 
-            f"🔗 Main Characters : "
+            f"🔗 Personnages principaux : "
             f"**{stats['mains']}**\n"
 
-            f"🔹 Alt Characters : "
+            f"🔹 Personnages secondaires : "
             f"**{stats['alts']}**\n"
 
             f"🚪 Hors corporation : "
@@ -4973,14 +32116,14 @@ def interactions():
         })
 
     # ========================================================
-    # /sync-check
+    # /synchro-verifier
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "sync-check"
+        "synchro-verifier"
     ):
 
         try:
@@ -5028,14 +32171,14 @@ def interactions():
         })
 
     # ========================================================
-    # /sync-apply
+    # /synchro-appliquer
     # STAFF ONLY
     # ========================================================
 
     if (
         command_name
         ==
-        "sync-apply"
+        "synchro-appliquer"
     ):
 
         try:
@@ -5044,13 +32187,13 @@ def interactions():
                 sync_results,
                 actions,
             ) = run_sync(
-                apply_changes=True
+                apply_changes=False
             )
 
         except Exception as error:
 
             print(
-                "Sync apply failed:",
+                "Sync apply preview failed:",
                 repr(error),
             )
 
@@ -5060,12 +32203,31 @@ def interactions():
 
                 "data": {
                     "content":
-                        "⚠️ La synchronisation "
-                        "a rencontré une erreur.",
+                        "⚠️ Le contrôle préalable "
+                        "à la synchronisation a rencontré une erreur.",
 
                     **interaction_response_flags_payload(data),
                 },
             })
+
+        confirmation_token = (
+            create_sync_apply_token(
+                discord_user_id
+            )
+        )
+
+        preview_message = (
+            build_sync_message(
+                sync_results,
+                applied=False,
+            )
+            +
+            "\n\n⚠️ **Confirmation requise**\n"
+            "Aucun changement n'a encore été appliqué.\n"
+            "En confirmant, Freeborn relancera un contrôle ESI "
+            "à jour avant toute modification.\n\n"
+            "Cette confirmation expire après **5 minutes**."
+        )
 
         return jsonify({
             "type":
@@ -5073,40 +32235,336 @@ def interactions():
 
             "data": {
                 "content":
-                    build_sync_message(
-                        sync_results,
-                        actions=actions,
-                        applied=True,
-                    ),
+                    preview_message,
+
+                "components": [
+                    {
+                        "type":
+                            1,
+
+                        "components": [
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    4,
+
+                                "label":
+                                    "Confirmer la synchronisation",
+
+                                "custom_id":
+                                    f"sa_yes:{confirmation_token}",
+                            },
+
+                            {
+                                "type":
+                                    2,
+
+                                "style":
+                                    2,
+
+                                "label":
+                                    "Annuler",
+
+                                "custom_id":
+                                    f"sa_no:{confirmation_token}",
+                            },
+                        ],
+                    }
+                ],
 
                 **interaction_response_flags_payload(data),
             },
         })
 
     # ========================================================
-    # /verify
+    # /verification
     # MEMBER COMMAND
     # ========================================================
 
     if (
         command_name
         ==
-        "verify"
+        "verification"
     ):
 
+        options = (
+            data[
+                "data"
+            ].get(
+                "options",
+                [],
+            )
+        )
+
+        target_user_id = None
+
+        for option in options:
+
+            if option.get("name") == "membre":
+
+                target_user_id = str(
+                    option["value"]
+                )
+
+                break
+
+        if not target_user_id:
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "❌ Aucun candidat sélectionné.",
+
+                    "flags":
+                        64,
+                },
+            })
+
+        status_row = get_member_status_v3(
+            guild_id,
+            target_user_id,
+        )
+
+        status_value = (
+            status_row[0]
+            if status_row
+            else None
+        )
+
+        status_labels = {
+            "guest":
+                "Invité",
+
+            "candidate":
+                "Candidat",
+
+            "candidate_accepted":
+                "Candidat Accepté",
+
+            "member":
+                "Membre",
+        }
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                target_user_id,
+            )
+        )
+
+        main_row = get_guild_main_character_v3(
+            guild_id,
+            target_user_id,
+        )
+
+        if not main_row and str(guild_id) == str(DISCORD_GUILD_ID):
+
+            legacy_main = get_main_character(
+                target_user_id
+            )
+
+            if legacy_main:
+
+                main_name = legacy_main[1]
+                main_text = (
+                    f"✅ **{main_name}** "
+                    "(ancien profil Freeborn)"
+                )
+
+            else:
+
+                main_text = "❌ Aucun Main EVE enregistré"
+
+        elif main_row:
+
+            (
+                main_character_id,
+                main_name,
+                main_corporation_id,
+                main_in_corporation,
+                main_verified_at,
+                main_last_checked_at,
+                main_left_at,
+                main_total_skill_points,
+                main_skills_updated_at,
+            ) = main_row
+
+            main_text = (
+                f"✅ **{main_name}** "
+                f"(`{main_character_id}`)"
+            )
+
+            if main_total_skill_points is not None:
+                main_text += (
+                    "\n🎓 Skill Points : "
+                    f"**{int(main_total_skill_points):,} SP**"
+                )
+
+        else:
+
+            main_text = "❌ Aucun Main EVE enregistré"
+
+        lines = [
+            "🔎 **Vérification recrutement Freeborn**",
+            "",
+            f"Candidat : <@{target_user_id}>",
+            (
+                "Statut Discord : "
+                f"**{status_labels.get(status_value, 'Non défini')}**"
+            ),
+            "",
+            "### Documents",
+            (
+                "✅ Règlement Corp"
+                if policy_state["corp_rules"]
+                else
+                "❌ Règlement Corp"
+            ),
+            (
+                "✅ Charte Freeborn"
+                if policy_state["charter"]
+                else
+                "❌ Charte Freeborn"
+            ),
+            "",
+            "### Identité EVE",
+            main_text,
+            "",
+        ]
+
+        if status_value == "candidate_accepted":
+
+            lines.append(
+                "✅ **Recrutement validé par la Direction/RH.**"
+            )
+
+        elif status_value == "candidate":
+
+            lines.append(
+                "🕒 **Candidature encore en cours.**"
+            )
+
+        elif status_value == "member":
+
+            lines.append(
+                "✅ Cette personne est déjà **Membre**."
+            )
+
+        else:
+
+            lines.append(
+                "⚠️ Le parcours Candidat n'est pas actif."
+            )
+
+        return jsonify({
+            "type":
+                4,
+
+            "data": {
+                "content":
+                    "\n".join(lines),
+
+                "flags":
+                    64,
+            },
+        })
+
+    # ========================================================
+    # /freeborn
+    # FINAL MEMBER INTEGRATION
+    # ========================================================
+
+    elif (
+        command_name
+        ==
+        "freeborn"
+    ):
+
+        current_status = get_member_status_v3(
+            guild_id,
+            discord_user_id,
+        )
+
+        if (
+            not current_status
+            or
+            current_status[0]
+            not in {
+                "candidate",
+                "candidate_accepted",
+            }
+        ):
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Parcours Freeborn incomplet**\n\n"
+                        "Tu dois d'abord passer par "
+                        "**Orientation → Candidat**.",
+
+                    **interaction_response_flags_payload(data),
+                },
+            })
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                discord_user_id,
+            )
+        )
+
+        if not policy_state["complete"]:
+
+            missing_documents = []
+
+            if not policy_state["corp_rules"]:
+
+                missing_documents.append(
+                    "Règlement Corp"
+                )
+
+            if not policy_state["charter"]:
+
+                missing_documents.append(
+                    "Charte Freeborn"
+                )
+
+            return jsonify({
+                "type":
+                    4,
+
+                "data": {
+                    "content":
+                        "⛔ **Parcours Freeborn incomplet**\n\n"
+                        "Il te reste à accepter : "
+                        + ", ".join(missing_documents)
+                        + ".",
+
+                    **interaction_response_flags_payload(data),
+                },
+            })
+
         verification_type = (
-            "main"
+            "freeborn"
         )
 
     # ========================================================
-    # /alt
+    # /alt-ajouter
     # MEMBER COMMAND
     # ========================================================
 
     elif (
         command_name
         ==
-        "alt"
+        "alt-ajouter"
     ):
 
         verification_type = (
@@ -5135,7 +32593,7 @@ def interactions():
                 "data": {
                     "content":
                         "⚠️ Impossible de lire "
-                        "ton Main Character.",
+                        "ton personnage principal.",
 
                     **interaction_response_flags_payload(data),
                 },
@@ -5150,8 +32608,8 @@ def interactions():
                 "data": {
                     "content":
                         "❌ Utilise d'abord "
-                        "**/verify** "
-                        "pour ton Main.",
+                        "**/freeborn** "
+                        "pour enregistrer ton Main EVE.",
 
                     **interaction_response_flags_payload(data),
                 },
@@ -5202,6 +32660,14 @@ def interactions():
             state,
     }
 
+    # Only candidates finalising /freeborn grant the private ESI scope.
+    # Guests never authenticate to EVE, and legacy Main/Alt actions do not
+    # request private character data.
+    if verification_type == "freeborn":
+        params["scope"] = " ".join(
+            FREEBORN_EVE_SCOPES
+        )
+
     login_url = (
         f"{EVE_AUTHORIZE_URL}?"
         f"{urlencode(params)}"
@@ -5210,11 +32676,27 @@ def interactions():
     if (
         verification_type
         ==
+        "freeborn"
+    ):
+
+        message = (
+            "🛡️ **Intégration Freeborn**\n\n"
+            "Connecte ton **Main EVE**. "
+            "Freeborn contrôlera que ce personnage "
+            "appartient bien à la corporation EVE configurée "
+            "pour ce serveur.\n\n"
+            f"[Finaliser mon intégration Freeborn]"
+            f"({login_url})"
+        )
+
+    elif (
+        verification_type
+        ==
         "main"
     ):
 
         message = (
-            "🔐 **Freeborn Verify**\n\n"
+            "🔐 **Freeborn**\n\n"
 
             "Connecte ton personnage "
             "principal EVE Online :\n\n"
@@ -5226,7 +32708,7 @@ def interactions():
     else:
 
         message = (
-            "🔗 **Freeborn Alt Verify**\n\n"
+            "🔗 **Vérification du personnage secondaire**\n\n"
 
             "Sélectionne le personnage "
             "à enregistrer comme Alt :\n\n"
@@ -5246,6 +32728,223 @@ def interactions():
             **interaction_response_flags_payload(data),
         },
     })
+
+
+# ============================================================
+# WEB UI - FREEBORN LEGACY V3
+# ============================================================
+
+def freeborn_web_page(
+    title,
+    message,
+    status="info",
+    character_name=None,
+):
+
+    status_map = {
+        "success": ("✓", "VALIDATION CONFIRMÉE", "#22C55E"),
+        "pending": ("⌛", "SYNCHRONISATION ESI", "#FFB300"),
+        "warning": ("i", "INFORMATIONS", "#0A84FF"),
+        "error": ("×", "ERREUR", "#FF3B30"),
+        "info": ("i", "INFORMATIONS", "#00E5FF"),
+    }
+
+    icon, badge, accent = status_map.get(
+        status,
+        status_map["info"],
+    )
+
+    safe_title = escape(str(title))
+    safe_message = escape(str(message)).replace("\n", "<br>")
+    safe_character = (
+        escape(str(character_name))
+        if character_name
+        else None
+    )
+
+    character_html = (
+        f"""
+        <div class="character">
+            <span>Personnage EVE</span>
+            <strong>{safe_character}</strong>
+        </div>
+        """
+        if safe_character
+        else ""
+    )
+
+    return f"""<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#02070d">
+<link rel="icon" type="image/png" href="/assets/favicon.png">
+<title>Freeborn Legacy — {safe_title}</title>
+<style>
+:root {{
+    color-scheme: dark;
+    --accent:{accent};
+    --cyan:#00E5FF;
+    --blue:#0A84FF;
+    --green:#22C55E;
+    --orange:#FFB300;
+    --red:#FF3B30;
+    --text:#F5F8FC;
+    --muted:#B9C8D5;
+}}
+* {{ box-sizing:border-box; }}
+html,body {{ min-height:100%; }}
+body {{
+    margin:0;
+    min-height:100vh;
+    display:grid;
+    place-items:center;
+    padding:18px;
+    color:var(--text);
+    font-family:"Segoe UI",Arial,sans-serif;
+    background:
+        linear-gradient(rgba(0,4,9,.38),rgba(0,4,9,.58)),
+        url("/assets/bg-space.jpg") center/cover fixed no-repeat,
+        #01050a;
+}}
+.page {{
+    width:min(860px,100%);
+}}
+.frame {{
+    position:relative;
+    padding:2px;
+    background:linear-gradient(135deg,var(--cyan),var(--blue) 28%,transparent 45%,var(--blue) 72%,var(--cyan));
+    clip-path:polygon(0 28px,28px 0,calc(100% - 28px) 0,100% 28px,100% calc(100% - 28px),calc(100% - 28px) 100%,28px 100%,0 calc(100% - 28px));
+    filter:drop-shadow(0 0 14px rgba(0,132,255,.38));
+}}
+.card {{
+    position:relative;
+    min-height:0;
+    padding:20px 48px 24px;
+    text-align:center;
+    background:
+        linear-gradient(rgba(1,8,15,.91),rgba(1,7,13,.96)),
+        url("/assets/bg-panel.jpg") center/cover;
+    clip-path:inherit;
+    overflow:hidden;
+}}
+.card::before,
+.card::after {{
+    content:"";
+    position:absolute;
+    top:62px;
+    width:22%;
+    height:1px;
+    background:linear-gradient(90deg,transparent,var(--cyan));
+    box-shadow:0 0 9px var(--blue);
+}}
+.card::before {{ left:3%; }}
+.card::after {{ right:3%; transform:scaleX(-1); }}
+.logo {{
+    display:block;
+    width:min(210px,48vw);
+    height:auto;
+    margin:0 auto 10px;
+    object-fit:contain;
+}}
+.status-icon {{
+    width:54px;
+    height:54px;
+    margin:0 auto 10px;
+    display:grid;
+    place-items:center;
+    transform:rotate(45deg);
+    border:2px solid var(--accent);
+    border-radius:8px;
+    color:var(--accent);
+    font-size:27px;
+    font-weight:900;
+    background:color-mix(in srgb,var(--accent) 10%,#02070d);
+    box-shadow:0 0 20px color-mix(in srgb,var(--accent) 52%,transparent);
+}}
+.status-icon span {{ transform:rotate(-45deg); }}
+.badge {{
+    margin:0 0 6px;
+    color:var(--accent);
+    font-size:13px;
+    font-weight:800;
+    letter-spacing:.16em;
+}}
+h1 {{
+    margin:4px 0 12px;
+    font-size:clamp(28px,4.4vw,40px);
+    line-height:1.05;
+    text-transform:uppercase;
+    letter-spacing:.025em;
+    color:var(--accent);
+    text-shadow:0 0 22px color-mix(in srgb,var(--accent) 24%,transparent);
+}}
+.message {{
+    max-width:720px;
+    margin:0 auto;
+    color:#F2F6FA;
+    font-size:16px;
+    line-height:1.5;
+}}
+.character {{
+    max-width:650px;
+    margin:18px auto 0;
+    padding:12px 18px;
+    display:flex;
+    justify-content:center;
+    gap:18px;
+    align-items:center;
+    border:1px solid color-mix(in srgb,var(--accent) 78%,transparent);
+    background:rgba(0,7,14,.78);
+    box-shadow:inset 0 0 22px rgba(0,0,0,.45);
+}}
+.character span {{ color:#E9F0F6; }}
+.character span::after {{ content:" :"; }}
+.character strong {{ color:var(--accent); }}
+.footer {{
+    margin:18px auto 0;
+    padding-top:13px;
+    max-width:720px;
+    border-top:1px solid rgba(0,229,255,.28);
+    color:var(--muted);
+    font-size:14px;
+}}
+.brandline {{
+    margin-top:14px;
+    color:#48B9FF;
+    font-size:11px;
+    letter-spacing:.22em;
+    text-transform:uppercase;
+}}
+@media (max-width:640px) {{
+    body {{ padding:12px; }}
+    .card {{ min-height:0; padding:24px 20px 28px; }}
+    .card::before,.card::after {{ top:64px; width:14%; }}
+    .logo {{ margin-bottom:18px; }}
+    .status-icon {{ width:54px; height:54px; font-size:27px; }}
+    .message {{ font-size:16px; }}
+    .character {{ flex-direction:column; gap:5px; }}
+}}
+</style>
+</head>
+<body>
+<div class="page">
+    <div class="frame">
+        <main class="card">
+            <img class="logo" src="/assets/logo-freeborn-legacy.png" alt="Freeborn Legacy">
+            <div class="status-icon"><span>{icon}</span></div>
+            <div class="badge">{badge}</div>
+            <h1>{safe_title}</h1>
+            <div class="message">{safe_message}</div>
+            {character_html}
+            <div class="footer">Tu peux fermer cette fenêtre et retourner sur Discord.</div>
+            <div class="brandline">Freeborn Legacy · Freeborn</div>
+        </main>
+    </div>
+</div>
+</body>
+</html>"""
 
 
 # ============================================================
@@ -5269,10 +32968,11 @@ def callback():
         not state
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Authentication failed</h2>
-        """, 400
+        return freeborn_web_page(
+            "Authentification impossible",
+            "La demande EVE est incomplète. Relance la commande depuis Discord.",
+            status="error",
+        ), 400
 
     try:
 
@@ -5285,22 +32985,24 @@ def callback():
 
     except SignatureExpired:
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Verification link expired</h2>
-        """, 400
+        return freeborn_web_page(
+            "Lien expiré",
+            "Le lien de vérification a expiré. Relance la commande depuis Discord.",
+            status="error",
+        ), 400
 
     except BadSignature:
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Invalid verification request</h2>
-        """, 400
+        return freeborn_web_page(
+            "Demande invalide",
+            "La demande de vérification n'est pas valide. Relance la commande depuis Discord.",
+            status="error",
+        ), 400
 
     discord_user_id = (
-        state_data[
+        state_data.get(
             "discord_user_id"
-        ]
+        )
     )
 
     guild_id = (
@@ -5316,16 +33018,33 @@ def callback():
         )
     )
 
-    if (
+    guild_config = get_guild_config(
         guild_id
-        !=
-        DISCORD_GUILD_ID
+    )
+
+    if (
+        not guild_config
+        or
+        not guild_config[6]
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Invalid Discord server</h2>
-        """, 400
+        return freeborn_web_page(
+            "Serveur Discord invalide",
+            "Ce serveur n'est pas configuré ou n'est plus actif dans Freeborn.",
+            status="error",
+        ), 400
+
+    expected_corporation_id = (
+        guild_config[2]
+    )
+
+    if not expected_corporation_id:
+
+        return freeborn_web_page(
+            "Configuration EVE incomplète",
+            "Aucune corporation EVE n'est configurée pour ce serveur Discord.",
+            status="warning",
+        ), 500
 
     token_response = requests.post(
         EVE_TOKEN_URL,
@@ -5352,15 +33071,20 @@ def callback():
         200
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Unable to obtain EVE access token</h2>
-        """, 400
+        return freeborn_web_page(
+            "Connexion EVE refusée",
+            "Freeborn n'a pas pu obtenir l'autorisation EVE. Relance l'intégration depuis Discord.",
+            status="error",
+        ), 400
 
-    access_token = (
-        token_response.json()[
-            "access_token"
-        ]
+    token_data = token_response.json()
+
+    access_token = token_data[
+        "access_token"
+    ]
+
+    refresh_token = token_data.get(
+        "refresh_token"
     )
 
     try:
@@ -5368,6 +33092,7 @@ def callback():
         (
             character_id,
             character_name,
+            granted_scopes,
         ) = get_eve_identity(
             access_token
         )
@@ -5379,61 +33104,460 @@ def callback():
             repr(error),
         )
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Unable to validate EVE identity</h2>
-        """, 400
+        return freeborn_web_page(
+            "Identité EVE non validée",
+            "L'identité du personnage EVE n'a pas pu être vérifiée.",
+            status="error",
+        ), 400
 
-    character_response = requests.get(
-        (
-            f"{ESI_BASE_URL}/characters/"
-            f"{character_id}/"
-        ),
-        timeout=15,
+    skill_summary = None
+
+    if verification_type in {"freeborn", "fit_pilot"}:
+
+        missing_scopes = (
+            set(FREEBORN_EVE_SCOPES)
+            -
+            set(granted_scopes)
+        )
+
+        if missing_scopes:
+
+            return freeborn_web_page(
+                "Autorisation ESI incomplète",
+                (
+                    "Le scope ESI nécessaire aux compétences n'a pas été accordé. "
+                    + (
+                        "Retourne sur la fiche Freeborn Fittings et relance "
+                        "« Tester avec mon personnage »."
+                        if verification_type == "fit_pilot"
+                        else
+                        "Relance /freeborn et accepte l'autorisation EVE demandée."
+                    )
+                ),
+                status="error",
+                character_name=character_name,
+            ), 403
+
+        if (
+            verification_type == "freeborn"
+            and
+            not refresh_token
+        ):
+
+            return freeborn_web_page(
+                "Autorisation EVE incomplète",
+                "EVE n'a pas fourni de refresh token. Relance /freeborn afin que Freeborn puisse conserver l'autorisation sans te redemander de te connecter.",
+                status="error",
+                character_name=character_name,
+            ), 400
+
+        try:
+
+            skill_summary = get_eve_character_skills(
+                character_id,
+                access_token,
+            )
+
+        except Exception as error:
+
+            print(
+                "EVE skills lookup failed:",
+                repr(error),
+            )
+
+            return freeborn_web_page(
+                "Compétences EVE indisponibles",
+                "Freeborn n'a pas pu récupérer les Skill Points du personnage. Aucune intégration n'a été enregistrée ; relance /freeborn dans quelques instants.",
+                status="warning",
+                character_name=character_name,
+            ), 502
+
+    affiliation_source = "characters/affiliation"
+    affiliation_result = get_eve_character_affiliation(
+        character_id
     )
+
+    if affiliation_result:
+
+        character_data = (
+            affiliation_result["data"]
+        )
+
+        corporation_response = (
+            affiliation_result["response"]
+        )
+
+        corporation_id = (
+            character_data[
+                "corporation_id"
+            ]
+        )
+
+    else:
+
+        # Fallback to the existing public character route so an outage or
+        # unexpected response from /characters/affiliation/ does not break
+        # the integration flow.
+        affiliation_source = "characters/{character_id}"
+
+        character_response = requests.get(
+            (
+                f"{ESI_BASE_URL}/characters/"
+                f"{character_id}/"
+            ),
+            timeout=15,
+        )
+
+        if (
+            character_response.status_code
+            !=
+            200
+        ):
+
+            return freeborn_web_page(
+                "Personnage EVE indisponible",
+                "Les informations du personnage n'ont pas pu être récupérées auprès d'EVE Online.",
+                status="error",
+            ), 400
+
+        character_data = (
+            character_response.json()
+        )
+
+        corporation_id = (
+            character_data[
+                "corporation_id"
+            ]
+        )
+
+        corporation_response = (
+            character_response
+        )
 
     if (
-        character_response.status_code
+        int(corporation_id)
         !=
-        200
+        int(expected_corporation_id)
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>❌ Unable to retrieve character</h2>
-        """, 400
+        return freeborn_web_page(
+            "Intégration en attente",
+            (
+                "Freeborn ne peut pas encore confirmer ton appartenance "
+                "à Freeborn Legacy auprès de l’ESI EVE Online.\n\n"
+                "Après une entrée récente dans la corporation, la synchronisation "
+                "des données ESI peut nécessiter un certain délai. Un délai pouvant "
+                "aller jusqu’à 24 heures peut être nécessaire.\n\n"
+                "Réessaie simplement /freeborn un peu plus tard. Si la situation "
+                "persiste au-delà de ce délai, contacte le staff."
+            ),
+            status="pending",
+            character_name=character_name,
+        ), 409
 
-    character_data = (
-        character_response.json()
-    )
+    # ========================================================
+    # FREEBORN FITTINGS — PILOT TEST SSO
+    # ========================================================
 
-    corporation_id = (
-        character_data[
-            "corporation_id"
+    if verification_type == "fit_pilot":
+
+        try:
+            fit_id = int(state_data["fit_id"])
+            fit_web_token = str(state_data["fit_web_token"])
+        except (KeyError, TypeError, ValueError):
+            return freeborn_web_page(
+                "Test pilote invalide",
+                "Le lien de test du fitting est incomplet. Retourne sur la fiche et relance le test.",
+                status="error",
+                character_name=character_name,
+            ), 400
+
+        pilot_record = get_guild_main_by_character_id_v3(
+            guild_id,
+            character_id,
+        )
+
+        if (
+            not pilot_record
+            or
+            not pilot_record["in_corporation"]
+        ):
+            return freeborn_web_page(
+                "Main EVE non reconnu",
+                (
+                    "Ce personnage n'est pas enregistré comme Main Freeborn "
+                    "pour ce serveur. Utilise d'abord /freeborn sur Discord "
+                    "avec ton Main EVE."
+                ),
+                status="warning",
+                character_name=character_name,
+            ), 403
+
+        try:
+            update_guild_main_skills_snapshot_v3(
+                guild_id,
+                character_id,
+                skill_summary,
+            )
+        except Exception as error:
+            print(
+                "Freeborn Fittings pilot snapshot refresh failed:",
+                repr(error),
+            )
+            return freeborn_web_page(
+                "Profil pilote indisponible",
+                "Freeborn n'a pas pu actualiser les compétences de ce Main EVE.",
+                status="warning",
+                character_name=character_name,
+            ), 500
+
+        pilot_token = fit_pilot_serializer.dumps({
+            "guild_id": str(guild_id),
+            "fit_id": int(fit_id),
+            "character_id": int(character_id),
+        })
+
+        target_url = (
+            f"{PUBLIC_BASE_URL}/fittings/"
+            f"{format_fit_reference(fit_id)}?"
+            + urlencode({
+                "token": fit_web_token,
+                "pilot": pilot_token,
+            })
+        )
+
+        return redirect(target_url)
+
+    # ========================================================
+    # FREEBORN FINAL INTEGRATION FLOW
+    # ========================================================
+
+    if (
+        verification_type
+        ==
+        "freeborn"
+    ):
+
+        current_status = get_member_status_v3(
+            guild_id,
+            discord_user_id,
+        )
+
+        if (
+            not current_status
+            or
+            current_status[0]
+            not in {
+                "candidate",
+                "candidate_accepted",
+            }
+        ):
+
+            return freeborn_web_page(
+                "Parcours Discord incomplet",
+                "Le parcours Orientation → Candidat doit être effectué avant /freeborn.",
+                status="error",
+            ), 400
+
+        policy_state = (
+            has_required_policy_acceptances_v3(
+                guild_id,
+                discord_user_id,
+            )
+        )
+
+        if not policy_state["complete"]:
+
+            return freeborn_web_page(
+                "Documents non acceptés",
+                "Le Règlement Corp et la Charte Freeborn doivent être lus et acceptés avant /freeborn.",
+                status="error",
+            ), 400
+
+        try:
+
+            save_main_character_v3(
+                guild_id,
+                discord_user_id,
+                character_id,
+                character_name,
+                corporation_id,
+                refresh_token=refresh_token,
+                granted_scopes=granted_scopes,
+                total_skill_points=skill_summary["total_sp"],
+                skills_snapshot=skill_summary["skills"],
+            )
+
+            if str(guild_id) == str(DISCORD_GUILD_ID):
+
+                try:
+
+                    save_main_character(
+                        discord_user_id,
+                        character_id,
+                        character_name,
+                        corporation_id,
+                    )
+
+                except ValueError as legacy_error:
+
+                    if (
+                        "already has main character"
+                        not in str(legacy_error)
+                        and
+                        "already linked"
+                        not in str(legacy_error).lower()
+                    ):
+
+                        raise
+
+        except ValueError as error:
+
+            error_text = str(error)
+            if "another Discord account" in error_text:
+                error_text = "Ce personnage EVE est déjà lié à un autre compte Discord."
+            elif "already has main character" in error_text:
+                error_text = "Ce compte Discord possède déjà un Main EVE enregistré."
+
+            return freeborn_web_page(
+                "Conflit d'identité EVE",
+                error_text,
+                status="error",
+                character_name=character_name,
+            ), 409
+
+        except Exception as error:
+
+            print(
+                "V3 /freeborn main save failed:",
+                repr(error),
+            )
+
+            return freeborn_web_page(
+                "Erreur de base de données",
+                "L'identité EVE n'a pas pu être enregistrée. Aucune validation n'a été confirmée.",
+                status="warning",
+                character_name=character_name,
+            ), 500
+
+        eve_verified_role_id = resolve_guild_role_id(
+            guild_id,
+            "eve_verified",
+        )
+
+        main_character_role_id = resolve_guild_role_id(
+            guild_id,
+            "main_character",
+        )
+
+        if (
+            not eve_verified_role_id
+            or
+            not main_character_role_id
+        ):
+
+            return freeborn_web_page(
+                "Rôles Discord non configurés",
+                "Les rôles EVE Verified / Main Character ne sont pas correctement configurés pour ce serveur.",
+                status="warning",
+            ), 500
+
+        identity_role_responses = [
+            add_discord_role(
+                guild_id,
+                discord_user_id,
+                eve_verified_role_id,
+            ),
+
+            add_discord_role(
+                guild_id,
+                discord_user_id,
+                main_character_role_id,
+            ),
         ]
-    )
 
-    if (
-        corporation_id
-        !=
-        FREEBORN_CORPORATION_ID
-    ):
+        if any(
+            response.status_code
+            not in
+            (200, 204)
 
-        return f"""
-        <h1>Freeborn Verify</h1>
+            for response
+            in identity_role_responses
+        ):
 
-        <p>
-        <strong>Character:</strong>
-        {character_name}
-        </p>
+            return freeborn_web_page(
+                "Attribution des rôles impossible",
+                "L'identité EVE est enregistrée mais les rôles Discord n'ont pas pu être attribués. Contacte un administrateur.",
+                status="warning",
+                character_name=character_name,
+            ), 500
 
-        <h2>❌ REFUSED</h2>
+        add_audit_event_v3(
+            guild_id,
+            "freeborn_eve_identity_verified",
+            target_discord_user_id=
+                discord_user_id,
+            actor_discord_user_id=
+                discord_user_id,
+        )
 
-        <p>
-        Ce personnage n'appartient
-        pas à Freeborn Legacy.
-        </p>
-        """
+        log_v3_event_to_discord(
+            guild_config,
+            "🛡️ **Identité EVE vérifiée**\n"
+            f"Membre : <@{discord_user_id}> (`{discord_user_id}`)\n"
+            f"Main EVE : **{character_name}**\n"
+            f"Skill Points : **{skill_summary['total_sp']:,} SP**\n"
+            "Étape suivante : contrôle staff puis promotion en Membre.",
+        )
+
+        nickname_response = sync_discord_nickname(
+            guild_id,
+            discord_user_id,
+            character_name,
+        )
+
+        nickname_changed = (
+            nickname_response.status_code
+            in
+            (200, 204)
+        )
+
+        nickname_status = (
+            "<p>"
+            "Le pseudo Discord a été synchronisé sur "
+            f"<strong>{character_name}</strong>."
+            "</p>"
+
+            if nickname_changed
+
+            else
+
+            "<p>"
+            "Le personnage est validé, mais le pseudo Discord "
+            "n'a pas pu être modifié."
+            "</p>"
+        )
+
+        next_step = (
+            "Ton identité EVE est validée. Le staff peut maintenant contrôler "
+            "ton dossier et finaliser ton passage en Membre."
+            if current_status[0] == "candidate_accepted"
+            else
+            "Ton identité EVE est validée. Le staff peut maintenant contrôler "
+            "ton dossier puis valider ta candidature."
+        )
+
+        return freeborn_web_page(
+            "Identité EVE validée",
+            next_step + (
+                " Le pseudo Discord a également été synchronisé."
+                if nickname_changed
+                else
+                " Le pseudo Discord n'a pas pu être modifié automatiquement."
+            ),
+            status="success",
+            character_name=character_name,
+        )
 
     # ========================================================
     # MAIN FLOW
@@ -5477,38 +33601,19 @@ def callback():
                     "Unknown"
                 )
 
-                return f"""
-                <h1>Freeborn Verify</h1>
+                return freeborn_web_page(
+                    "Main déjà enregistré",
+                    f"Ton Main actuel est {existing_main_name}. Utilise /main-changer pour changer de Main.",
+                    status="error",
+                    character_name=character_name,
+                ), 400
 
-                <p>
-                <strong>Character:</strong>
-                {character_name}
-                </p>
-
-                <h2>❌ MAIN ALREADY REGISTERED</h2>
-
-                <p>
-                Ton personnage principal actuel est
-                <strong>{existing_main_name}</strong>.
-                </p>
-
-                <p>
-                Utilise la commande
-                <strong>/main-change</strong>
-                pour changer de Main Character.
-                </p>
-                """, 400
-
-            return """
-            <h1>Freeborn Verify</h1>
-
-            <h2>❌ CHARACTER ALREADY LINKED</h2>
-
-            <p>
-            Ce personnage EVE est déjà associé
-            à un autre compte Discord.
-            </p>
-            """, 400
+            return freeborn_web_page(
+                "Personnage déjà lié",
+                "Ce personnage EVE est déjà associé à un autre compte Discord.",
+                status="error",
+                character_name=character_name,
+            ), 409
 
         except Exception as error:
 
@@ -5517,10 +33622,12 @@ def callback():
                 repr(error),
             )
 
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ Database error</h2>
-            """, 500
+            return freeborn_web_page(
+                "Erreur de base de données",
+                "Le Main EVE n'a pas pu être enregistré. Aucune validation n'a été confirmée.",
+                status="warning",
+                character_name=character_name,
+            ), 500
 
         role_responses = [
             add_discord_role(
@@ -5551,10 +33658,12 @@ def callback():
             in role_responses
         ):
 
-            return """
-            <h1>Freeborn Verify</h1>
-            <h2>⚠️ Role assignment error</h2>
-            """, 500
+            return freeborn_web_page(
+                "Attribution des rôles impossible",
+                "Le personnage est enregistré mais les rôles Discord n'ont pas pu être appliqués. Contacte un administrateur.",
+                status="warning",
+                character_name=character_name,
+            ), 500
 
         remove_discord_role(
             guild_id,
@@ -5594,33 +33703,20 @@ def callback():
             "</p>"
         )
 
-        return f"""
-        <h1>Freeborn Verify</h1>
-
-        <p>
-        <strong>Character:</strong>
-        {character_name}
-        </p>
-
-        <p>
-        <strong>Corporation:</strong>
-        Freeborn Legacy
-        </p>
-
-        <h2>✅ VERIFIED</h2>
-
-        <p>
-        <strong>{character_name}</strong>
-        est enregistré comme
-        <strong>Main Character</strong>.
-        </p>
-
-        {nickname_status}
-
-        <p>
-        Tu peux retourner sur Discord.
-        </p>
-        """
+        return freeborn_web_page(
+            "Main EVE vérifié",
+            (
+                f"{character_name} est enregistré comme personnage principal. "
+                + (
+                    "Le pseudo Discord a été synchronisé."
+                    if nickname_changed
+                    else
+                    "Le pseudo Discord n'a pas pu être modifié automatiquement."
+                )
+            ),
+            status="success",
+            character_name=character_name,
+        )
 
     # ========================================================
     # ALT FLOW
@@ -5630,16 +33726,11 @@ def callback():
         discord_user_id
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-
-        <h2>❌ MAIN REQUIRED</h2>
-
-        <p>
-        Tu dois d'abord enregistrer
-        ton Main avec /verify.
-        </p>
-        """, 400
+        return freeborn_web_page(
+            "Main EVE requis",
+            "Tu dois d'abord enregistrer ton Main EVE avant d'ajouter un Alt.",
+            status="error",
+        ), 400
 
     try:
 
@@ -5657,27 +33748,19 @@ def callback():
             in str(error)
         ):
 
-            return f"""
-            <h1>Freeborn Verify</h1>
+            return freeborn_web_page(
+                "Ajout d'Alt refusé",
+                "Ce personnage est déjà ton personnage principal.",
+                status="error",
+                character_name=character_name,
+            ), 400
 
-            <p>
-            <strong>{character_name}</strong>
-            est déjà ton Main Character.
-            </p>
-
-            <h2>❌ REFUSED</h2>
-            """, 400
-
-        return """
-        <h1>Freeborn Verify</h1>
-
-        <h2>❌ CHARACTER ALREADY LINKED</h2>
-
-        <p>
-        Ce personnage est déjà associé
-        à un autre compte Discord.
-        </p>
-        """, 400
+        return freeborn_web_page(
+            "Personnage déjà lié",
+            "Ce personnage EVE est déjà associé à un autre compte Discord.",
+            status="error",
+            character_name=character_name,
+        ), 409
 
     except Exception as error:
 
@@ -5686,10 +33769,12 @@ def callback():
             repr(error),
         )
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>⚠️ Database error</h2>
-        """, 500
+        return freeborn_web_page(
+            "Erreur de base de données",
+            "L'Alt EVE n'a pas pu être enregistré.",
+            status="warning",
+            character_name=character_name,
+        ), 500
 
     alt_role_response = (
         add_discord_role(
@@ -5705,36 +33790,19 @@ def callback():
         (200, 204)
     ):
 
-        return """
-        <h1>Freeborn Verify</h1>
-        <h2>⚠️ Alt role error</h2>
-        """, 500
+        return freeborn_web_page(
+            "Attribution du rôle Alt impossible",
+            "L'Alt est enregistré mais le rôle Discord Alt Character n'a pas pu être attribué.",
+            status="warning",
+            character_name=character_name,
+        ), 500
 
-    return f"""
-    <h1>Freeborn Verify</h1>
-
-    <p>
-    <strong>Character:</strong>
-    {character_name}
-    </p>
-
-    <p>
-    <strong>Corporation:</strong>
-    Freeborn Legacy
-    </p>
-
-    <h2>✅ ALT VERIFIED</h2>
-
-    <p>
-    <strong>{character_name}</strong>
-    a été ajouté comme
-    <strong>Alt Character</strong>.
-    </p>
-
-    <p>
-    Tu peux retourner sur Discord.
-    </p>
-    """
+    return freeborn_web_page(
+        "Alt EVE vérifié",
+        f"{character_name} a été ajouté comme personnage secondaire.",
+        status="success",
+        character_name=character_name,
+    )
 
 
 # ============================================================
@@ -5757,11 +33825,10 @@ def register_commands():
 
         {
             "name":
-                "verify",
+                "freeborn",
 
             "description":
-                "Vérifier ton Main EVE "
-                "pour Freeborn Legacy",
+                "Finaliser ton intégration Freeborn",
 
             "type":
                 1,
@@ -5769,11 +33836,10 @@ def register_commands():
 
         {
             "name":
-                "alt",
+                "srp",
 
             "description":
-                "Ajouter un Alt EVE "
-                "à ton compte Freeborn",
+                "Créer une demande de remboursement SRP",
 
             "type":
                 1,
@@ -5781,7 +33847,320 @@ def register_commands():
 
         {
             "name":
-                "alt-remove",
+                "op-corp",
+
+            "description":
+                "Créer une opération corporation Freeborn",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type":
+                        3,
+                    "name":
+                        "type",
+                    "description":
+                        "Type d'opération corporation",
+                    "required":
+                        True,
+                    "choices": [
+                        {
+                            "name":
+                                "⛏️ Minage",
+                            "value":
+                                "mining",
+                        },
+                        {
+                            "name":
+                                "🛡️ PvE",
+                            "value":
+                                "pve",
+                        },
+                        {
+                            "name":
+                                "⚔️ PvP",
+                            "value":
+                                "pvp",
+                        },
+                        {
+                            "name":
+                                "✨ Autre",
+                            "value":
+                                "other",
+                        },
+                    ],
+                }
+            ],
+        },
+
+        {
+            "name":
+                "prix-jita",
+
+            "description":
+                "Consulter les prix Jita SELL et volumes EVE — CEO uniquement",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "achat",
+
+            "description":
+                "Créer une annonce personnelle d'achat sur Freeborn Market",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "vente",
+
+            "description":
+                "Créer une annonce personnelle de vente sur Freeborn Market",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "achat-corp",
+
+            "description":
+                "Créer une annonce officielle d'achat pour la corporation",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "vente-corp",
+
+            "description":
+                "Créer une annonce officielle de vente pour la corporation",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "fit-creer",
+
+            "description":
+                "Proposer un fitting Freeborn à partir d'un copier-coller EFT",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "fit-liste",
+
+            "description":
+                "Afficher la bibliothèque des fittings Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "fit-afficher",
+
+            "description":
+                "Publier la fiche d'un fitting Freeborn",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type": 3,
+                    "name": "ref",
+                    "description": "Référence du fit (ex. FREE-0001)",
+                    "required": True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "fit-modifier",
+
+            "description":
+                "Modifier un fitting existant sans changer son FREE-xxxx",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type": 3,
+                    "name": "ref",
+                    "description":
+                        "Référence du fit (ex. FREE-0001)",
+                    "required": True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "fit-approuver",
+
+            "description":
+                "Valider un fitting comme FREEBORN APPROVED",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type": 3,
+                    "name": "ref",
+                    "description": "Référence du fit (ex. FREE-0001)",
+                    "required": True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "fit-refuser",
+
+            "description":
+                "Refuser un fitting proposé",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type": 3,
+                    "name": "ref",
+                    "description": "Référence du fit (ex. FREE-0001)",
+                    "required": True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "fit-supprimer",
+
+            "description":
+                "Supprimer définitivement un fitting Freeborn",
+
+            "type":
+                1,
+
+            "options": [
+                {
+                    "type": 3,
+                    "name": "ref",
+                    "description": "Référence du fit (ex. FREE-0001)",
+                    "required": True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "guide-membre",
+
+            "description":
+                "Afficher ton guide privé Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "guide-staff",
+
+            "description":
+                "Afficher le guide privé des commandes staff V3",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "verification",
+
+            "description":
+                "Contrôler le dossier d'un candidat",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type":
+                        3,
+
+                    "name":
+                        "membre",
+
+                    "description":
+                        "Candidat à contrôler",
+
+                    "required":
+                        True,
+
+                    "autocomplete":
+                        True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "alt-ajouter",
+
+            "description":
+                "Ajouter un personnage secondaire EVE "
+                "à ton profil Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "alt-supprimer",
 
             "description":
                 "Supprimer un Alt "
@@ -5799,7 +34178,7 @@ def register_commands():
                         "personnage",
 
                     "description":
-                        "Alt Character à supprimer",
+                        "Personnage secondaire à supprimer",
 
                     "required":
                         True,
@@ -5812,11 +34191,11 @@ def register_commands():
 
         {
             "name":
-                "main-change",
+                "main-changer",
 
             "description":
-                "Choisir un de tes Alts "
-                "comme nouveau Main",
+                "Choisir un personnage secondaire "
+                "comme nouveau personnage principal",
 
             "type":
                 1,
@@ -5830,8 +34209,8 @@ def register_commands():
                         "personnage",
 
                     "description":
-                        "Alt Character "
-                        "qui deviendra ton Main",
+                        "Personnage secondaire qui deviendra "
+                        "ton personnage principal",
 
                     "required":
                         True,
@@ -5844,10 +34223,10 @@ def register_commands():
 
         {
             "name":
-                "member-info",
+                "membre-info",
 
             "description":
-                "Afficher un profil EVE Freeborn",
+                "Afficher le profil EVE d'un membre Freeborn",
 
             "type":
                 1,
@@ -5876,17 +34255,117 @@ def register_commands():
 
         {
             "name":
-                "member-remove",
+                "reglement-discord-panneau",
 
             "description":
-                "Supprimer complètement "
-                "le profil EVE d'un membre",
+                "Publier le règlement Discord officiel Freeborn Legacy",
 
             "type":
                 1,
 
-            # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "bienvenue-panneau",
+
+            "description":
+                "Publier le panneau officiel de bienvenue Freeborn Legacy",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "orientation-panneau",
+
+            "description":
+                "Publier le panneau d'orientation V3",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "reglement-corp-panneau",
+
+            "description":
+                "Publier le bouton d'acceptation du Règlement Corp",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "charte-panneau",
+
+            "description":
+                "Publier le bouton d'acceptation de la Charte Freeborn",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "candidat-accepter",
+
+            "description":
+                "Valider un candidat en Candidat Accepté",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type":
+                        3,
+
+                    "name":
+                        "membre",
+
+                    "description":
+                        "Candidat à valider",
+
+                    "required":
+                        True,
+
+                    "autocomplete":
+                        True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "membre-promouvoir",
+
+            "description":
+                "Promouvoir un Candidat Accepté en Membre",
+
+            "type":
+                1,
+
             "default_member_permissions":
                 "0",
 
@@ -5899,7 +34378,7 @@ def register_commands():
                         "membre",
 
                     "description":
-                        "Membre Freeborn à supprimer",
+                        "Candidat Accepté à promouvoir",
 
                     "required":
                         True,
@@ -5909,41 +34388,75 @@ def register_commands():
 
         {
             "name":
-                "member-list",
+                "membre-supprimer",
 
             "description":
-                "Afficher la liste des "
-                "membres EVE enregistrés",
+                "Supprimer complètement "
+                "le profil EVE d'un membre",
 
             "type":
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
+            "default_member_permissions":
+                "0",
+
+            "options": [
+                {
+                    "type":
+                        3,
+
+                    "name":
+                        "membre",
+
+                    "description":
+                        "Membre Freeborn à supprimer",
+
+                    "required":
+                        True,
+
+                    "autocomplete":
+                        True,
+                }
+            ],
+        },
+
+        {
+            "name":
+                "membre-liste",
+
+            "description":
+                "Afficher la liste des membres EVE enregistrés",
+
+            "type":
+                1,
+
+            # Hidden/disabled by default. Explicit Discord role
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
 
         {
             "name":
-                "db-health",
+                "base-statut",
 
             "description":
-                "Afficher l'état de "
-                "la base Freeborn",
+                "Afficher l'état de la base de données Freeborn",
 
             "type":
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
 
         {
             "name":
-                "sync-status",
+                "synchro-statut",
 
             "description":
                 "Afficher l'état global "
@@ -5953,14 +34466,14 @@ def register_commands():
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
 
         {
             "name":
-                "sync-check",
+                "synchro-verifier",
 
             "description":
                 "Contrôler les personnages "
@@ -5970,24 +34483,23 @@ def register_commands():
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
 
         {
             "name":
-                "sync-apply",
+                "synchro-appliquer",
 
             "description":
-                "Synchroniser et révoquer "
-                "les anciens membres",
+                "Appliquer la synchronisation et les révocations confirmées",
 
             "type":
                 1,
 
             # Hidden/disabled by default. Explicit Discord role
-            # overwrites allow Founder, CEO and Director.
+            # overwrites are managed according to the V3 staff hierarchy.
             "default_member_permissions":
                 "0",
         },
@@ -6020,13 +34532,19 @@ def register_commands():
         ):
 
             print(
-                "Discord commands registered: "
-                "/verify, /alt, /alt-remove, "
-                "/main-change, /member-info, "
-                "/member-remove, /member-list, "
-                "/db-health, /sync-status, "
-                "/sync-check, "
-                "/sync-apply."
+                "Commandes Discord enregistrées : "
+                "/freeborn, /fit-creer, /fit-liste, /fit-afficher, /fit-modifier, /fit-approuver, /fit-refuser, /fit-supprimer, "
+                "/guide-membre, /guide-staff, /verification, "
+                "/alt-ajouter, /alt-supprimer, /main-changer, "
+                "/membre-info, /membre-liste, "
+                "/membre-promouvoir, /membre-supprimer, "
+                "/candidat-accepter, "
+                "/reglement-discord-panneau, "
+                "/bienvenue-panneau, "
+                "/orientation-panneau, "
+                "/reglement-corp-panneau, /charte-panneau, "
+                "/base-statut, /synchro-statut, "
+                "/synchro-verifier, /synchro-appliquer."
             )
 
         else:
@@ -6062,6 +34580,163 @@ register_commands()
 # ============================================================
 # START
 # ============================================================
+
+# ============================================================
+# FREEBORN FITTINGS — ADVANCED CAPACITOR MODEL
+# ============================================================
+
+CAPACITOR_EFFECT_CLASSES = {
+    "continuous_consumer": (
+        "microwarpdrive", "afterburner", "shield booster", "armor repairer",
+        "armor repair", "hardener", "tracking computer", "guidance computer",
+        "sensor booster", "remote", "ecm", "warp disrupt", "warp scram",
+        "stasis web", "target painter", "cloaking device", "tractor beam",
+    ),
+    "conditional_source": ("nosferatu", "energy nosferatu"),
+    "active_injector": ("capacitor booster", "cap booster"),
+    "energy_transfer": ("energy transfer", "remote capacitor"),
+}
+
+def classify_capacitor_item(type_name):
+    name = (type_name or "").strip().lower()
+    if not name:
+        return "neutral_or_unknown"
+    for cls in ("conditional_source", "active_injector", "energy_transfer"):
+        if any(token in name for token in CAPACITOR_EFFECT_CLASSES[cls]):
+            return cls
+    if any(token in name for token in CAPACITOR_EFFECT_CLASSES["continuous_consumer"]):
+        return "continuous_consumer"
+    return "neutral_or_unknown"
+
+def build_capacitor_activity_audit(item_names):
+    audit = {
+        "continuous_consumers": [], "conditional_sources": [],
+        "active_injectors": [], "energy_transfers": [],
+        "neutral_or_unknown": [],
+    }
+    keymap = {
+        "continuous_consumer": "continuous_consumers",
+        "conditional_source": "conditional_sources",
+        "active_injector": "active_injectors",
+        "energy_transfer": "energy_transfers",
+        "neutral_or_unknown": "neutral_or_unknown",
+    }
+    for item in item_names or []:
+        audit[keymap[classify_capacitor_item(item)]].append(item)
+    return audit
+
+
+def build_fitted_capacitor_activity_audit(
+    eft_sections,
+):
+    """
+    Build a capacitor-behaviour audit from the modules actually fitted.
+
+    Returns display-ready rows with quantities. Cargo, drones and charges
+    are deliberately excluded.
+    """
+    fitted_lines = (
+        eft_sections.get("low", [])
+        + eft_sections.get("mid", [])
+        + eft_sections.get("high", [])
+        + eft_sections.get("rigs", [])
+    )
+
+    counts = {}
+
+    for raw_line in fitted_lines:
+        item_name = normalize_eft_item_name(raw_line)
+
+        if not item_name:
+            continue
+
+        key = item_name.casefold()
+
+        if key not in counts:
+            counts[key] = {
+                "name": item_name,
+                "quantity": 0,
+            }
+
+        counts[key]["quantity"] += 1
+
+    audit = {
+        "continuous_consumers": [],
+        "conditional_sources": [],
+        "active_injectors": [],
+        "energy_transfers": [],
+        "neutral_or_unknown": [],
+    }
+
+    keymap = {
+        "continuous_consumer": "continuous_consumers",
+        "conditional_source": "conditional_sources",
+        "active_injector": "active_injectors",
+        "energy_transfer": "energy_transfers",
+        "neutral_or_unknown": "neutral_or_unknown",
+    }
+
+    for row in counts.values():
+        classification = classify_capacitor_item(
+            row["name"]
+        )
+
+        audit[keymap[classification]].append(
+            row
+        )
+
+    return audit
+
+
+def format_capacitor_audit_items(rows):
+    """Compact HTML-safe list such as '1× Corpus X-Type Heavy Energy Nosferatu'."""
+    if not rows:
+        return "Aucun"
+
+    parts = []
+
+    for row in rows:
+        quantity = int(
+            row.get("quantity", 1)
+            or 1
+        )
+        name = escape(
+            str(
+                row.get("name")
+                or "Module inconnu"
+            )
+        )
+
+        parts.append(
+            f"{quantity}× {name}"
+        )
+
+    return " • ".join(parts)
+
+
+def capacitor_verdict_policy(base_projection, audit):
+    audit = audit or {}
+    conditional = (
+        audit.get("conditional_sources", [])
+        + audit.get("active_injectors", [])
+        + audit.get("energy_transfers", [])
+    )
+    if conditional:
+        return {
+            "projection": base_projection,
+            "verdict": "PROJECTION CONDITIONNELLE",
+            "is_final_eve_verdict": False,
+            "reason": "Source, injection ou transfert de capaciteur conditionnel détecté.",
+            "conditional_items": conditional,
+        }
+    return {
+        "projection": base_projection,
+        "verdict": "PROJECTION ALL-ACTIVE",
+        "is_final_eve_verdict": False,
+        "reason": "Capacitor State théorique limitée aux effets Dogma actuellement couverts.",
+        "conditional_items": [],
+    }
+
 
 if __name__ == "__main__":
 
