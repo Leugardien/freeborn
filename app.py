@@ -228,6 +228,23 @@ DISCORD_SRP_FORUM_ID = os.environ.get(
     "1536573060285730817",
 )
 
+# Freeborn — propositions de réunion.
+# Three independent private forums with independent visible numbering.
+DISCORD_MEETING_OFFICER_FORUM_ID = os.environ.get(
+    "DISCORD_MEETING_OFFICER_FORUM_ID",
+    "1538061991007096832",
+)
+
+DISCORD_MEETING_DIRECTION_FORUM_ID = os.environ.get(
+    "DISCORD_MEETING_DIRECTION_FORUM_ID",
+    "1538062082019430471",
+)
+
+DISCORD_MEETING_COUNCIL_FORUM_ID = os.environ.get(
+    "DISCORD_MEETING_COUNCIL_FORUM_ID",
+    "1538062154694000661",
+)
+
 # Market page line count:
 # - operational default: 10
 # - hard ceiling: 15
@@ -400,6 +417,31 @@ SRP_MANAGER_ROLE_IDS = configured_role_ids(
 
 
 # ============================================================
+# FREEBORN REUNIONS — ACCESS
+# ============================================================
+
+# Réunion Officiers: Officier + Direction + Haut Conseil + CEO.
+MEETING_OFFICER_ROLE_IDS = configured_role_ids(
+    DISCORD_OFFICER_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# Réunion Direction: Direction + Haut Conseil + CEO.
+MEETING_DIRECTION_ROLE_IDS = configured_role_ids(
+    DISCORD_DIRECTION_ROLE_ID,
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# Réunion Haut Conseil: Haut Conseil + CEO.
+MEETING_COUNCIL_ROLE_IDS = configured_role_ids(
+    DISCORD_HIGH_COUNCIL_ROLE_ID,
+    DISCORD_CEO_ROLE_ID,
+)
+
+# ============================================================
 # URLS
 # ============================================================
 
@@ -427,7 +469,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-PRODUCTION-FINAL"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-REUNIONS-P1"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -1174,6 +1216,130 @@ def init_database():
                     idx_corp_operation_attendance_operation
                     ON corp_operation_attendance (
                         operation_id,
+                        attendance_status
+                    );
+                    """
+                )
+
+                # ====================================================
+                # FREEBORN REUNIONS
+                # ====================================================
+
+                # Internal primary key. The visible references use three
+                # independent sequences OFF / DIR / HC so that one level
+                # cannot infer activity in another level from numbering.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS meeting_proposals (
+                        meeting_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        meeting_level TEXT NOT NULL CHECK (
+                            meeting_level IN (
+                                'officer',
+                                'direction',
+                                'council'
+                            )
+                        ),
+                        meeting_number BIGINT NOT NULL,
+                        title TEXT NOT NULL,
+                        meeting_date DATE NOT NULL,
+                        start_time TIME NOT NULL,
+                        end_time TIME NOT NULL,
+                        comment TEXT,
+                        created_by_discord_user_id TEXT NOT NULL,
+                        discord_thread_id TEXT,
+                        discord_post_message_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'open' CHECK (
+                            status IN (
+                                'open',
+                                'closed'
+                            )
+                        ),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        closed_at TIMESTAMPTZ,
+                        closed_by_discord_user_id TEXT,
+                        UNIQUE (
+                            guild_id,
+                            meeting_level,
+                            meeting_number
+                        ),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS meeting_attendance (
+                        meeting_id BIGINT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        attendance_status TEXT NOT NULL CHECK (
+                            attendance_status IN (
+                                'present',
+                                'absent',
+                                'maybe'
+                            )
+                        ),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (
+                            meeting_id,
+                            discord_user_id
+                        ),
+                        FOREIGN KEY (meeting_id)
+                            REFERENCES meeting_proposals (meeting_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                # Separate visible counters by confidentiality level.
+                cur.execute(
+                    """
+                    CREATE SEQUENCE IF NOT EXISTS
+                    meeting_officer_number_seq
+                    START WITH 1 INCREMENT BY 1;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE SEQUENCE IF NOT EXISTS
+                    meeting_direction_number_seq
+                    START WITH 1 INCREMENT BY 1;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE SEQUENCE IF NOT EXISTS
+                    meeting_council_number_seq
+                    START WITH 1 INCREMENT BY 1;
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_meeting_proposals_guild_level_status
+                    ON meeting_proposals (
+                        guild_id,
+                        meeting_level,
+                        status,
+                        meeting_date,
+                        start_time
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_meeting_attendance_meeting
+                    ON meeting_attendance (
+                        meeting_id,
                         attendance_status
                     );
                     """
@@ -13678,6 +13844,1296 @@ def freeborn_srp_archive_thread(
 
 
 # ============================================================
+# FREEBORN REUNIONS
+# ============================================================
+
+FREEBORN_MEETING_META = {
+    "officer": {
+        "prefix": "OFF",
+        "label": "Réunion Officiers",
+        "forum_id": DISCORD_MEETING_OFFICER_FORUM_ID,
+        "roles": MEETING_OFFICER_ROLE_IDS,
+        "sequence": "meeting_officer_number_seq",
+        "color": 0x2F81F7,
+    },
+    "direction": {
+        "prefix": "DIR",
+        "label": "Réunion Direction",
+        "forum_id": DISCORD_MEETING_DIRECTION_FORUM_ID,
+        "roles": MEETING_DIRECTION_ROLE_IDS,
+        "sequence": "meeting_direction_number_seq",
+        "color": 0x5865F2,
+    },
+    "council": {
+        "prefix": "HC",
+        "label": "Réunion Haut Conseil",
+        "forum_id": DISCORD_MEETING_COUNCIL_FORUM_ID,
+        "roles": MEETING_COUNCIL_ROLE_IDS,
+        "sequence": "meeting_council_number_seq",
+        "color": 0xF1C75B,
+    },
+}
+
+
+def freeborn_meeting_meta(meeting_level):
+    return FREEBORN_MEETING_META.get(
+        str(meeting_level)
+    )
+
+
+def freeborn_meeting_reference(
+    meeting_level,
+    meeting_number,
+):
+    meta = freeborn_meeting_meta(
+        meeting_level
+    )
+
+    if not meta:
+        return (
+            f"R-{int(meeting_number):04d}"
+        )
+
+    return (
+        f"{meta['prefix']}-"
+        f"{int(meeting_number):04d}"
+    )
+
+
+def freeborn_meeting_get(meeting_id):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    meeting_id,
+                    guild_id,
+                    meeting_level,
+                    meeting_number,
+                    title,
+                    meeting_date,
+                    start_time,
+                    end_time,
+                    comment,
+                    created_by_discord_user_id,
+                    discord_thread_id,
+                    discord_post_message_id,
+                    status,
+                    created_at,
+                    updated_at,
+                    closed_at,
+                    closed_by_discord_user_id
+                FROM meeting_proposals
+                WHERE meeting_id = %s
+                LIMIT 1;
+                """,
+                (
+                    int(meeting_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "meeting_id":
+            int(row[0]),
+        "guild_id":
+            str(row[1]),
+        "meeting_level":
+            str(row[2]),
+        "meeting_number":
+            int(row[3]),
+        "title":
+            row[4],
+        "meeting_date":
+            row[5],
+        "start_time":
+            row[6],
+        "end_time":
+            row[7],
+        "comment":
+            row[8],
+        "created_by_discord_user_id":
+            str(row[9]),
+        "discord_thread_id":
+            row[10],
+        "discord_post_message_id":
+            row[11],
+        "status":
+            str(row[12]),
+        "created_at":
+            row[13],
+        "updated_at":
+            row[14],
+        "closed_at":
+            row[15],
+        "closed_by_discord_user_id":
+            row[16],
+    }
+
+
+def freeborn_meeting_insert(
+    guild_id,
+    meeting_level,
+    title,
+    meeting_date,
+    start_time,
+    end_time,
+    comment,
+    creator_user_id,
+):
+    meta = freeborn_meeting_meta(
+        meeting_level
+    )
+
+    if not meta:
+        raise ValueError(
+            "Invalid meeting level"
+        )
+
+    # Sequence identifiers are hard-coded from FREEBORN_MEETING_META,
+    # never supplied by a user.
+    sequence_name = str(
+        meta[
+            "sequence"
+        ]
+    )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT nextval('{sequence_name}');"
+            )
+            meeting_number = int(
+                cur.fetchone()[0]
+            )
+
+            cur.execute(
+                """
+                INSERT INTO meeting_proposals (
+                    guild_id,
+                    meeting_level,
+                    meeting_number,
+                    title,
+                    meeting_date,
+                    start_time,
+                    end_time,
+                    comment,
+                    created_by_discord_user_id,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    'open', NOW(), NOW()
+                )
+                RETURNING meeting_id;
+                """,
+                (
+                    str(guild_id),
+                    str(meeting_level),
+                    int(meeting_number),
+                    str(title),
+                    meeting_date,
+                    start_time,
+                    end_time,
+                    (
+                        str(comment)
+                        if comment
+                        else None
+                    ),
+                    str(creator_user_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    if not row:
+        raise RuntimeError(
+            "Meeting insert failed"
+        )
+
+    return int(
+        row[0]
+    )
+
+
+def freeborn_meeting_delete(
+    meeting_id
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM meeting_proposals
+                WHERE meeting_id = %s;
+                """,
+                (
+                    int(meeting_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_meeting_save_discord_link(
+    meeting_id,
+    thread_id,
+    message_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE meeting_proposals
+                SET
+                    discord_thread_id = %s,
+                    discord_post_message_id = %s,
+                    updated_at = NOW()
+                WHERE meeting_id = %s;
+                """,
+                (
+                    str(thread_id),
+                    str(message_id),
+                    int(meeting_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_meeting_attendance(
+    meeting_id
+):
+    result = {
+        "present":
+            [],
+        "absent":
+            [],
+        "maybe":
+            [],
+    }
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    discord_user_id,
+                    attendance_status
+                FROM meeting_attendance
+                WHERE meeting_id = %s
+                ORDER BY updated_at ASC;
+                """,
+                (
+                    int(meeting_id),
+                ),
+            )
+
+            rows = cur.fetchall()
+
+    for user_id, status in rows:
+        status = str(
+            status
+        )
+
+        if status in result:
+            result[
+                status
+            ].append(
+                str(user_id)
+            )
+
+    return result
+
+
+def freeborn_meeting_set_attendance(
+    meeting_id,
+    discord_user_id,
+    attendance_status,
+):
+    if attendance_status not in {
+        "present",
+        "absent",
+        "maybe",
+    }:
+        raise ValueError(
+            "Invalid meeting attendance status"
+        )
+
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO meeting_attendance (
+                    meeting_id,
+                    discord_user_id,
+                    attendance_status,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (
+                    meeting_id,
+                    discord_user_id
+                )
+                DO UPDATE SET
+                    attendance_status =
+                        EXCLUDED.attendance_status,
+                    updated_at = NOW();
+                """,
+                (
+                    int(meeting_id),
+                    str(discord_user_id),
+                    str(attendance_status),
+                ),
+            )
+
+        conn.commit()
+
+
+def freeborn_meeting_format_attendance(
+    attendance
+):
+    def render(
+        status,
+        label,
+        emoji,
+    ):
+        user_ids = (
+            attendance.get(
+                status
+            )
+            or []
+        )
+
+        mentions = (
+            "\n".join(
+                f"<@{user_id}>"
+                for user_id
+                in user_ids
+            )
+            if user_ids
+            else "—"
+        )
+
+        return (
+            f"{emoji} **{label} "
+            f"({len(user_ids)})**\n"
+            f"{mentions}"
+        )
+
+    return "\n\n".join([
+        render(
+            "present",
+            "Présents",
+            "✅",
+        ),
+        render(
+            "absent",
+            "Absents",
+            "❌",
+        ),
+        render(
+            "maybe",
+            "Indécis",
+            "❔",
+        ),
+    ])
+
+
+def freeborn_meeting_build_embed(
+    meeting
+):
+    meta = freeborn_meeting_meta(
+        meeting[
+            "meeting_level"
+        ]
+    )
+
+    attendance = freeborn_meeting_attendance(
+        meeting[
+            "meeting_id"
+        ]
+    )
+
+    status_label = (
+        "🟢 OUVERTE"
+        if meeting[
+            "status"
+        ] == "open"
+        else "🏁 CLÔTURÉE"
+    )
+
+    reference = freeborn_meeting_reference(
+        meeting[
+            "meeting_level"
+        ],
+        meeting[
+            "meeting_number"
+        ],
+    )
+
+    fields = [
+        {
+            "name":
+                "Statut",
+            "value":
+                status_label,
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Niveau",
+            "value":
+                (
+                    f"**{meta['label']}**"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Créée par",
+            "value":
+                (
+                    f"<@{meeting['created_by_discord_user_id']}>"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Date",
+            "value":
+                (
+                    f"**{meeting['meeting_date'].strftime('%d/%m/%Y')}**"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Horaire",
+            "value":
+                (
+                    f"**{meeting['start_time'].strftime('%H:%M')} "
+                    f"→ {meeting['end_time'].strftime('%H:%M')}**"
+                ),
+            "inline":
+                True,
+        },
+        {
+            "name":
+                "Participations",
+            "value":
+                freeborn_meeting_format_attendance(
+                    attendance
+                )[:1024],
+            "inline":
+                False,
+        },
+    ]
+
+    if meeting.get(
+        "comment"
+    ):
+        fields.append({
+            "name":
+                "Commentaire",
+            "value":
+                str(
+                    meeting[
+                        "comment"
+                    ]
+                )[:1024],
+            "inline":
+                False,
+        })
+
+    return {
+        "title":
+            (
+                f"{reference} — "
+                f"{meeting['title']}"
+            )[:256],
+        "description":
+            (
+                "Proposition de réunion Freeborn Legacy.\n"
+                "Indique ta disponibilité avec les boutons ci-dessous."
+            ),
+        "color":
+            int(
+                meta[
+                    "color"
+                ]
+            ),
+        # Official Freeborn logo on the right.
+        "thumbnail": {
+            "url":
+                (
+                    f"{PUBLIC_BASE_URL}"
+                    "/assets/logo-freeborn-legacy.png"
+                )
+        },
+        "fields":
+            fields,
+        "footer": {
+            "text":
+                (
+                    "Freeborn Legacy • Réunions • "
+                    "Présent / Absent / Indécis"
+                )
+        },
+    }
+
+
+def freeborn_meeting_components(
+    meeting_id,
+    status,
+):
+    if status != "open":
+        return []
+
+    return [
+        {
+            "type":
+                1,
+            "components": [
+                {
+                    "type":
+                        2,
+                    "style":
+                        3,
+                    "label":
+                        "Présent",
+                    "emoji": {
+                        "name":
+                            "✅",
+                    },
+                    "custom_id":
+                        f"meeting_attend_present:{int(meeting_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        4,
+                    "label":
+                        "Absent",
+                    "emoji": {
+                        "name":
+                            "❌",
+                    },
+                    "custom_id":
+                        f"meeting_attend_absent:{int(meeting_id)}",
+                },
+                {
+                    "type":
+                        2,
+                    "style":
+                        2,
+                    "label":
+                        "Indécis",
+                    "emoji": {
+                        "name":
+                            "❔",
+                    },
+                    "custom_id":
+                        f"meeting_attend_maybe:{int(meeting_id)}",
+                },
+            ],
+        },
+        {
+            "type":
+                1,
+            "components": [
+                {
+                    "type":
+                        2,
+                    "style":
+                        4,
+                    "label":
+                        "Clôturer la réunion",
+                    "emoji": {
+                        "name":
+                            "🏁",
+                    },
+                    "custom_id":
+                        f"meeting_close:{int(meeting_id)}",
+                },
+            ],
+        },
+    ]
+
+
+def freeborn_meeting_select_forum_tags(
+    forum,
+    status,
+):
+    available_tags = (
+        forum.get(
+            "available_tags"
+        )
+        or []
+    )
+
+    aliases = {
+        "open": {
+            "ouverte",
+            "ouvert",
+            "open",
+            "à venir",
+            "a venir",
+        },
+        "closed": {
+            "clôturée",
+            "cloturee",
+            "clôturé",
+            "cloture",
+            "closed",
+            "terminée",
+            "terminee",
+            "terminé",
+            "termine",
+        },
+    }.get(
+        str(status),
+        set(),
+    )
+
+    for tag in available_tags:
+        tag_name = str(
+            tag.get(
+                "name"
+            )
+            or ""
+        ).strip().casefold()
+
+        if tag_name in aliases:
+            tag_id = str(
+                tag.get(
+                    "id"
+                )
+                or ""
+            ).strip()
+
+            if tag_id:
+                return [
+                    tag_id
+                ]
+
+    # For creation in a forum that requires one tag, use the first
+    # configured tag if no explicit "Ouverte" tag exists.
+    if (
+        str(status) == "open"
+        and available_tags
+    ):
+        fallback_id = str(
+            available_tags[0].get(
+                "id"
+            )
+            or ""
+        ).strip()
+
+        if fallback_id:
+            return [
+                fallback_id
+            ]
+
+    return []
+
+
+def freeborn_meeting_publish(
+    meeting_id
+):
+    meeting = freeborn_meeting_get(
+        meeting_id
+    )
+
+    if not meeting:
+        raise RuntimeError(
+            "Meeting not found"
+        )
+
+    meta = freeborn_meeting_meta(
+        meeting[
+            "meeting_level"
+        ]
+    )
+
+    forum_id = str(
+        meta.get(
+            "forum_id"
+        )
+        or ""
+    ).strip()
+
+    if not forum_id:
+        raise RuntimeError(
+            "Meeting forum ID missing"
+        )
+
+    forum = discord_get_channel(
+        forum_id
+    )
+
+    if int(
+        forum.get(
+            "type",
+            -1,
+        )
+    ) not in {
+        15,
+        16,
+    }:
+        raise RuntimeError(
+            "Meeting destination is not a Forum/Media channel"
+        )
+
+    reference = freeborn_meeting_reference(
+        meeting[
+            "meeting_level"
+        ],
+        meeting[
+            "meeting_number"
+        ],
+    )
+
+    payload = {
+        "name":
+            (
+                f"{reference} — "
+                f"{meeting['title']}"
+            )[:100],
+        "auto_archive_duration":
+            10080,
+        "message": {
+            "embeds": [
+                freeborn_meeting_build_embed(
+                    meeting
+                )
+            ],
+            "components":
+                freeborn_meeting_components(
+                    meeting_id,
+                    meeting[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+    }
+
+    applied_tags = freeborn_meeting_select_forum_tags(
+        forum,
+        "open",
+    )
+
+    if applied_tags:
+        payload[
+            "applied_tags"
+        ] = applied_tags
+
+    response = requests.post(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{forum_id}/threads"
+        ),
+        headers=discord_bot_headers(),
+        json=payload,
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn meeting forum publication failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    body = (
+        response.json()
+        or {}
+    )
+
+    thread_id = str(
+        body[
+            "id"
+        ]
+    )
+
+    starter = (
+        body.get(
+            "message"
+        )
+        or {}
+    )
+
+    message_id = str(
+        starter.get(
+            "id"
+        )
+        or thread_id
+    )
+
+    freeborn_meeting_save_discord_link(
+        meeting_id,
+        thread_id,
+        message_id,
+    )
+
+    return {
+        "thread_id":
+            thread_id,
+        "message_id":
+            message_id,
+    }
+
+
+def freeborn_meeting_refresh_post(
+    meeting_id
+):
+    meeting = freeborn_meeting_get(
+        meeting_id
+    )
+
+    if not meeting:
+        raise RuntimeError(
+            "Meeting not found"
+        )
+
+    thread_id = str(
+        meeting.get(
+            "discord_thread_id"
+        )
+        or ""
+    ).strip()
+
+    message_id = str(
+        meeting.get(
+            "discord_post_message_id"
+        )
+        or ""
+    ).strip()
+
+    if (
+        not thread_id
+        or not message_id
+    ):
+        raise RuntimeError(
+            "Meeting Discord linkage missing"
+        )
+
+    response = requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{thread_id}/messages/"
+            f"{message_id}"
+        ),
+        headers=discord_bot_headers(),
+        json={
+            "embeds": [
+                freeborn_meeting_build_embed(
+                    meeting
+                )
+            ],
+            "components":
+                freeborn_meeting_components(
+                    meeting_id,
+                    meeting[
+                        "status"
+                    ],
+                ),
+            "allowed_mentions": {
+                "parse":
+                    [],
+            },
+        },
+        timeout=15,
+    )
+
+    if response.status_code not in {
+        200,
+        201,
+    }:
+        raise RuntimeError(
+            "Freeborn meeting post update failed "
+            f"({response.status_code}): "
+            f"{response.text[:800]}"
+        )
+
+    # Optional forum tag update. The post is deliberately NOT archived:
+    # the user explicitly wants closed meetings to remain visible.
+    if (
+        meeting[
+            "status"
+        ] == "closed"
+    ):
+        meta = freeborn_meeting_meta(
+            meeting[
+                "meeting_level"
+            ]
+        )
+
+        forum = discord_get_channel(
+            meta[
+                "forum_id"
+            ]
+        )
+
+        closed_tags = (
+            freeborn_meeting_select_forum_tags(
+                forum,
+                "closed",
+            )
+        )
+
+        if closed_tags:
+            tag_response = requests.patch(
+                (
+                    f"{DISCORD_API}/channels/"
+                    f"{thread_id}"
+                ),
+                headers=discord_bot_headers(),
+                json={
+                    "applied_tags":
+                        closed_tags,
+                },
+                timeout=12,
+            )
+
+            if tag_response.status_code not in {
+                200,
+                201,
+            }:
+                print(
+                    "Freeborn meeting closed-tag warning:",
+                    tag_response.status_code,
+                    tag_response.text[:500],
+                )
+
+
+def freeborn_meeting_close(
+    meeting_id,
+    actor_user_id,
+):
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE meeting_proposals
+                SET
+                    status = 'closed',
+                    closed_at = NOW(),
+                    closed_by_discord_user_id = %s,
+                    updated_at = NOW()
+                WHERE meeting_id = %s
+                  AND status = 'open'
+                RETURNING meeting_id;
+                """,
+                (
+                    str(actor_user_id),
+                    int(meeting_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return bool(
+        row
+    )
+
+
+def freeborn_meeting_parse_date_time(
+    date_text,
+    start_text,
+    end_text,
+):
+    meeting_date = datetime.strptime(
+        str(date_text).strip(),
+        "%d/%m/%Y",
+    ).date()
+
+    start_time = datetime.strptime(
+        str(start_text).strip(),
+        "%H:%M",
+    ).time()
+
+    end_time = datetime.strptime(
+        str(end_text).strip(),
+        "%H:%M",
+    ).time()
+
+    if (
+        datetime.combine(
+            meeting_date,
+            end_time,
+        )
+        <=
+        datetime.combine(
+            meeting_date,
+            start_time,
+        )
+    ):
+        raise ValueError(
+            "Meeting end must be after start"
+        )
+
+    return (
+        meeting_date,
+        start_time,
+        end_time,
+    )
+
+
+def handle_meeting_modal_submit(
+    data
+):
+    custom_id = str(
+        (
+            data.get(
+                "data"
+            )
+            or {}
+        ).get(
+            "custom_id"
+        )
+        or ""
+    )
+
+    create_match = re.fullmatch(
+        r"freeborn_meeting_create:(officer|direction|council)",
+        custom_id,
+    )
+
+    if not create_match:
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    "❌ Formulaire de réunion inconnu.",
+                "flags":
+                    64,
+            },
+        })
+
+    meeting_level = str(
+        create_match.group(
+            1
+        )
+    )
+
+    meta = freeborn_meeting_meta(
+        meeting_level
+    )
+
+    if not (
+        interaction_member_role_ids(
+            data
+        )
+        & meta[
+            "roles"
+        ]
+    ):
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    "⛔ Tu n'es pas autorisé à créer cette réunion.",
+                "flags":
+                    64,
+            },
+        })
+
+    guild_id = str(
+        data.get(
+            "guild_id"
+        )
+        or ""
+    )
+
+    actor_user_id = str(
+        data[
+            "member"
+        ][
+            "user"
+        ][
+            "id"
+        ]
+    )
+
+    title = freeborn_op_modal_value(
+        data,
+        "meeting_title",
+    )
+
+    date_text = freeborn_op_modal_value(
+        data,
+        "meeting_date",
+    )
+
+    start_text = freeborn_op_modal_value(
+        data,
+        "meeting_start",
+    )
+
+    end_text = freeborn_op_modal_value(
+        data,
+        "meeting_end",
+    )
+
+    comment = (
+        freeborn_op_modal_value(
+            data,
+            "meeting_comment",
+        )
+        or None
+    )
+
+    try:
+        (
+            meeting_date,
+            start_time,
+            end_time,
+        ) = freeborn_meeting_parse_date_time(
+            date_text,
+            start_text,
+            end_text,
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "❌ **Date ou horaires invalides.**\n\n"
+                        "Date : `JJ/MM/AAAA`\n"
+                        "Début : `HH:MM`\n"
+                        "Fin : `HH:MM`\n"
+                        "La fin doit être postérieure au début."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    meeting_id = None
+
+    try:
+        meeting_id = freeborn_meeting_insert(
+            guild_id,
+            meeting_level,
+            title,
+            meeting_date,
+            start_time,
+            end_time,
+            comment,
+            actor_user_id,
+        )
+
+        freeborn_meeting_publish(
+            meeting_id
+        )
+
+    except Exception as error:
+        print(
+            "Freeborn meeting creation failed:",
+            repr(
+                error
+            ),
+        )
+
+        if meeting_id is not None:
+            try:
+                freeborn_meeting_delete(
+                    meeting_id
+                )
+            except Exception as rollback_error:
+                print(
+                    "Freeborn meeting rollback failed:",
+                    repr(
+                        rollback_error
+                    ),
+                )
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        "⚠️ **La création de la réunion a échoué.**\n"
+                        "Aucune réunion incomplète n'a été conservée."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    meeting = freeborn_meeting_get(
+        meeting_id
+    )
+
+    reference = freeborn_meeting_reference(
+        meeting_level,
+        meeting[
+            "meeting_number"
+        ],
+    )
+
+    return jsonify({
+        "type":
+            4,
+        "data": {
+            "content":
+                (
+                    f"✅ **{reference} créée.**\n"
+                    "Le post a été publié automatiquement dans "
+                    f"<#{meta['forum_id']}>."
+                ),
+            "flags":
+                64,
+        },
+    })
+
+
+# ============================================================
 # FREEBORN OP CORP
 # ============================================================
 
@@ -14981,6 +16437,247 @@ def handle_message_component(
             "",
         )
     )
+
+    # ========================================================
+    # FREEBORN REUNIONS — PARTICIPATION / CLOSURE
+    # ========================================================
+
+    meeting_attendance_match = re.fullmatch(
+        r"meeting_attend_(present|absent|maybe):(\d+)",
+        str(
+            custom_id
+        ),
+    )
+
+    if meeting_attendance_match:
+        attendance_status = str(
+            meeting_attendance_match.group(
+                1
+            )
+        )
+
+        meeting_id = int(
+            meeting_attendance_match.group(
+                2
+            )
+        )
+
+        meeting = freeborn_meeting_get(
+            meeting_id
+        )
+
+        if (
+            not meeting
+            or meeting[
+                "status"
+            ] != "open"
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette réunion n'est plus ouverte.",
+                    "flags":
+                        64,
+                },
+            })
+
+        meta = freeborn_meeting_meta(
+            meeting[
+                "meeting_level"
+            ]
+        )
+
+        if not (
+            interaction_member_role_ids(
+                data
+            )
+            & meta[
+                "roles"
+            ]
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "⛔ Tu n'es pas autorisé à participer à cette réunion.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+        freeborn_meeting_set_attendance(
+            meeting_id,
+            actor_user_id,
+            attendance_status,
+        )
+
+        freeborn_meeting_refresh_post(
+            meeting_id
+        )
+
+        labels = {
+            "present":
+                "Présent",
+            "absent":
+                "Absent",
+            "maybe":
+                "Indécis",
+        }
+
+        reference = freeborn_meeting_reference(
+            meeting[
+                "meeting_level"
+            ],
+            meeting[
+                "meeting_number"
+            ],
+        )
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        f"✅ Ton statut pour **{reference}** "
+                        f"est maintenant **{labels[attendance_status]}**."
+                    ),
+                "flags":
+                    64,
+            },
+        })
+
+    meeting_close_match = re.fullmatch(
+        r"meeting_close:(\d+)",
+        str(
+            custom_id
+        ),
+    )
+
+    if meeting_close_match:
+        meeting_id = int(
+            meeting_close_match.group(
+                1
+            )
+        )
+
+        meeting = freeborn_meeting_get(
+            meeting_id
+        )
+
+        if not meeting:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette réunion n'existe plus.",
+                    "flags":
+                        64,
+                },
+            })
+
+        actor_user_id = str(
+            data[
+                "member"
+            ][
+                "user"
+            ][
+                "id"
+            ]
+        )
+
+        actor_roles = interaction_member_role_ids(
+            data
+        )
+
+        can_close = (
+            actor_user_id
+            ==
+            str(
+                meeting[
+                    "created_by_discord_user_id"
+                ]
+            )
+            or str(
+                DISCORD_CEO_ROLE_ID
+            ) in actor_roles
+        )
+
+        if not can_close:
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **Clôture refusée.**\n"
+                            "Seuls le créateur de la réunion et le **CEO** "
+                            "peuvent la clôturer."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        if not freeborn_meeting_close(
+            meeting_id,
+            actor_user_id,
+        ):
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette réunion est déjà clôturée.",
+                    "flags":
+                        64,
+                },
+            })
+
+        freeborn_meeting_refresh_post(
+            meeting_id
+        )
+
+        closed_meeting = freeborn_meeting_get(
+            meeting_id
+        )
+
+        reference = freeborn_meeting_reference(
+            closed_meeting[
+                "meeting_level"
+            ],
+            closed_meeting[
+                "meeting_number"
+            ],
+        )
+
+        return jsonify({
+            "type":
+                4,
+            "data": {
+                "content":
+                    (
+                        f"🏁 **{reference} est maintenant clôturée.**\n"
+                        "Le post reste conservé dans le forum."
+                    ),
+                "flags":
+                    64,
+            },
+        })
 
     # ========================================================
     # FREEBORN SRP — DECISION / CLOSURE
@@ -28954,6 +30651,13 @@ def interactions():
                 data
             )
 
+        if modal_custom_id.startswith(
+            "freeborn_meeting_create:"
+        ):
+            return handle_meeting_modal_submit(
+                data
+            )
+
         if (
             modal_custom_id.startswith(
                 "freeborn_op_create:"
@@ -29236,6 +30940,193 @@ def interactions():
                                 False,
                             "placeholder":
                                 "Informations utiles si nécessaire...",
+                        },
+                    },
+                ],
+            },
+        })
+
+    # ========================================================
+    # FREEBORN REUNIONS
+    # ========================================================
+
+    meeting_command_levels = {
+        "reunion-officier":
+            "officer",
+        "reunion-direction":
+            "direction",
+        "reunion-haut-conseil":
+            "council",
+    }
+
+    if command_name in meeting_command_levels:
+        meeting_level = meeting_command_levels[
+            command_name
+        ]
+
+        meta = freeborn_meeting_meta(
+            meeting_level
+        )
+
+        if not (
+            interaction_member_role_ids(
+                data
+            )
+            & meta[
+                "roles"
+            ]
+        ):
+            access_text = {
+                "officer":
+                    "Officier, Direction, Haut Conseil ou CEO",
+                "direction":
+                    "Direction, Haut Conseil ou CEO",
+                "council":
+                    "Haut Conseil ou CEO",
+            }[
+                meeting_level
+            ]
+
+            return jsonify({
+                "type":
+                    4,
+                "data": {
+                    "content":
+                        (
+                            "⛔ **Accès refusé.**\n"
+                            f"Cette réunion est réservée aux rôles : "
+                            f"**{access_text}**."
+                        ),
+                    "flags":
+                        64,
+                },
+            })
+
+        return jsonify({
+            "type":
+                9,
+            "data": {
+                "custom_id":
+                    f"freeborn_meeting_create:{meeting_level}",
+                "title":
+                    (
+                        f"Freeborn — {meta['label']}"
+                    )[:45],
+                "components": [
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Nom de la réunion",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "meeting_title",
+                            "style":
+                                1,
+                            "min_length":
+                                2,
+                            "max_length":
+                                80,
+                            "required":
+                                True,
+                            "placeholder":
+                                "Ex. Organisation industrielle, recrutement...",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Date",
+                        "description":
+                            "Format JJ/MM/AAAA",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "meeting_date",
+                            "style":
+                                1,
+                            "min_length":
+                                10,
+                            "max_length":
+                                10,
+                            "required":
+                                True,
+                            "placeholder":
+                                "16/08/2026",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Heure de début",
+                        "description":
+                            "Format HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "meeting_start",
+                            "style":
+                                1,
+                            "min_length":
+                                5,
+                            "max_length":
+                                5,
+                            "required":
+                                True,
+                            "placeholder":
+                                "20:30",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Heure de fin",
+                        "description":
+                            "Format HH:MM",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "meeting_end",
+                            "style":
+                                1,
+                            "min_length":
+                                5,
+                            "max_length":
+                                5,
+                            "required":
+                                True,
+                            "placeholder":
+                                "22:00",
+                        },
+                    },
+                    {
+                        "type":
+                            18,
+                        "label":
+                            "Commentaire",
+                        "description":
+                            "Facultatif",
+                        "component": {
+                            "type":
+                                4,
+                            "custom_id":
+                                "meeting_comment",
+                            "style":
+                                2,
+                            "required":
+                                False,
+                            "max_length":
+                                1000,
+                            "placeholder":
+                                "Sujet, contexte ou informations utiles...",
                         },
                     },
                 ],
@@ -33847,6 +35738,45 @@ def register_commands():
 
         {
             "name":
+                "reunion-officier",
+
+            "description":
+                "Proposer une réunion Officiers Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
+                "reunion-direction",
+
+            "description":
+                "Proposer une réunion Direction Freeborn",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
+                "reunion-haut-conseil",
+
+            "description":
+                "Proposer une réunion Haut Conseil Freeborn",
+
+            "type":
+                1,
+
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
                 "op-corp",
 
             "description":
@@ -34534,6 +36464,7 @@ def register_commands():
             print(
                 "Commandes Discord enregistrées : "
                 "/freeborn, /fit-creer, /fit-liste, /fit-afficher, /fit-modifier, /fit-approuver, /fit-refuser, /fit-supprimer, "
+                "/reunion-officier, /reunion-direction, /reunion-haut-conseil, "
                 "/guide-membre, /guide-staff, /verification, "
                 "/alt-ajouter, /alt-supprimer, /main-changer, "
                 "/membre-info, /membre-liste, "
