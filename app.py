@@ -199,12 +199,11 @@ DISCORD_FITTINGS_CHANNEL_ID = os.environ.get(
 )
 
 # ============================================================
-# FREEBORN MARKET — PHASE 1
+# FREEBORN MARKET
 # ============================================================
 
 # Dedicated Freeborn Market forum/channel.
-# The exact channel ID can be added in Render once the Discord forum has been
-# renamed/finalized. Phase 1 does not require it yet for page opening.
+# Configured in Render for automatic forum publication.
 DISCORD_MARKET_CHANNEL_ID = os.environ.get(
     "DISCORD_MARKET_CHANNEL_ID"
 )
@@ -384,6 +383,14 @@ OP_CORP_CREATOR_ROLE_IDS = configured_role_ids(
     DISCORD_FLEET_COMMANDER_ROLE_ID,
 )
 
+# OP Corp management:
+# the original creator may manage their own OP;
+# Direction and CEO may manage any OP.
+OP_CORP_MANAGER_ROLE_IDS = configured_role_ids(
+    DISCORD_CEO_ROLE_ID,
+    DISCORD_DIRECTION_ROLE_ID,
+)
+
 # SRP moderation / decision roles.
 # Only CEO + Direction may accept, refuse or close an SRP request.
 SRP_MANAGER_ROLE_IDS = configured_role_ids(
@@ -419,11 +426,11 @@ FREEBORN_EVE_SCOPES = (
 
 DISCORD_API = "https://discord.com/api/v10"
 
-# Freeborn Fittings deletion synchronization build marker.
-FREEBORN_FITTINGS_DELETE_SYNC_BUILD = "SRP-P1.1-ACCESS-FIX + OP-CORP-P1.3 + JITA-CHECK-CEO + MARKET-FINAL + FITTINGS-STABLE"
+# Production build identifier.
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-PRODUCTION-FINAL"
 print(
-    "FREEBORN FITTINGS BUILD:",
-    FREEBORN_FITTINGS_DELETE_SYNC_BUILD,
+    "FREEBORN BUILD:",
+    FREEBORN_BUILD_VERSION,
 )
 
 VALID_EVE_ISSUERS = {
@@ -726,7 +733,7 @@ def init_database():
                 )
 
                 # ====================================================
-                # FREEBORN FITTINGS — PHASE 1
+                # FREEBORN FITTINGS — DATABASE
                 # ====================================================
 
                 cur.execute(
@@ -802,7 +809,7 @@ def init_database():
                 )
 
                 # FREEBORN FITTINGS — 4T-C STATUS MIGRATION
-                # The original Phase 1 constraint only allowed
+                # The original status constraint only allowed
                 # proposed/testing/approved. The workflow now also uses
                 # rejected (and keeps archived reserved for lifecycle cleanup).
                 cur.execute(
@@ -866,7 +873,7 @@ def init_database():
                 )
 
                 # ====================================================
-                # FREEBORN MARKET — PHASE 1 FOUNDATION
+                # FREEBORN MARKET FOUNDATION
                 # ====================================================
 
                 cur.execute(
@@ -3751,7 +3758,7 @@ def build_member_list_message():
         return (
             "👥 **Liste des membres Freeborn**\n\n"
             "ℹ️ Aucun compte EVE n'est actuellement "
-            "enregistré dans Freeborn Verify.\n\n"
+            "enregistré dans Freeborn.\n\n"
             "🛡️ **Mode lecture seule**\n"
             "Aucune donnée Neon n'a été modifiée.\n"
             "Aucun rôle Discord n'a été modifié."
@@ -3942,7 +3949,7 @@ def build_member_list_message():
 
 
 # ============================================================
-# FREEBORN FITTINGS — PHASE 2
+# FREEBORN FITTINGS
 # ============================================================
 
 def parse_eft_header(eft_text):
@@ -4311,7 +4318,7 @@ def build_fit_embed(fit):
 
 
 # ============================================================
-# FREEBORN MARKET — PHASE 2
+# FREEBORN MARKET — EVE DATA & JITA ENGINE
 # SEARCH EVE + JITA PRICING + FINAL VISUAL FOUNDATION
 # ============================================================
 
@@ -7905,7 +7912,7 @@ button,input{{font:inherit}}
   <footer class="footer">
     <span>Libres par choix • Unis par volonté</span>
     <span class="center">FREEBORN MARKET</span>
-    <span class="right">PHASE 3 • VALIDATION + DISCORD</span>
+    <span class="right">VALIDATION + DISCORD</span>
   </footer>
 </main>
 
@@ -7940,7 +7947,7 @@ function money(value) {{
 
 function parseIntegerInput(value) {{
   const raw = String(value ?? '')
-    .replace(/\s/g, '')
+    .replace(/\\s/g, '')
     .replace(/[^0-9]/g, '');
 
   const parsed = Number(raw);
@@ -7958,7 +7965,7 @@ function formatIntegerFR(value) {{
 function parseISKInput(value) {{
   let raw = String(value ?? '')
     .trim()
-    .replace(/\s/g, '')
+    .replace(/\\s/g, '')
     .replace(',', '.')
     .replace(/[^0-9.-]/g, '');
 
@@ -9959,7 +9966,7 @@ def handle_op_corp_modal_submit(
             )
             or bool(
                 actor_roles
-                & OP_CORP_CREATOR_ROLE_IDS
+                & OP_CORP_MANAGER_ROLE_IDS
             )
         ):
             return jsonify({
@@ -11218,7 +11225,7 @@ def get_eve_character_skills(
         "trained_skills":
             len(normalized_skills),
 
-        # Phase 4K foundation:
+        # Fitting telemetry foundation:
         # keep the individual skill levels so Freeborn Fittings can later
         # compare the corporate ALL-V reference with the real pilot.
         "skills":
@@ -12336,7 +12343,7 @@ def handle_autocomplete(
         })
 
     # /membre-supprimer lists only human Discord accounts that actually
-    # own at least one EVE profile in Freeborn Verify.
+    # own at least one EVE profile in Freeborn.
     if command_name == "membre-supprimer":
 
         guild_id = str(data.get("guild_id", ""))
@@ -15257,7 +15264,7 @@ def handle_message_component(
                 interaction_member_role_ids(
                     data
                 )
-                & OP_CORP_CREATOR_ROLE_IDS
+                & OP_CORP_MANAGER_ROLE_IDS
             )
         )
 
@@ -15491,7 +15498,7 @@ def handle_message_component(
         })
 
     # ========================================================
-    # FREEBORN MARKET — PHASE 4 LIFECYCLE COMPONENTS
+    # FREEBORN MARKET — LIFECYCLE COMPONENTS
     # IMPORTANT: market buttons must be routed here, before the
     # legacy signed-token confirmation router below.
     # ========================================================
@@ -15788,7 +15795,7 @@ def handle_message_component(
                 "data": {
                     "content":
                         "⛔ Ce serveur n'est pas "
-                        "configuré pour Freeborn Verify V3.",
+                        "configuré pour Freeborn.",
 
                     "flags":
                         64,
@@ -16028,7 +16035,7 @@ def handle_message_component(
                 "data": {
                     "content":
                         "⛔ Ce serveur n'est pas "
-                        "configuré pour Freeborn Verify V3.",
+                        "configuré pour Freeborn.",
 
                     "flags":
                         64,
@@ -16302,7 +16309,7 @@ def handle_message_component(
                     f"✅ **{document_label} accepté**\n\n"
                     f"Version : `{document_version}`\n"
                     "Ta preuve d'acceptation horodatée "
-                    "a été enregistrée par Freeborn Verify.\n\n"
+                    "a été enregistrée par Freeborn.\n\n"
                     + (
                         (
                             "✅ **Parcours documentaire terminé.**\n"
@@ -16458,7 +16465,7 @@ def handle_message_component(
                 "🔄 **Changement de personnage principal**\n\n"
                 f"Ancien Main : **{result['old_main_name']}** → Personnage secondaire\n"
                 f"Nouveau personnage principal : **{result['new_main_name']}** → Personnage principal\n\n"
-                "✅ Changement enregistré dans Freeborn Verify.\n"
+                "✅ Changement enregistré dans Freeborn.\n"
                 f"{nickname_text}\n\n"
                 "Aucun personnage EVE n'a été supprimé.",
             "components": [],
@@ -17306,7 +17313,7 @@ def handle_message_component(
 
 
 # ============================================================
-# FREEBORN FITTINGS — WEB CARD PHASE 4A
+# FREEBORN FITTINGS — WEB CARD
 # ============================================================
 
 def parse_eft_web_sections(eft_text):
@@ -17479,7 +17486,7 @@ def eve_type_icon_url(type_id, size=64):
 
 
 # ============================================================
-# FREEBORN FITTINGS — PHASE 4J DOGMA TELEMETRY
+# FREEBORN FITTINGS — DOGMA TELEMETRY
 # ============================================================
 
 # Core Dogma attribute IDs used by EVE fitting calculations.
@@ -17869,7 +17876,7 @@ def get_eve_type_group_name(type_id):
     """
     Resolve one inventory type's public group name.
 
-    Phase 4O-B uses this only as a conservative classifier for the two
+    This uses a conservative classifier for the two
     universal weapon fitting skills. The future SDE Dogma layer will replace
     this classifier with modifierInfo-driven rules.
     """
@@ -17893,7 +17900,7 @@ def freeborn_is_weapon_fitting_group(type_id):
 
     Weapon Upgrades affects CPU use of weapon turrets, launchers and
     smartbombs; Advanced Weapon Upgrades affects PG use of turrets/launchers.
-    Group-name matching is temporary and intentionally narrow: unknown
+    Group-name matching is intentionally narrow: unknown
     modules are left untouched rather than receiving a guessed modifier.
     """
     name = get_eve_type_group_name(type_id).casefold()
@@ -19608,7 +19615,7 @@ def calculate_skill_aware_velocity(
     type_ids=None,
 ):
     """
-    Phase 4P-C velocity engine.
+    Velocity engine.
 
     OFF:
         hull maxVelocity × Navigation.
@@ -20005,7 +20012,7 @@ def calculate_base_capacitor_engine(
     type_ids,
 ):
     """
-    Phase 4O-F capacitor engine.
+    Capacitor engine.
 
     This layer intentionally stays conservative. It calculates only values
     directly supported by public Dogma attributes:
@@ -20183,9 +20190,9 @@ def freeborn_capacitor_module_skill_modifier(
     """
     Return (cap_need_multiplier, duration_multiplier, rule_label).
 
-    Phase 4O-H intentionally recognizes only well-defined, common fitting
+    The capacitor model intentionally recognizes only well-defined, common fitting
     families. Unknown groups remain at 1.0 rather than receiving a guessed
-    bonus. Full SDE modifierInfo coverage remains a later engine phase.
+    bonus. Full SDE modifierInfo coverage remains outside this conservative model.
     """
     group_name = get_eve_type_group_name(type_id).casefold()
 
@@ -20360,7 +20367,7 @@ def calculate_skill_aware_capacitor(
     skills_snapshot=None,
 ):
     """
-    Phase 4O-H skill-aware capacitor profile.
+    Skill-aware capacitor profile.
 
     Universal pilot skills:
       - Capacitor Management: +5% capacity / level
@@ -20496,7 +20503,7 @@ def calculate_skill_aware_capacitor(
 
 
 # ============================================================
-# FREEBORN FITTINGS — PHASE 4O-B SKILL-AWARE ENGINE
+# FREEBORN FITTINGS — SKILL-AWARE ENGINE
 # ============================================================
 
 # Universal Engineering skills affecting the ship's fitting outputs.
@@ -20883,9 +20890,9 @@ def calculate_skill_aware_fitting_resources(
     skills_snapshot=None,
 ):
     """
-    Phase 4O-B CPU/PG engine.
+    CPU/PG engine.
 
-    Applied in this phase:
+    Applied here:
       Ship output:
         - CPU Management: +5% CPU output / level
         - Power Grid Management: +5% PG output / level
@@ -20965,7 +20972,7 @@ def calculate_skill_aware_fitting_resources(
                 1.0 - (0.05 * weapon_upgrades_level)
             )
 
-            # AWU applies to turrets/launchers. The temporary 4O-B classifier
+            # AWU applies to turrets/launchers. The conservative classifier
             # also recognizes smartbomb groups for WU; smartbomb PG is not
             # modified here.
             group_name = get_eve_type_group_name(
@@ -21306,7 +21313,7 @@ def format_eft_bay_items(items, type_ids=None):
 
 
 # ============================================================
-# FREEBORN FITTINGS — PHASE 4R-C PERSISTENT SNAPSHOT
+# FREEBORN FITTINGS — PERSISTENT SNAPSHOT
 # ============================================================
 
 FREEBORN_TECHNICAL_SNAPSHOT_VERSION = "4S-N-A-AUTO-INVENTORY-V1"
@@ -23126,7 +23133,7 @@ def freeborn_render_repairs_audit(
 
 
 def freeborn_ship_targeting_misc_base(ship_type_id):
-    """Phase 4S-F: static hull targeting/navigation values from cached Dogma."""
+    """Static hull targeting/navigation values from cached Dogma."""
     dogma = get_eve_type_dogma(ship_type_id)
     if not dogma:
         return {}
@@ -24863,7 +24870,7 @@ def freeborn_compare_delta_class(
 
 def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
     """
-    FREEBORN FITTINGS — Phase 4R-C
+    FREEBORN FITTINGS
     EVE-like corporate technical layout.
 
     The visual structure follows the final Freeborn target:
@@ -25444,7 +25451,7 @@ def freeborn_fitting_web_page(fit, fit_web_token=None, pilot_profile=None):
         )
     )
 
-    # Phase 4O-F — capacitor engine.
+    # Capacitor engine.
     # The main telemetry remains BASE while the engine audits cyclic module
     # consumption. We expose peak passive recharge but do not invent final
     # stability for conditional/special capacitor mechanics.
@@ -28028,9 +28035,9 @@ function colorPilotDeltas() {{
 
     const normalized = raw
       .replace(',', '.')
-      .replace(/\s/g, '');
+      .replace(/\\s/g, '');
 
-    const match = normalized.match(/^([+-]?\d+(?:\.\d+)?)/);
+    const match = normalized.match(/^([+-]?\\d+(?:\\.\\d+)?)/);
 
     if (!match) {{
       node.classList.add('compare-neutral');
@@ -28582,7 +28589,7 @@ def freeborn_market_api_validate():
 
         # Compensating rollback:
         # If Discord publication failed after Neon insertion, remove the order
-        # so Phase 3 never leaves a database-only announcement.
+        # so validation never leaves a database-only announcement.
         if (
             market_id is not None
             and publication is None
@@ -28789,7 +28796,7 @@ def home():
 
     return freeborn_web_page(
         "Service opérationnel",
-        "Freeborn Verify V3 assure la vérification EVE Online et le parcours d'intégration de Freeborn Legacy.",
+        "Freeborn assure la vérification EVE Online et le parcours d'intégration de Freeborn Legacy.",
         status="success",
     )
 
@@ -28806,7 +28813,7 @@ def health():
             "ok",
 
         "service":
-            "freeborn-verify",
+            "freeborn",
     }
 
 
@@ -29064,382 +29071,11 @@ def interactions():
             "data": {
                 "content":
                     "⛔ Ce serveur n'est pas "
-                    "configuré pour Freeborn Verify V3.",
+                    "configuré pour Freeborn.",
 
                 **interaction_response_flags_payload(data),
             },
         })
-
-    interaction_type = int(
-        data.get(
-            "type",
-            0,
-        )
-        or 0
-    )
-
-    # ========================================================
-    # FREEBORN MARKET — PHASE 4 LIFECYCLE COMPONENTS
-    # ========================================================
-
-    if (
-        interaction_type
-        == 3
-    ):
-        custom_id = str(
-            (
-                data.get(
-                    "data"
-                )
-                or {}
-            ).get(
-                "custom_id"
-            )
-            or ""
-        )
-
-        lifecycle_match = re.fullmatch(
-            r"market_(take|withdraw|complete|cancel):(\d+)",
-            custom_id,
-        )
-
-        if lifecycle_match:
-            action = lifecycle_match.group(
-                1
-            )
-            market_id = int(
-                lifecycle_match.group(
-                    2
-                )
-            )
-
-            order = (
-                freeborn_market_get_order(
-                    guild_id,
-                    market_id,
-                )
-            )
-
-            if not order:
-                return jsonify({
-                    "type": 4,
-                    "data": {
-                        "content":
-                            "ℹ️ Cette annonce Freeborn Market n'existe plus.",
-                        "flags":
-                            64,
-                    },
-                })
-
-            # ------------------------------------------------
-            # TAKE
-            # ------------------------------------------------
-            if action == "take":
-                if order[
-                    "status"
-                ] != "open":
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                (
-                                    "ℹ️ Cette annonce n'est plus disponible "
-                                    "au statut **OUVERT**."
-                                ),
-                            "flags":
-                                64,
-                        },
-                    })
-
-                creator_is_taker = (
-                    str(
-                        order[
-                            "created_by_discord_user_id"
-                        ]
-                    )
-                    == str(
-                        discord_user_id
-                    )
-                )
-
-                if creator_is_taker:
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                (
-                                    "ℹ️ Tu es déjà le créateur de cette annonce. "
-                                    "Un autre membre doit la prendre."
-                                ),
-                            "flags":
-                                64,
-                        },
-                    })
-
-                if not freeborn_market_take_order(
-                    guild_id,
-                    market_id,
-                    discord_user_id,
-                ):
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                (
-                                    "ℹ️ L'annonce vient d'être prise par "
-                                    "quelqu'un d'autre."
-                                ),
-                            "flags":
-                                64,
-                        },
-                    })
-
-                order = freeborn_market_get_order(
-                    guild_id,
-                    market_id,
-                )
-
-                freeborn_market_update_forum_post(
-                    order
-                )
-
-                return jsonify({
-                    "type": 4,
-                    "data": {
-                        "content":
-                            (
-                                f"🤝 **{format_market_reference(market_id)} "
-                                "est maintenant EN COURS.**\n"
-                                "Tu es enregistré comme membre ayant pris l'annonce."
-                            ),
-                        "flags":
-                            64,
-                    },
-                })
-
-            # ------------------------------------------------
-            # WITHDRAW — taker gives up, order returns OPEN
-            # ------------------------------------------------
-            if action == "withdraw":
-                if order["status"] != "in_progress":
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content": (
-                                "ℹ️ Seule une annonce **EN COURS** "
-                                "peut faire l'objet d'un désistement."
-                            ),
-                            "flags": 64,
-                        },
-                    })
-
-                if str(order.get("accepted_by_discord_user_id") or "") != str(discord_user_id):
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content": (
-                                "⛔ Seul le membre ayant pris cette annonce "
-                                "peut se désister."
-                            ),
-                            "flags": 64,
-                        },
-                    })
-
-                if not freeborn_market_withdraw_order(
-                    guild_id,
-                    market_id,
-                    discord_user_id,
-                ):
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content": "ℹ️ Le statut de cette annonce a déjà changé.",
-                            "flags": 64,
-                        },
-                    })
-
-                order = freeborn_market_get_order(
-                    guild_id,
-                    market_id,
-                )
-                freeborn_market_update_forum_post(order)
-
-                return jsonify({
-                    "type": 4,
-                    "data": {
-                        "content": (
-                            f"↩️ **{format_market_reference(market_id)} "
-                            "est de nouveau OUVERT.**\n"
-                            "Ton attribution a été retirée et l'annonce "
-                            "peut être prise par un autre membre."
-                        ),
-                        "flags": 64,
-                    },
-                })
-
-            # ------------------------------------------------
-            # COMPLETE
-            # ------------------------------------------------
-            if action == "complete":
-                if order[
-                    "status"
-                ] != "in_progress":
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                (
-                                    "ℹ️ Seule une annonce **EN COURS** "
-                                    "peut être terminée."
-                                ),
-                            "flags":
-                                64,
-                        },
-                    })
-
-                if not freeborn_market_user_can_complete(
-                    data,
-                    order,
-                    discord_user_id,
-                ):
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                (
-                                    "⛔ Tu n'es pas autorisé à terminer "
-                                    "cette annonce."
-                                ),
-                            "flags":
-                                64,
-                        },
-                    })
-
-                if not freeborn_market_complete_order(
-                    guild_id,
-                    market_id,
-                ):
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                "ℹ️ Le statut de cette annonce a déjà changé.",
-                            "flags":
-                                64,
-                        },
-                    })
-
-                order = freeborn_market_get_order(
-                    guild_id,
-                    market_id,
-                )
-
-                freeborn_market_update_forum_post(
-                    order
-                )
-
-                # Final cleanup: once completed, remove the forum post/thread.
-                freeborn_market_delete_forum_thread(
-                    order
-                )
-
-                return jsonify({
-                    "type": 4,
-                    "data": {
-                        "content":
-                            (
-                                f"✅ **{format_market_reference(market_id)} "
-                                "terminé.**\n"
-                                "L'annonce est conservée dans Neon et le post "
-                                "Discord a été supprimé."
-                            ),
-                        "flags":
-                            64,
-                    },
-                })
-
-            # ------------------------------------------------
-            # CANCEL
-            # ------------------------------------------------
-            if action == "cancel":
-                if order[
-                    "status"
-                ] not in {
-                    "open",
-                    "in_progress",
-                }:
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                (
-                                    "ℹ️ Cette annonce est déjà clôturée."
-                                ),
-                            "flags":
-                                64,
-                        },
-                    })
-
-                if not freeborn_market_user_can_cancel(
-                    data,
-                    order,
-                    discord_user_id,
-                ):
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                (
-                                    "⛔ Seul le créateur de l'annonce, "
-                                    "la Direction, le Haut Conseil ou le CEO "
-                                    "peut l'annuler."
-                                ),
-                            "flags":
-                                64,
-                        },
-                    })
-
-                if not freeborn_market_cancel_order(
-                    guild_id,
-                    market_id,
-                ):
-                    return jsonify({
-                        "type": 4,
-                        "data": {
-                            "content":
-                                "ℹ️ Le statut de cette annonce a déjà changé.",
-                            "flags":
-                                64,
-                        },
-                    })
-
-                order = freeborn_market_get_order(
-                    guild_id,
-                    market_id,
-                )
-
-                freeborn_market_update_forum_post(
-                    order
-                )
-
-                freeborn_market_delete_forum_thread(
-                    order
-                )
-
-                return jsonify({
-                    "type": 4,
-                    "data": {
-                        "content":
-                            (
-                                f"🔴 **{format_market_reference(market_id)} "
-                                "annulé.**\n"
-                                "L'annonce est conservée dans Neon et le post "
-                                "Discord a été supprimé."
-                            ),
-                        "flags":
-                            64,
-                    },
-                })
 
     # ========================================================
     # FREEBORN SRP
@@ -29887,7 +29523,7 @@ def interactions():
         })
 
     # ========================================================
-    # FREEBORN MARKET — PHASE 1
+    # FREEBORN MARKET
     # /achat, /vente, /achat-corp, /vente-corp
     # ========================================================
 
@@ -30413,7 +30049,7 @@ def interactions():
             "data": {
                 "embeds": [
                     {
-                        "title": "📘 GUIDE MEMBRE — FREEBORN VERIFY V3",
+                        "title": "📘 GUIDE MEMBRE — FREEBORN",
                         "description": (
                             "Guide personnel des commandes et du parcours "
                             "Freeborn Legacy."
@@ -30463,7 +30099,7 @@ def interactions():
             "data": {
                 "embeds": [
                     {
-                        "title": "🛡️ GUIDE STAFF — FREEBORN VERIFY V3",
+                        "title": "🛡️ GUIDE STAFF — FREEBORN",
                         "description": (
                             "Référence privée des commandes de gestion "
                             "et du parcours de recrutement."
@@ -30755,7 +30391,7 @@ def interactions():
                             "🟢 **Candidat** → accès au parcours de "
                             "recrutement Freeborn Legacy.\n\n"
                             "📌 **Suis les étapes dans l'ordre : "
-                            "Freeborn Verify s'occupe automatiquement "
+                            "Freeborn s'occupe automatiquement "
                             "de la suite.**",
 
                         "color":
@@ -30873,7 +30509,7 @@ def interactions():
                             "🟢 **Candidat** → commencer le parcours "
                             "de recrutement Freeborn Legacy.\n\n"
                             "📌 **Ton choix est enregistré par "
-                            "Freeborn Verify et le serveur adapte "
+                            "Freeborn et le serveur adapte "
                             "automatiquement tes accès.**",
 
                         "color":
@@ -31011,7 +30647,7 @@ def interactions():
                             "Règlement Corporation ci-dessus.\n\n"
                             "En validant, tu confirmes avoir lu et "
                             "accepté **l'intégralité du règlement**. "
-                            "Freeborn Verify enregistre une preuve "
+                            "Freeborn enregistre une preuve "
                             "horodatée de ton acceptation.",
 
                         "color":
@@ -31159,7 +30795,7 @@ def interactions():
                             "la Charte Freeborn Legacy ci-dessus.\n\n"
                             "En validant, tu confirmes avoir lu et "
                             "accepté **l'intégralité de la Charte**. "
-                            "Freeborn Verify enregistre une preuve "
+                            "Freeborn enregistre une preuve "
                             "horodatée de ton acceptation.",
 
                         "color":
@@ -31765,7 +31401,7 @@ def interactions():
                         "ℹ️ **Aucun profil EVE enregistré**\n\n"
                         f"**{target_display_name}** "
                         "ne possède aucun personnage "
-                        "dans Freeborn Verify.\n\n"
+                        "dans Freeborn.\n\n"
                         "Aucune modification effectuée.",
 
                     **interaction_response_flags_payload(data),
@@ -32588,7 +32224,7 @@ def interactions():
             +
             "\n\n⚠️ **Confirmation requise**\n"
             "Aucun changement n'a encore été appliqué.\n"
-            "En confirmant, Freeborn Verify relancera un contrôle ESI "
+            "En confirmant, Freeborn relancera un contrôle ESI "
             "à jour avant toute modification.\n\n"
             "Cette confirmation expire après **5 minutes**."
         )
@@ -33046,7 +32682,7 @@ def interactions():
         message = (
             "🛡️ **Intégration Freeborn**\n\n"
             "Connecte ton **Main EVE**. "
-            "Freeborn Verify contrôlera que ce personnage "
+            "Freeborn contrôlera que ce personnage "
             "appartient bien à la corporation EVE configurée "
             "pour ce serveur.\n\n"
             f"[Finaliser mon intégration Freeborn]"
@@ -33060,7 +32696,7 @@ def interactions():
     ):
 
         message = (
-            "🔐 **Freeborn Verify**\n\n"
+            "🔐 **Freeborn**\n\n"
 
             "Connecte ton personnage "
             "principal EVE Online :\n\n"
@@ -33303,7 +32939,7 @@ h1 {{
             <div class="message">{safe_message}</div>
             {character_html}
             <div class="footer">Tu peux fermer cette fenêtre et retourner sur Discord.</div>
-            <div class="brandline">Freeborn Legacy · Freeborn Verify V3</div>
+            <div class="brandline">Freeborn Legacy · Freeborn</div>
         </main>
     </div>
 </div>
@@ -33394,7 +33030,7 @@ def callback():
 
         return freeborn_web_page(
             "Serveur Discord invalide",
-            "Ce serveur n'est pas configuré ou n'est plus actif dans Freeborn Verify V3.",
+            "Ce serveur n'est pas configuré ou n'est plus actif dans Freeborn.",
             status="error",
         ), 400
 
@@ -33437,7 +33073,7 @@ def callback():
 
         return freeborn_web_page(
             "Connexion EVE refusée",
-            "Freeborn Verify n'a pas pu obtenir l'autorisation EVE. Relance l'intégration depuis Discord.",
+            "Freeborn n'a pas pu obtenir l'autorisation EVE. Relance l'intégration depuis Discord.",
             status="error",
         ), 400
 
@@ -33531,7 +33167,7 @@ def callback():
 
             return freeborn_web_page(
                 "Compétences EVE indisponibles",
-                "Freeborn Verify n'a pas pu récupérer les Skill Points du personnage. Aucune intégration n'a été enregistrée ; relance /freeborn dans quelques instants.",
+                "Freeborn n'a pas pu récupérer les Skill Points du personnage. Aucune intégration n'a été enregistrée ; relance /freeborn dans quelques instants.",
                 status="warning",
                 character_name=character_name,
             ), 502
@@ -33598,54 +33234,6 @@ def callback():
             character_response
         )
 
-    # ========================================================
-    # TEMPORARY ESI CORPORATION DIAGNOSTIC
-    # Safe diagnostic only: no token, code, state or secret logged.
-    # ========================================================
-
-    esi_date = corporation_response.headers.get(
-        "Date",
-        "",
-    )
-
-    esi_expires = corporation_response.headers.get(
-        "Expires",
-        "",
-    )
-
-    esi_age = corporation_response.headers.get(
-        "Age",
-        "",
-    )
-
-    esi_etag = corporation_response.headers.get(
-        "ETag",
-        "",
-    )
-
-    corporation_match = (
-        int(corporation_id)
-        ==
-        int(expected_corporation_id)
-    )
-
-    print(
-        "[FREEBORN ESI DEBUG] "
-        f"character={character_name!r} "
-        f"character_id={character_id} "
-        f"corporation_id_esi={corporation_id} "
-        f"corporation_id_expected={expected_corporation_id} "
-        f"match={corporation_match} "
-        f"affiliation_source={affiliation_source!r} "
-        f"verification_type={verification_type!r} "
-        f"guild_id={guild_id} "
-        f"esi_date={esi_date!r} "
-        f"esi_expires={esi_expires!r} "
-        f"esi_age={esi_age!r} "
-        f"esi_etag={esi_etag!r}",
-        flush=True,
-    )
-
     if (
         int(corporation_id)
         !=
@@ -33655,7 +33243,7 @@ def callback():
         return freeborn_web_page(
             "Intégration en attente",
             (
-                "Freeborn Verify ne peut pas encore confirmer ton appartenance "
+                "Freeborn ne peut pas encore confirmer ton appartenance "
                 "à Freeborn Legacy auprès de l’ESI EVE Online.\n\n"
                 "Après une entrée récente dans la corporation, la synchronisation "
                 "des données ESI peut nécessiter un certain délai. Un délai pouvant "
@@ -34505,7 +34093,7 @@ def register_commands():
                 "guide-membre",
 
             "description":
-                "Afficher ton guide privé Freeborn Verify V3",
+                "Afficher ton guide privé Freeborn",
 
             "type":
                 1,
@@ -34994,7 +34582,7 @@ register_commands()
 # ============================================================
 
 # ============================================================
-# PHASE 4O-H — ADVANCED CAPACITOR MODEL
+# FREEBORN FITTINGS — ADVANCED CAPACITOR MODEL
 # ============================================================
 
 CAPACITOR_EFFECT_CLASSES = {
