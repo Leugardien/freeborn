@@ -30485,17 +30485,529 @@ def fitting_pilot_start(fit_ref):
 
 
 # ============================================================
-# HOME
+# HOME — FREEBORN LEGACY LANDING PAGE
 # ============================================================
+
+FREEBORN_DISCORD_INVITE_URL = os.environ.get(
+    "FREEBORN_DISCORD_INVITE_URL",
+    "https://discord.gg/VfuH4QGMud",
+)
+
+
+def freeborn_landing_page():
+    """Public Freeborn Legacy entry portal.
+
+    This landing page deliberately does not perform authentication or assign
+    Discord roles. Both entry choices lead to the same permanent Discord
+    invitation; the recruitment transition remains a human decision inside
+    Discord.
+    """
+
+    invite_url = escape(
+        str(FREEBORN_DISCORD_INVITE_URL),
+        quote=True,
+    )
+
+    return f"""<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#020712">
+<meta name="description" content="Portail officiel de Freeborn Legacy — corporation EVE Online.">
+<link rel="icon" type="image/png" href="/assets/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<title>Freeborn Legacy — Portail</title>
+<style>
+:root {{
+    color-scheme: dark;
+    --fb-bg: #020712;
+    --fb-panel: rgba(4, 13, 29, .78);
+    --fb-panel-strong: rgba(3, 10, 24, .94);
+    --fb-cyan: #43d7ff;
+    --fb-cyan-hot: #72e6ff;
+    --fb-blue: #148dff;
+    --fb-line: rgba(67, 215, 255, .58);
+    --fb-line-soft: rgba(67, 215, 255, .20);
+    --fb-text: #edf7ff;
+    --fb-muted: #9fb4c9;
+    --fb-shadow: rgba(0, 163, 255, .34);
+}}
+
+* {{ box-sizing: border-box; }}
+
+html, body {{
+    min-height: 100%;
+}}
+
+body {{
+    margin: 0;
+    min-height: 100vh;
+    min-height: 100svh;
+    overflow-x: hidden;
+    color: var(--fb-text);
+    background: var(--fb-bg);
+    font-family: "Segoe UI", Arial, sans-serif;
+}}
+
+body::before {{
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -5;
+    background:
+        linear-gradient(180deg, rgba(1, 7, 18, .48), rgba(1, 6, 16, .76)),
+        radial-gradient(circle at 50% 42%, rgba(14, 118, 192, .12), transparent 45%),
+        url("/assets/freeborn-landing-bg.jpg") center / cover no-repeat;
+    transform: scale(1.015);
+}}
+
+body::after {{
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -4;
+    pointer-events: none;
+    background:
+        radial-gradient(ellipse at center, transparent 32%, rgba(0, 4, 13, .46) 68%, rgba(0, 2, 8, .88) 100%),
+        linear-gradient(90deg, rgba(0, 13, 31, .22), transparent 28%, transparent 72%, rgba(0, 13, 31, .22));
+}}
+
+.scene {{
+    position: relative;
+    min-height: 100vh;
+    min-height: 100svh;
+    display: grid;
+    place-items: center;
+    padding: clamp(22px, 4vw, 56px) 18px;
+    isolation: isolate;
+}}
+
+.scene::before {{
+    content: "";
+    position: fixed;
+    inset: -12vh -12vw;
+    z-index: -2;
+    opacity: .22;
+    pointer-events: none;
+    background-image:
+        linear-gradient(rgba(64, 205, 255, .07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(64, 205, 255, .06) 1px, transparent 1px);
+    background-size: 72px 72px;
+    mask-image: radial-gradient(circle at center, black 0, transparent 72%);
+    animation: fb-grid-drift 34s linear infinite;
+}}
+
+.scene::after {{
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: .26;
+    background: linear-gradient(180deg, transparent 0%, rgba(73, 216, 255, .08) 49%, transparent 51%);
+    background-size: 100% 9px;
+    animation: fb-scan 18s linear infinite;
+}}
+
+.portal {{
+    position: relative;
+    width: min(520px, 94vw);
+    padding: 1px;
+    clip-path: polygon(
+        0 24px, 24px 0,
+        calc(100% - 24px) 0, 100% 24px,
+        100% calc(100% - 24px), calc(100% - 24px) 100%,
+        24px 100%, 0 calc(100% - 24px)
+    );
+    background: linear-gradient(135deg,
+        rgba(111, 230, 255, .98),
+        rgba(16, 141, 255, .72) 22%,
+        rgba(11, 55, 95, .22) 43%,
+        rgba(11, 55, 95, .22) 57%,
+        rgba(16, 141, 255, .72) 78%,
+        rgba(111, 230, 255, .98)
+    );
+    filter: drop-shadow(0 0 22px rgba(0, 153, 255, .32));
+}}
+
+.portal::before,
+.portal::after {{
+    content: "";
+    position: absolute;
+    z-index: 5;
+    top: 84px;
+    width: 88px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--fb-cyan));
+    box-shadow: 0 0 10px var(--fb-cyan);
+    opacity: .78;
+}}
+
+.portal::before {{ left: 20px; }}
+.portal::after {{ right: 20px; transform: scaleX(-1); }}
+
+.panel {{
+    position: relative;
+    overflow: hidden;
+    min-height: 610px;
+    padding: 34px 34px 28px;
+    clip-path: inherit;
+    text-align: center;
+    background:
+        linear-gradient(180deg, rgba(2, 10, 25, .80), rgba(2, 9, 22, .95)),
+        radial-gradient(circle at 50% 0%, rgba(29, 165, 255, .18), transparent 40%);
+    backdrop-filter: blur(9px);
+    box-shadow:
+        inset 0 0 45px rgba(0, 0, 0, .56),
+        inset 0 0 22px rgba(14, 146, 255, .10);
+}}
+
+.panel::before {{
+    content: "";
+    position: absolute;
+    inset: 12px;
+    pointer-events: none;
+    border: 1px solid rgba(81, 217, 255, .14);
+    clip-path: inherit;
+}}
+
+.logo-wrap {{
+    position: relative;
+    width: 132px;
+    height: 132px;
+    margin: 0 auto 14px;
+    display: grid;
+    place-items: center;
+}}
+
+.logo-wrap::before {{
+    content: "";
+    position: absolute;
+    inset: 8px;
+    border: 1px solid rgba(77, 222, 255, .58);
+    transform: rotate(45deg);
+    box-shadow: 0 0 24px rgba(0, 179, 255, .30);
+    animation: fb-logo-pulse 4.8s ease-in-out infinite;
+}}
+
+.logo {{
+    position: relative;
+    z-index: 2;
+    display: block;
+    width: 118px;
+    height: 118px;
+    object-fit: contain;
+    filter: drop-shadow(0 0 15px rgba(22, 181, 255, .34));
+}}
+
+.brand {{
+    margin: 0;
+    font-family: "Orbitron", "Segoe UI", sans-serif;
+    font-weight: 700;
+    font-size: clamp(25px, 5.2vw, 35px);
+    line-height: 1.08;
+    letter-spacing: .105em;
+    text-transform: uppercase;
+    color: #f4fbff;
+    text-shadow: 0 0 18px rgba(42, 193, 255, .26);
+}}
+
+.tagline {{
+    margin: 10px auto 24px;
+    color: #b8c9db;
+    font-family: "Orbitron", "Segoe UI", sans-serif;
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 1.65;
+    letter-spacing: .28em;
+    text-transform: uppercase;
+}}
+
+.access-title {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 18px;
+    color: var(--fb-cyan-hot);
+    font-family: "Orbitron", "Segoe UI", sans-serif;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: .32em;
+    text-transform: uppercase;
+}}
+
+.access-title::before,
+.access-title::after {{
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--fb-line));
+}}
+
+.access-title::after {{ transform: scaleX(-1); }}
+
+.access-grid {{
+    display: grid;
+    gap: 14px;
+}}
+
+.access-card {{
+    position: relative;
+    display: grid;
+    grid-template-columns: 52px 1fr 24px;
+    align-items: center;
+    gap: 14px;
+    min-height: 96px;
+    padding: 16px 18px;
+    color: var(--fb-text);
+    text-decoration: none;
+    text-align: left;
+    border: 1px solid rgba(72, 214, 255, .66);
+    background:
+        linear-gradient(90deg, rgba(8, 31, 58, .74), rgba(4, 15, 31, .82)),
+        rgba(3, 12, 27, .86);
+    clip-path: polygon(0 12px, 12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%);
+    box-shadow:
+        inset 0 0 24px rgba(0, 82, 150, .12),
+        0 0 0 rgba(0, 174, 255, 0);
+    transition:
+        transform .18s ease,
+        border-color .18s ease,
+        background .18s ease,
+        box-shadow .18s ease;
+}}
+
+.access-card::before {{
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 24%;
+    bottom: 24%;
+    width: 2px;
+    background: var(--fb-cyan);
+    box-shadow: 0 0 9px var(--fb-cyan);
+    opacity: .76;
+}}
+
+.access-card:hover,
+.access-card:focus-visible {{
+    transform: translateY(-2px);
+    border-color: rgba(121, 235, 255, .98);
+    background:
+        linear-gradient(90deg, rgba(9, 49, 87, .87), rgba(4, 20, 41, .90)),
+        rgba(4, 16, 34, .92);
+    box-shadow:
+        inset 0 0 28px rgba(0, 122, 210, .18),
+        0 0 22px rgba(0, 178, 255, .20);
+    outline: none;
+}}
+
+.access-icon {{
+    width: 46px;
+    height: 46px;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(78, 221, 255, .72);
+    transform: rotate(45deg);
+    color: var(--fb-cyan-hot);
+    background: rgba(3, 18, 36, .86);
+    box-shadow: 0 0 14px rgba(0, 168, 255, .16);
+}}
+
+.access-icon span {{
+    transform: rotate(-45deg);
+    font-family: "Orbitron", sans-serif;
+    font-size: 20px;
+    line-height: 1;
+}}
+
+.access-copy strong {{
+    display: block;
+    margin-bottom: 7px;
+    color: var(--fb-cyan-hot);
+    font-family: "Orbitron", "Segoe UI", sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: .095em;
+    text-transform: uppercase;
+}}
+
+.access-copy small {{
+    display: block;
+    color: #c0cedb;
+    font-size: 12.5px;
+    line-height: 1.45;
+}}
+
+.access-arrow {{
+    color: var(--fb-cyan);
+    font-family: "Orbitron", sans-serif;
+    font-size: 18px;
+    opacity: .74;
+    transition: transform .18s ease, opacity .18s ease;
+}}
+
+.access-card:hover .access-arrow,
+.access-card:focus-visible .access-arrow {{
+    transform: translateX(3px);
+    opacity: 1;
+}}
+
+.footer {{
+    margin-top: 22px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(67, 215, 255, .18);
+    color: #8199b0;
+    font-family: "Orbitron", "Segoe UI", sans-serif;
+    font-size: 8.5px;
+    line-height: 1.7;
+    letter-spacing: .20em;
+    text-transform: uppercase;
+}}
+
+.footer strong {{
+    color: #87dfff;
+    font-weight: 500;
+}}
+
+@keyframes fb-grid-drift {{
+    from {{ transform: translate3d(0, 0, 0); }}
+    to {{ transform: translate3d(72px, 72px, 0); }}
+}}
+
+@keyframes fb-scan {{
+    from {{ transform: translateY(-12%); }}
+    to {{ transform: translateY(12%); }}
+}}
+
+@keyframes fb-logo-pulse {{
+    0%, 100% {{ opacity: .54; box-shadow: 0 0 18px rgba(0, 179, 255, .22); }}
+    50% {{ opacity: .92; box-shadow: 0 0 30px rgba(0, 179, 255, .42); }}
+}}
+
+@media (max-width: 620px) {{
+    .scene {{
+        padding: 14px 10px;
+    }}
+
+    .portal {{
+        width: min(470px, 97vw);
+    }}
+
+    .panel {{
+        min-height: 0;
+        padding: 28px 20px 24px;
+    }}
+
+    .portal::before,
+    .portal::after {{
+        width: 44px;
+        top: 76px;
+    }}
+
+    .logo-wrap {{
+        width: 112px;
+        height: 112px;
+        margin-bottom: 10px;
+    }}
+
+    .logo {{
+        width: 100px;
+        height: 100px;
+    }}
+
+    .brand {{
+        letter-spacing: .075em;
+    }}
+
+    .tagline {{
+        margin-bottom: 20px;
+        font-size: 8.5px;
+        letter-spacing: .20em;
+    }}
+
+    .access-card {{
+        grid-template-columns: 46px 1fr 18px;
+        min-height: 92px;
+        padding: 14px;
+        gap: 12px;
+    }}
+
+    .access-icon {{
+        width: 40px;
+        height: 40px;
+    }}
+
+    .access-copy strong {{
+        font-size: 12px;
+        letter-spacing: .07em;
+    }}
+
+    .access-copy small {{
+        font-size: 11.5px;
+    }}
+}}
+
+@media (prefers-reduced-motion: reduce) {{
+    *, *::before, *::after {{
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+    }}
+}}
+</style>
+</head>
+<body>
+<div class="scene">
+    <div class="portal">
+        <main class="panel" aria-labelledby="freeborn-title">
+            <div class="logo-wrap">
+                <img class="logo" src="/assets/logo-freeborn-legacy.png" alt="Logo Freeborn Legacy">
+            </div>
+
+            <h1 class="brand" id="freeborn-title">Freeborn Legacy</h1>
+            <p class="tagline">Libres par choix.<br>Unis par volonté.</p>
+
+            <div class="access-title">Accès</div>
+
+            <div class="access-grid">
+                <a class="access-card" href="{invite_url}" target="_blank" rel="noopener noreferrer">
+                    <span class="access-icon" aria-hidden="true"><span>V</span></span>
+                    <span class="access-copy">
+                        <strong>Visiter Freeborn</strong>
+                        <small>Je souhaite rejoindre la communauté comme invité.</small>
+                    </span>
+                    <span class="access-arrow" aria-hidden="true">›</span>
+                </a>
+
+                <a class="access-card" href="{invite_url}" target="_blank" rel="noopener noreferrer">
+                    <span class="access-icon" aria-hidden="true"><span>R</span></span>
+                    <span class="access-copy">
+                        <strong>Rejoindre Freeborn</strong>
+                        <small>Je souhaite candidater pour intégrer la corporation.</small>
+                    </span>
+                    <span class="access-arrow" aria-hidden="true">›</span>
+                </a>
+            </div>
+
+            <footer class="footer">
+                <strong>Discord officiel</strong> · Freeborn Legacy · New Eden<br>
+                Corporation EVE Online
+            </footer>
+        </main>
+    </div>
+</div>
+</body>
+</html>"""
+
 
 @app.route("/")
 def home():
 
-    return freeborn_web_page(
-        "Service opérationnel",
-        "Freeborn assure la vérification EVE Online et le parcours d'intégration de Freeborn Legacy.",
-        status="success",
-    )
+    return freeborn_landing_page()
 
 
 # ============================================================
