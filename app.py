@@ -30560,7 +30560,7 @@ body::before {{
     background:
         linear-gradient(180deg, rgba(1, 7, 18, .48), rgba(1, 6, 16, .76)),
         radial-gradient(circle at 50% 42%, rgba(14, 118, 192, .12), transparent 45%),
-        url("/assets/freeborn-landing-bg.jpg") center / cover no-repeat;
+        url("/assets/freeborn-landing-bg.jpg") center top / cover no-repeat;
     transform: scale(1.015);
 }}
 
@@ -30580,8 +30580,9 @@ body::after {{
     min-height: 100vh;
     min-height: 100svh;
     display: grid;
-    place-items: center;
-    padding: clamp(22px, 4vw, 56px) 18px;
+    justify-items: center;
+    align-items: start;
+    padding: clamp(112px, 12vh, 138px) 18px 34px;
     isolation: isolate;
 }}
 
@@ -30614,7 +30615,7 @@ body::after {{
 
 .portal {{
     position: relative;
-    width: min(520px, 94vw);
+    width: min(448px, 92vw);
     padding: 1px;
     clip-path: polygon(
         0 24px, 24px 0,
@@ -30652,8 +30653,8 @@ body::after {{
 .panel {{
     position: relative;
     overflow: hidden;
-    min-height: 610px;
-    padding: 34px 34px 28px;
+    min-height: 560px;
+    padding: 28px 28px 24px;
     clip-path: inherit;
     text-align: center;
     background:
@@ -30676,9 +30677,9 @@ body::after {{
 
 .logo-wrap {{
     position: relative;
-    width: 132px;
-    height: 132px;
-    margin: 0 auto 14px;
+    width: 116px;
+    height: 116px;
+    margin: 0 auto 10px;
     display: grid;
     place-items: center;
 }}
@@ -30697,8 +30698,8 @@ body::after {{
     position: relative;
     z-index: 2;
     display: block;
-    width: 118px;
-    height: 118px;
+    width: 102px;
+    height: 102px;
     object-fit: contain;
     filter: drop-shadow(0 0 15px rgba(22, 181, 255, .34));
 }}
@@ -30707,7 +30708,7 @@ body::after {{
     margin: 0;
     font-family: "Orbitron", "Segoe UI", sans-serif;
     font-weight: 700;
-    font-size: clamp(25px, 5.2vw, 35px);
+    font-size: clamp(24px, 4.8vw, 32px);
     line-height: 1.08;
     letter-spacing: .105em;
     text-transform: uppercase;
@@ -30716,7 +30717,7 @@ body::after {{
 }}
 
 .tagline {{
-    margin: 10px auto 24px;
+    margin: 9px auto 20px;
     color: #b8c9db;
     font-family: "Orbitron", "Segoe UI", sans-serif;
     font-size: 10px;
@@ -30760,8 +30761,8 @@ body::after {{
     grid-template-columns: 52px 1fr 24px;
     align-items: center;
     gap: 14px;
-    min-height: 96px;
-    padding: 16px 18px;
+    min-height: 88px;
+    padding: 14px 16px;
     color: var(--fb-text);
     text-decoration: none;
     text-align: left;
@@ -30857,8 +30858,8 @@ body::after {{
 }}
 
 .footer {{
-    margin-top: 22px;
-    padding-top: 16px;
+    margin-top: 18px;
+    padding-top: 14px;
     border-top: 1px solid rgba(67, 215, 255, .18);
     color: #8199b0;
     font-family: "Orbitron", "Segoe UI", sans-serif;
@@ -30890,16 +30891,17 @@ body::after {{
 
 @media (max-width: 620px) {{
     .scene {{
-        padding: 14px 10px;
+        align-items: start;
+        padding: 84px 10px 18px;
     }}
 
     .portal {{
-        width: min(470px, 97vw);
+        width: min(430px, 96vw);
     }}
 
     .panel {{
         min-height: 0;
-        padding: 28px 20px 24px;
+        padding: 24px 18px 22px;
     }}
 
     .portal::before,
@@ -30948,6 +30950,47 @@ body::after {{
 
     .access-copy small {{
         font-size: 11.5px;
+    }}
+}}
+
+@media (max-height: 760px) and (min-width: 621px) {{
+    .scene {{
+        padding-top: 72px;
+        padding-bottom: 20px;
+    }}
+
+    .portal {{
+        width: min(420px, 90vw);
+    }}
+
+    .panel {{
+        min-height: 0;
+        padding: 22px 24px 20px;
+    }}
+
+    .logo-wrap {{
+        width: 96px;
+        height: 96px;
+        margin-bottom: 8px;
+    }}
+
+    .logo {{
+        width: 84px;
+        height: 84px;
+    }}
+
+    .tagline {{
+        margin-bottom: 15px;
+    }}
+
+    .access-card {{
+        min-height: 80px;
+        padding: 12px 14px;
+    }}
+
+    .footer {{
+        margin-top: 14px;
+        padding-top: 11px;
     }}
 }}
 
