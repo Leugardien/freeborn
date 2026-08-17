@@ -30818,11 +30818,20 @@ body::after {{
     box-shadow: 0 0 14px rgba(0, 168, 255, .16);
 }}
 
-.access-icon span {{
+.access-icon-inner {{
+    width: 38px;
+    height: 38px;
+    display: grid;
+    place-items: center;
     transform: rotate(-45deg);
-    font-family: "Orbitron", sans-serif;
-    font-size: 20px;
-    line-height: 1;
+}}
+
+.access-icon-inner img {{
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    filter: drop-shadow(0 0 7px rgba(45, 199, 255, .26));
 }}
 
 .access-copy strong {{
@@ -31018,7 +31027,7 @@ body::after {{
 
             <div class="access-grid">
                 <a class="access-card" href="{invite_url}" target="_blank" rel="noopener noreferrer">
-                    <span class="access-icon" aria-hidden="true"><span>V</span></span>
+                    <span class="access-icon" aria-hidden="true"><span class="access-icon-inner"><img src="/assets/icon-visiteur.png" alt=""></span></span>
                     <span class="access-copy">
                         <strong>Visiter Freeborn</strong>
                         <small>Je souhaite rejoindre la communauté comme invité.</small>
@@ -31027,7 +31036,7 @@ body::after {{
                 </a>
 
                 <a class="access-card" href="{invite_url}" target="_blank" rel="noopener noreferrer">
-                    <span class="access-icon" aria-hidden="true"><span>R</span></span>
+                    <span class="access-icon" aria-hidden="true"><span class="access-icon-inner"><img src="/assets/icon-recrutement.png" alt=""></span></span>
                     <span class="access-copy">
                         <strong>Rejoindre Freeborn</strong>
                         <small>Je souhaite candidater pour intégrer la corporation.</small>
