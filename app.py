@@ -3232,7 +3232,7 @@ def freeborn_corp_rules_web_page(
 <link rel="icon" type="image/png" href="/assets/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
 <title>Règlement Corporation — Freeborn Legacy</title>
 <style>
 :root {{
@@ -3244,9 +3244,29 @@ def freeborn_corp_rules_web_page(
 }}
 *{{box-sizing:border-box}}
 html{{scroll-behavior:smooth}}
-body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:#020712;overflow-x:hidden}}
-body::before{{content:"";position:fixed;inset:0;z-index:-4;background:linear-gradient(180deg,rgba(1,7,18,.76),rgba(1,6,16,.92)),radial-gradient(circle at 52% 15%,rgba(17,133,216,.16),transparent 38%),url('/assets/bg-space.png') center/cover fixed no-repeat;}}
-body::after{{content:"";position:fixed;inset:0;z-index:-3;pointer-events:none;background:radial-gradient(ellipse at center,transparent 28%,rgba(0,3,11,.58) 74%,rgba(0,1,7,.92) 100%),linear-gradient(rgba(67,215,255,.028) 1px,transparent 1px),linear-gradient(90deg,rgba(67,215,255,.024) 1px,transparent 1px);background-size:auto,72px 72px,72px 72px;}}
+body{{margin:0;min-height:100vh;color:var(--text);font-family:"Rajdhani","Segoe UI",Arial,sans-serif;background:#020712;overflow-x:hidden}}
+body::before{{content:"";position:fixed;inset:0;z-index:-4;background:
+radial-gradient(circle at 11% 18%,rgba(87,204,255,.82) 0 1px,transparent 1.8px),
+radial-gradient(circle at 22% 68%,rgba(255,255,255,.58) 0 1px,transparent 1.7px),
+radial-gradient(circle at 36% 31%,rgba(101,221,255,.64) 0 1.2px,transparent 2px),
+radial-gradient(circle at 48% 82%,rgba(255,255,255,.48) 0 1px,transparent 1.7px),
+radial-gradient(circle at 63% 21%,rgba(77,195,255,.72) 0 1px,transparent 1.8px),
+radial-gradient(circle at 75% 58%,rgba(255,255,255,.56) 0 1px,transparent 1.7px),
+radial-gradient(circle at 88% 34%,rgba(81,213,255,.70) 0 1.2px,transparent 2px),
+radial-gradient(circle at 93% 79%,rgba(255,255,255,.42) 0 1px,transparent 1.7px),
+radial-gradient(ellipse at 18% 72%,rgba(0,121,184,.19),transparent 36%),
+radial-gradient(ellipse at 82% 22%,rgba(20,77,174,.20),transparent 38%),
+radial-gradient(ellipse at 52% 10%,rgba(18,152,218,.14),transparent 42%),
+linear-gradient(180deg,#03101f 0%,#020a16 46%,#01050d 100%);
+background-size:
+310px 310px,420px 420px,365px 365px,500px 500px,
+335px 335px,470px 470px,390px 390px,540px 540px,
+auto,auto,auto,auto;}}
+body::after{{content:"";position:fixed;inset:0;z-index:-3;pointer-events:none;background:
+radial-gradient(ellipse at center,transparent 24%,rgba(0,4,13,.38) 70%,rgba(0,1,7,.84) 100%),
+linear-gradient(rgba(67,215,255,.027) 1px,transparent 1px),
+linear-gradient(90deg,rgba(67,215,255,.023) 1px,transparent 1px);
+background-size:auto,72px 72px,72px 72px;}}
 .scan{{position:fixed;inset:-20%;z-index:-2;pointer-events:none;opacity:.18;background:linear-gradient(180deg,transparent 0,rgba(71,219,255,.08) 49%,transparent 51%);background-size:100% 11px;animation:scan 20s linear infinite}}
 @keyframes scan{{to{{transform:translateY(110px)}}}}
 .shell{{width:min(1240px,94vw);margin:0 auto;padding:42px 0 64px}}
@@ -3268,7 +3288,7 @@ h1{{margin:14px 0 4px;font-size:clamp(29px,5vw,54px);letter-spacing:.08em;line-h
 .icon{{width:78px;height:78px;flex:0 0 78px;object-fit:contain;filter:drop-shadow(0 0 12px rgba(25,181,255,.24))}}
 .card h2{{margin:0;font-size:17px;letter-spacing:.055em;line-height:1.28}}
 .num{{color:var(--cyan);margin-right:7px}}
-p,li{{color:#ced9e4;line-height:1.66;font-size:15px}}
+p,li{{color:#d4e1ec;line-height:1.64;font-size:16px;font-weight:500;letter-spacing:.012em}}
 ul{{padding-left:21px;margin:10px 0}}
 li::marker{{color:var(--blue)}}
 .quote{{margin-top:15px;padding:13px 16px;border-left:2px solid var(--cyan);background:rgba(10,55,91,.20);color:var(--hot);font-family:"Orbitron",sans-serif;font-size:11px;letter-spacing:.075em;line-height:1.7}}
@@ -3285,12 +3305,12 @@ li::marker{{color:var(--blue)}}
 .checkline{{display:flex;gap:12px;align-items:flex-start;margin:18px 0 14px;padding:13px;border:1px solid var(--soft);background:rgba(0,0,0,.18);color:#d8e5ef;line-height:1.5}}
 .checkline input{{margin-top:4px;accent-color:#29caff}}
 .accept-btn{{width:100%;border:1px solid rgba(77,220,255,.72);padding:15px 18px;background:linear-gradient(90deg,rgba(5,51,86,.92),rgba(7,28,52,.96));color:#dff9ff;font:700 11px/1.3 "Orbitron",sans-serif;letter-spacing:.11em;cursor:pointer;clip-path:polygon(0 9px,9px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%);transition:.18s ease}}
-.accept-btn:hover{{transform:translateY(-2px);box-shadow:0 0 20px rgba(43,195,255,.26);border-color:var(--hot)}}
+.accept-btn:hover{{transform:translateY(-2px);background:linear-gradient(90deg,rgba(42,143,105,.94),rgba(29,99,84,.97));color:#eafff5;border-color:#8dffc8;box-shadow:0 0 24px rgba(101,230,172,.34),inset 0 0 18px rgba(152,255,211,.08)}}
 .form-error{{margin:12px 0;padding:10px 12px;border:1px solid rgba(255,116,108,.45);background:rgba(120,28,25,.18);color:#ffc0bc}}
 .privacy{{margin-top:12px!important;color:#7f98ae!important;font-size:12px!important}}
 .footer{{text-align:center;margin-top:25px;color:#66839d;font:500 10px/1.7 "Orbitron",sans-serif;letter-spacing:.13em;text-transform:uppercase}}
 @media(max-width:820px){{.grid,.dual{{grid-template-columns:1fr}}.card.wide{{grid-column:auto}}.acceptance{{grid-template-columns:1fr;text-align:center}}.acceptance-icon{{margin:auto}}}}
-@media(max-width:520px){{.shell{{width:min(96vw,1240px);padding-top:16px}}.hero{{padding:24px 18px}}.card{{padding:18px}}.card-head{{align-items:flex-start}}.icon{{width:62px;height:62px;flex-basis:62px}}p,li{{font-size:14px}}}}
+@media(max-width:520px){{.shell{{width:min(96vw,1240px);padding-top:16px}}.hero{{padding:24px 18px}}.card{{padding:18px}}.card-head{{align-items:flex-start}}.icon{{width:62px;height:62px;flex-basis:62px}}p,li{{font-size:15px}}}}
 @media(prefers-reduced-motion:reduce){{html{{scroll-behavior:auto}}.scan{{animation:none}}*{{transition:none!important}}}}
 </style>
 </head>
@@ -30989,7 +31009,7 @@ def freeborn_landing_page():
 <link rel="icon" type="image/png" href="/assets/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
 <title>Freeborn Legacy — Portail</title>
 <style>
 :root {{
