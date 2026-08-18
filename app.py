@@ -3273,7 +3273,7 @@ background-size:auto,72px 72px,72px 72px;}}
 .hero,.card,.acceptance{{position:relative;border:1px solid var(--line);background:linear-gradient(145deg,rgba(6,25,48,.88),rgba(2,10,24,.92));box-shadow:inset 0 0 32px rgba(0,89,158,.10),0 0 26px rgba(0,139,220,.07);clip-path:polygon(0 18px,18px 0,100% 0,100% calc(100% - 18px),calc(100% - 18px) 100%,0 100%)}}
 .hero{{padding:30px 34px 28px;text-align:center;overflow:hidden}}
 .hero::after{{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle at 50% 0,rgba(50,190,255,.14),transparent 48%)}}
-.logo{{width:112px;height:112px;object-fit:contain;filter:drop-shadow(0 0 16px rgba(48,194,255,.42));position:relative;z-index:1}}
+.logo{{width:168px;height:168px;object-fit:contain;filter:drop-shadow(0 0 20px rgba(48,194,255,.48));position:relative;z-index:1}}
 .kicker,.eyebrow{{font-family:"Orbitron",sans-serif;color:var(--cyan);font-weight:600;letter-spacing:.28em;text-transform:uppercase;font-size:11px}}
 h1,h2,h3{{font-family:"Orbitron",sans-serif;text-transform:uppercase}}
 h1{{margin:14px 0 4px;font-size:clamp(29px,5vw,54px);letter-spacing:.08em;line-height:1.05;text-shadow:0 0 20px rgba(56,199,255,.18)}}
@@ -31338,9 +31338,12 @@ body::after {{
 
 .access-copy small {{
     display: block;
-    color: #c0cedb;
-    font-size: 12.5px;
-    line-height: 1.45;
+    color: #d4e1ec;
+    font-family: "Rajdhani", "Segoe UI", Arial, sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: .012em;
+    line-height: 1.42;
 }}
 
 .access-arrow {{
