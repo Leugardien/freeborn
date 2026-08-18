@@ -140,17 +140,21 @@ DISCORD_GUEST_ROLE_ID = os.environ.get(
     "DISCORD_GUEST_ROLE_ID"
 )
 
-DISCORD_CANDIDATE_ROLE_ID = (
-    os.environ.get("DISCORD_CANDIDATE_ROLE_ID")
-    or
-    os.environ.get("DISCORD_RECRUIT_ROLE_ID")
+# Legacy role kept temporarily during the recruitment migration.
+DISCORD_CANDIDATE_ROLE_ID = os.environ.get(
+    "DISCORD_CANDIDATE_ROLE_ID"
 )
 
 DISCORD_CANDIDATE_ACCEPTED_ROLE_ID = os.environ.get(
     "DISCORD_CANDIDATE_ACCEPTED_ROLE_ID"
 )
 
+# New human-assigned recruitment access role. During migration only, the
+# former Candidate role remains a fallback so an existing deployment does
+# not fail before DISCORD_RECRUIT_ROLE_ID is configured in Render.
 DISCORD_RECRUIT_ROLE_ID = (
+    os.environ.get("DISCORD_RECRUIT_ROLE_ID")
+    or
     DISCORD_CANDIDATE_ROLE_ID
 )
 
@@ -469,7 +473,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-REUNIONS-P1"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-REGLEMENT-WEB-P1"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -526,6 +530,16 @@ market_web_serializer = URLSafeTimedSerializer(
     FLASK_SECRET_KEY,
     salt="freeborn-market-web",
 )
+
+# Signed bearer link used by the recruitment policy web pages.
+# The link is generated only from a private Discord slash-command response
+# and expires after 30 minutes.
+policy_web_serializer = URLSafeTimedSerializer(
+    FLASK_SECRET_KEY,
+    salt="freeborn-policy-web",
+)
+
+POLICY_WEB_TOKEN_MAX_AGE = 1800
 
 
 # ============================================================
@@ -2062,6 +2076,9 @@ def resolve_guild_role_id(
         "candidate":
             DISCORD_CANDIDATE_ROLE_ID,
 
+        "recruitment":
+            DISCORD_RECRUIT_ROLE_ID,
+
         "candidate_accepted":
             DISCORD_CANDIDATE_ACCEPTED_ROLE_ID,
 
@@ -3029,6 +3046,460 @@ def save_policy_acceptance_v3(
             )
 
         conn.commit()
+
+# ============================================================
+# FREEBORN POLICY WEB — SIGNED RECRUITMENT DOCUMENT ACCESS
+# ============================================================
+
+def create_policy_web_token(
+    guild_id,
+    discord_user_id,
+    document_type,
+):
+
+    return policy_web_serializer.dumps({
+        "guild_id": str(guild_id),
+        "discord_user_id": str(discord_user_id),
+        "document_type": str(document_type),
+    })
+
+
+def read_policy_web_token(token):
+
+    payload = policy_web_serializer.loads(
+        str(token or ""),
+        max_age=POLICY_WEB_TOKEN_MAX_AGE,
+    )
+
+    document_type = str(
+        payload.get("document_type") or ""
+    )
+
+    if document_type not in {
+        "corp_rules",
+        "freeborn_charter",
+    }:
+        raise ValueError("Invalid policy document type")
+
+    return {
+        "guild_id": str(payload["guild_id"]),
+        "discord_user_id": str(payload["discord_user_id"]),
+        "document_type": document_type,
+    }
+
+
+def build_policy_web_url(
+    guild_id,
+    discord_user_id,
+    document_type,
+):
+
+    token = create_policy_web_token(
+        guild_id,
+        discord_user_id,
+        document_type,
+    )
+
+    path = (
+        "/reglement-corp"
+        if document_type == "corp_rules"
+        else "/charte-corp"
+    )
+
+    return (
+        f"{PUBLIC_BASE_URL}{path}?"
+        + urlencode({"token": token})
+    )
+
+
+def policy_web_member_is_authorized(
+    guild_id,
+    discord_user_id,
+):
+    """Require the live Recruitment role for policy acceptance."""
+
+    if not DISCORD_RECRUIT_ROLE_ID:
+        return False
+
+    try:
+        response = requests.get(
+            f"{DISCORD_API}/guilds/{guild_id}/members/{discord_user_id}",
+            headers={
+                "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+            },
+            timeout=15,
+        )
+
+        if response.status_code != 200:
+            return False
+
+        roles = {
+            str(role_id)
+            for role_id in (
+                response.json().get("roles") or []
+            )
+        }
+
+        return str(DISCORD_RECRUIT_ROLE_ID) in roles
+
+    except Exception as error:
+        print(
+            "Policy web Discord role check failed:",
+            repr(error),
+        )
+        return False
+
+
+def policy_web_status_text(accepted_row):
+
+    if not accepted_row:
+        return None
+
+    accepted_at = accepted_row[0]
+
+    try:
+        return accepted_at.astimezone(
+            timezone.utc
+        ).strftime("%d/%m/%Y à %H:%M UTC")
+    except Exception:
+        return str(accepted_at)
+
+
+def freeborn_corp_rules_web_page(
+    token,
+    discord_user_id,
+    accepted_row=None,
+    just_accepted=False,
+    error_message=None,
+):
+
+    token_safe = escape(str(token or ""), quote=True)
+    user_safe = escape(str(discord_user_id or ""))
+    accepted_text = policy_web_status_text(accepted_row)
+
+    if accepted_text:
+        acceptance_panel = f"""
+        <section class="acceptance accepted">
+            <img src="/assets/reglement_20_bouclier_freeborn.png" alt="" class="acceptance-icon">
+            <div>
+                <div class="eyebrow">VALIDATION DOCUMENTAIRE</div>
+                <h2>Règlement déjà accepté</h2>
+                <p>Cette version du Règlement Corporation a déjà été validée pour ton compte Discord.</p>
+                <p class="acceptance-date">Version {escape(str(CORP_RULES_VERSION))} · {escape(accepted_text)}</p>
+            </div>
+        </section>
+        """
+    else:
+        error_html = (
+            f'<div class="form-error">{escape(str(error_message))}</div>'
+            if error_message
+            else ""
+        )
+        acceptance_panel = f"""
+        <section class="acceptance" id="validation">
+            <img src="/assets/reglement_20_bouclier_freeborn.png" alt="" class="acceptance-icon">
+            <div class="acceptance-copy">
+                <div class="eyebrow">VALIDATION DOCUMENTAIRE</div>
+                <h2>Accepter le Règlement Corporation</h2>
+                <p>En validant, tu confirmes avoir lu et accepté l'intégralité du règlement ci-dessus.</p>
+                {error_html}
+                <form method="post" action="/reglement-corp">
+                    <input type="hidden" name="token" value="{token_safe}">
+                    <label class="checkline">
+                        <input type="checkbox" name="confirm" value="yes" required>
+                        <span>J'ai lu l'intégralité du Règlement Corporation — version {escape(str(CORP_RULES_VERSION))}.</span>
+                    </label>
+                    <button type="submit" class="accept-btn">J'ACCEPTE LE RÈGLEMENT CORPORATION</button>
+                </form>
+                <p class="privacy">Validation liée au compte Discord <strong>{user_safe}</strong>. Une seule acceptation est enregistrée par version.</p>
+            </div>
+        </section>
+        """
+
+    accepted_banner = (
+        '<div class="success-banner">VALIDATION ENREGISTRÉE — le dossier de recrutement a été mis à jour.</div>'
+        if just_accepted
+        else ""
+    )
+
+    return f'''<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#020712">
+<meta name="description" content="Règlement Corporation officiel de Freeborn Legacy.">
+<link rel="icon" type="image/png" href="/assets/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<title>Règlement Corporation — Freeborn Legacy</title>
+<style>
+:root {{
+  color-scheme: dark;
+  --bg:#020712; --panel:rgba(4,15,31,.86); --panel2:rgba(5,22,42,.78);
+  --cyan:#43d7ff; --hot:#79e9ff; --blue:#148dff; --text:#eef8ff;
+  --muted:#9db2c6; --line:rgba(67,215,255,.48); --soft:rgba(67,215,255,.14);
+  --green:#65e6ac; --danger:#ff746c;
+}}
+*{{box-sizing:border-box}}
+html{{scroll-behavior:smooth}}
+body{{margin:0;min-height:100vh;color:var(--text);font-family:"Segoe UI",Arial,sans-serif;background:#020712;overflow-x:hidden}}
+body::before{{content:"";position:fixed;inset:0;z-index:-4;background:linear-gradient(180deg,rgba(1,7,18,.76),rgba(1,6,16,.92)),radial-gradient(circle at 52% 15%,rgba(17,133,216,.16),transparent 38%),url('/assets/bg-space.png') center/cover fixed no-repeat;}}
+body::after{{content:"";position:fixed;inset:0;z-index:-3;pointer-events:none;background:radial-gradient(ellipse at center,transparent 28%,rgba(0,3,11,.58) 74%,rgba(0,1,7,.92) 100%),linear-gradient(rgba(67,215,255,.028) 1px,transparent 1px),linear-gradient(90deg,rgba(67,215,255,.024) 1px,transparent 1px);background-size:auto,72px 72px,72px 72px;}}
+.scan{{position:fixed;inset:-20%;z-index:-2;pointer-events:none;opacity:.18;background:linear-gradient(180deg,transparent 0,rgba(71,219,255,.08) 49%,transparent 51%);background-size:100% 11px;animation:scan 20s linear infinite}}
+@keyframes scan{{to{{transform:translateY(110px)}}}}
+.shell{{width:min(1240px,94vw);margin:0 auto;padding:42px 0 64px}}
+.hero,.card,.acceptance{{position:relative;border:1px solid var(--line);background:linear-gradient(145deg,rgba(6,25,48,.88),rgba(2,10,24,.92));box-shadow:inset 0 0 32px rgba(0,89,158,.10),0 0 26px rgba(0,139,220,.07);clip-path:polygon(0 18px,18px 0,100% 0,100% calc(100% - 18px),calc(100% - 18px) 100%,0 100%)}}
+.hero{{padding:30px 34px 28px;text-align:center;overflow:hidden}}
+.hero::after{{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle at 50% 0,rgba(50,190,255,.14),transparent 48%)}}
+.logo{{width:112px;height:112px;object-fit:contain;filter:drop-shadow(0 0 16px rgba(48,194,255,.42));position:relative;z-index:1}}
+.kicker,.eyebrow{{font-family:"Orbitron",sans-serif;color:var(--cyan);font-weight:600;letter-spacing:.28em;text-transform:uppercase;font-size:11px}}
+h1,h2,h3{{font-family:"Orbitron",sans-serif;text-transform:uppercase}}
+h1{{margin:14px 0 4px;font-size:clamp(29px,5vw,54px);letter-spacing:.08em;line-height:1.05;text-shadow:0 0 20px rgba(56,199,255,.18)}}
+.hero-sub{{margin:10px auto 0;color:#c7d5e3;max-width:780px;line-height:1.7}}
+.motto{{margin:22px auto 0;width:min(690px,95%);padding:13px 18px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-family:"Orbitron",sans-serif;font-size:12px;letter-spacing:.16em;color:var(--hot)}}
+.version{{margin-top:16px;font:500 10px/1.5 "Orbitron",sans-serif;letter-spacing:.16em;color:#7894ad}}
+.success-banner{{margin:18px 0 0;padding:13px 16px;border:1px solid rgba(101,230,172,.52);background:rgba(29,110,81,.18);color:#aef7d3;font:600 11px/1.5 "Orbitron",sans-serif;letter-spacing:.1em;text-align:center}}
+.grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:20px}}
+.card{{padding:22px;min-height:250px}}
+.card.wide{{grid-column:1/-1;min-height:auto}}
+.card-head{{display:flex;gap:18px;align-items:center;margin-bottom:12px}}
+.icon{{width:78px;height:78px;flex:0 0 78px;object-fit:contain;filter:drop-shadow(0 0 12px rgba(25,181,255,.24))}}
+.card h2{{margin:0;font-size:17px;letter-spacing:.055em;line-height:1.28}}
+.num{{color:var(--cyan);margin-right:7px}}
+p,li{{color:#ced9e4;line-height:1.66;font-size:15px}}
+ul{{padding-left:21px;margin:10px 0}}
+li::marker{{color:var(--blue)}}
+.quote{{margin-top:15px;padding:13px 16px;border-left:2px solid var(--cyan);background:rgba(10,55,91,.20);color:var(--hot);font-family:"Orbitron",sans-serif;font-size:11px;letter-spacing:.075em;line-height:1.7}}
+.dual{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}
+.sanctions{{display:flex;flex-wrap:wrap;gap:12px;margin-top:15px}}
+.sanction{{display:flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid var(--soft);background:rgba(3,13,28,.62);font:500 10px/1.2 "Orbitron",sans-serif;letter-spacing:.06em}}
+.sanction img{{width:34px;height:34px;object-fit:contain}}
+.acceptance{{margin-top:24px;padding:25px 28px;display:grid;grid-template-columns:105px 1fr;gap:24px;align-items:center}}
+.acceptance.accepted{{border-color:rgba(101,230,172,.45)}}
+.acceptance-icon{{width:100px;height:100px;object-fit:contain;filter:drop-shadow(0 0 16px rgba(33,176,255,.28))}}
+.acceptance h2{{font-size:20px;letter-spacing:.055em;margin:5px 0 8px}}
+.acceptance p{{margin:6px 0}}
+.acceptance-date{{color:var(--green)!important;font-family:"Orbitron",sans-serif;font-size:11px!important}}
+.checkline{{display:flex;gap:12px;align-items:flex-start;margin:18px 0 14px;padding:13px;border:1px solid var(--soft);background:rgba(0,0,0,.18);color:#d8e5ef;line-height:1.5}}
+.checkline input{{margin-top:4px;accent-color:#29caff}}
+.accept-btn{{width:100%;border:1px solid rgba(77,220,255,.72);padding:15px 18px;background:linear-gradient(90deg,rgba(5,51,86,.92),rgba(7,28,52,.96));color:#dff9ff;font:700 11px/1.3 "Orbitron",sans-serif;letter-spacing:.11em;cursor:pointer;clip-path:polygon(0 9px,9px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%);transition:.18s ease}}
+.accept-btn:hover{{transform:translateY(-2px);box-shadow:0 0 20px rgba(43,195,255,.26);border-color:var(--hot)}}
+.form-error{{margin:12px 0;padding:10px 12px;border:1px solid rgba(255,116,108,.45);background:rgba(120,28,25,.18);color:#ffc0bc}}
+.privacy{{margin-top:12px!important;color:#7f98ae!important;font-size:12px!important}}
+.footer{{text-align:center;margin-top:25px;color:#66839d;font:500 10px/1.7 "Orbitron",sans-serif;letter-spacing:.13em;text-transform:uppercase}}
+@media(max-width:820px){{.grid,.dual{{grid-template-columns:1fr}}.card.wide{{grid-column:auto}}.acceptance{{grid-template-columns:1fr;text-align:center}}.acceptance-icon{{margin:auto}}}}
+@media(max-width:520px){{.shell{{width:min(96vw,1240px);padding-top:16px}}.hero{{padding:24px 18px}}.card{{padding:18px}}.card-head{{align-items:flex-start}}.icon{{width:62px;height:62px;flex-basis:62px}}p,li{{font-size:14px}}}}
+@media(prefers-reduced-motion:reduce){{html{{scroll-behavior:auto}}.scan{{animation:none}}*{{transition:none!important}}}}
+</style>
+</head>
+<body>
+<div class="scan"></div>
+<main class="shell">
+<section class="hero">
+  <img src="/assets/logo-freeborn-legacy.png" alt="Freeborn Legacy" class="logo">
+  <div class="kicker">FREEBORN LEGACY · DOCUMENT OFFICIEL</div>
+  <h1>Règlement Corporation</h1>
+  <p class="hero-sub"><strong>Libres, mais responsables.</strong><br>En rejoignant Freeborn Legacy, chaque membre accepte les règles suivantes. Elles existent pour protéger notre communauté, nos membres et ce que nous construisons ensemble.</p>
+  <div class="motto">LE DÉSACCORD EST AUTORISÉ · LE MANQUE DE RESPECT NE L'EST PAS</div>
+  <div class="version">VERSION {escape(str(CORP_RULES_VERSION))} · 11 AOÛT 2026</div>
+</section>
+{accepted_banner}
+<div class="grid">
+<section class="card">
+ <div class="card-head"><img class="icon" src="/assets/reglement_01_respect_poignee_main.png" alt=""><h2><span class="num">01</span> Respect & comportement</h2></div>
+ <p>Chaque membre doit adopter un comportement respectueux et mature.</p>
+ <p><strong>Sont notamment interdits :</strong></p>
+ <div class="dual"><ul><li>insultes et harcèlement ;</li><li>attaques personnelles ;</li><li>discriminations ;</li></ul><ul><li>provocations répétées ;</li><li>comportements volontairement toxiques ;</li><li>conflits personnels entretenus publiquement.</li></ul></div>
+ <div class="quote">Un désaccord peut arriver. Il doit être réglé calmement et intelligemment. En cas de problème, contactez un membre du Commandement plutôt que d'alimenter le conflit.</div>
+</section>
+<section class="card">
+ <div class="card-head"><img class="icon" src="/assets/reglement_02_discussions_messages.png" alt=""><h2><span class="num">02</span> Discussions & contenus</h2></div>
+ <p>Utilisez les salons selon leur fonction et évitez le spam.</p>
+ <p>Les contenus illégaux, malveillants, pornographiques ou volontairement choquants sont interdits.</p>
+ <p>Les débats sont autorisés tant qu'ils restent respectueux et maîtrisés.</p>
+ <div class="quote">Derrière chaque capsuleer se trouve une personne.</div>
+</section>
+<section class="card">
+ <div class="card-head"><img class="icon" src="/assets/reglement_03_salons_vocaux_microphone.png" alt=""><h2><span class="num">03</span> Salons vocaux</h2></div>
+ <p>Les mêmes règles de respect s'appliquent en vocal.</p>
+ <p>Évitez les interruptions volontaires, cris, sons parasites ou comportements empêchant les autres de communiquer normalement.</p>
+ <p>Pendant une opération ou une flotte, les consignes du <strong>Fleet Commander</strong> doivent être respectées.</p>
+</section>
+<section class="card">
+ <div class="card-head"><img class="icon" src="/assets/reglement_04_identite_eve_sso.png" alt=""><h2><span class="num">04</span> Identité Discord & EVE</h2></div>
+ <p>Les membres de Freeborn Legacy doivent utiliser le système officiel de vérification <strong>EVE SSO</strong> du serveur.</p>
+ <ul><li>Chaque personnage déclaré doit appartenir à son véritable propriétaire.</li><li>Les personnages secondaires doivent être déclarés conformément au système Main / Alts de la corporation.</li><li>Toute tentative de contourner ou falsifier la vérification pourra entraîner une exclusion immédiate.</li></ul>
+</section>
+<section class="card wide">
+ <div class="card-head"><img class="icon" src="/assets/reglement_05_confidentialite_securite.png" alt=""><h2><span class="num">05</span> Confidentialité & sécurité</h2></div>
+ <p>Les informations internes restent <strong>internes</strong>. Cela concerne notamment :</p>
+ <div class="dual"><ul><li>routes et connexions wormhole ;</li><li>positions et mouvements de flotte ;</li><li>structures et infrastructures ;</li></ul><ul><li>ressources et stocks ;</li><li>opérations planifiées ;</li><li>informations réservées au Commandement.</li></ul></div>
+ <p>Captures d'écran, messages ou documents internes ne doivent pas être transmis à l'extérieur sans autorisation.</p>
+ <div class="quote">CE QUI APPARTIENT AUX FREE RESTE CHEZ LES FREE.</div>
+</section>
+<section class="card">
+ <div class="card-head"><img class="icon" src="/assets/reglement_07_comportement_eve_flotte.png" alt=""><h2><span class="num">06</span> Comportement dans EVE</h2></div>
+ <p>Lorsque vous agissez sous la bannière Freeborn Legacy, vous représentez la corporation.</p>
+ <p>Respectez nos alliés, partenaires et accords diplomatiques.</p>
+ <p>Le PvP fait partie d'EVE Online. Combattre, perdre un vaisseau ou affronter un adversaire n'autorise jamais les insultes ou le harcèlement.</p>
+ <div class="quote">GAGNER AVEC HUMILITÉ · PERDRE AVEC DIGNITÉ · APPRENDRE TOUJOURS.</div>
+</section>
+<section class="card">
+ <div class="card-head"><img class="icon" src="/assets/reglement_09_biens_collectifs.png" alt=""><h2><span class="num">07</span> Biens collectifs</h2></div>
+ <p>Les ressources, structures, hangars et équipements appartenant à la corporation sont destinés à servir l'intérêt collectif.</p>
+ <p>Vol, détournement, sabotage ou utilisation volontairement abusive des ressources communes constituent une rupture grave de confiance.</p>
+ <p>Les droits accordés représentent une responsabilité, pas un privilège.</p>
+</section>
+<section class="card wide">
+ <div class="card-head"><img class="icon" src="/assets/reglement_10_moderation_justice.png" alt=""><h2><span class="num">08</span> Modération & sanctions</h2></div>
+ <p>Le Commandement peut intervenir lorsqu'un comportement met en danger un membre, la communauté ou la corporation. Selon la gravité :</p>
+ <div class="sanctions">
+   <div class="sanction"><img src="/assets/reglement_02_discussions_messages.png" alt="">Rappel</div>
+   <div class="sanction"><img src="/assets/reglement_11_avertissement.png" alt="">Avertissement</div>
+   <div class="sanction"><img src="/assets/reglement_12_restriction.png" alt="">Restriction</div>
+   <div class="sanction"><img src="/assets/reglement_13_exclusion.png" alt="">Exclusion</div>
+ </div>
+ <p>Les comportements graves — vol, sabotage, espionnage, divulgation volontaire d'informations sensibles ou tentative de compromission du serveur — peuvent entraîner une exclusion immédiate.</p>
+</section>
+<section class="card wide">
+ <div class="card-head"><img class="icon" src="/assets/reglement_15_communaute.png" alt=""><h2>Être FREE</h2></div>
+ <p>La liberté que nous défendons repose sur la <strong>confiance</strong>, la <strong>responsabilité</strong> et le <strong>respect</strong>.</p>
+ <p>En restant parmi nous, chaque membre accepte de respecter ce règlement et de contribuer à préserver l'esprit de Freeborn Legacy.</p>
+ <div class="quote">LIBRES PAR CHOIX · UNIS PAR VOLONTÉ · HÉRITIERS DE NOTRE PROPRE AVENIR.</div>
+</section>
+</div>
+{acceptance_panel}
+<div class="footer">FREEBORN LEGACY · RÈGLEMENT CORPORATION · VERSION {escape(str(CORP_RULES_VERSION))}<br>ENSEMBLE, FAISONS DE FREEBORN LEGACY UNE COMMUNAUTÉ EXEMPLAIRE.</div>
+</main>
+</body>
+</html>'''
+
+
+@app.route(
+    "/reglement-corp",
+    methods=["GET", "POST"],
+)
+def freeborn_corp_rules_web():
+
+    token = (
+        request.form.get("token")
+        if request.method == "POST"
+        else request.args.get("token")
+    )
+
+    try:
+        payload = read_policy_web_token(token)
+    except SignatureExpired:
+        return freeborn_web_page(
+            "Lien expiré",
+            "Le lien du Règlement Corporation a expiré. Relance /reglement-corp dans Discord.",
+            status="warning",
+        ), 410
+    except (BadSignature, ValueError, KeyError, TypeError):
+        return freeborn_web_page(
+            "Lien invalide",
+            "Ce lien de validation n'est pas valide. Relance /reglement-corp dans Discord.",
+            status="error",
+        ), 400
+
+    guild_id = payload["guild_id"]
+    discord_user_id = payload["discord_user_id"]
+
+    if (
+        guild_id != str(DISCORD_GUILD_ID)
+        or payload["document_type"] != "corp_rules"
+    ):
+        return freeborn_web_page(
+            "Accès refusé",
+            "Ce lien n'appartient pas au parcours de recrutement Freeborn Legacy.",
+            status="error",
+        ), 403
+
+    if not policy_web_member_is_authorized(
+        guild_id,
+        discord_user_id,
+    ):
+        return freeborn_web_page(
+            "Accès recrutement requis",
+            "Le rôle Recrutement est nécessaire pour consulter et valider ce document.",
+            status="warning",
+        ), 403
+
+    accepted_row = has_policy_acceptance_v3(
+        guild_id,
+        discord_user_id,
+        "corp_rules",
+        CORP_RULES_VERSION,
+    )
+
+    if request.method == "GET":
+        return freeborn_corp_rules_web_page(
+            token,
+            discord_user_id,
+            accepted_row=accepted_row,
+        )
+
+    if accepted_row:
+        return freeborn_corp_rules_web_page(
+            token,
+            discord_user_id,
+            accepted_row=accepted_row,
+        )
+
+    if request.form.get("confirm") != "yes":
+        return freeborn_corp_rules_web_page(
+            token,
+            discord_user_id,
+            error_message=(
+                "Tu dois confirmer avoir lu l'intégralité du règlement avant de valider."
+            ),
+        ), 400
+
+    save_policy_acceptance_v3(
+        guild_id,
+        discord_user_id,
+        "corp_rules",
+        CORP_RULES_VERSION,
+        channel_id=DISCORD_RECRUITMENT_CHANNEL_ID,
+    )
+
+    add_audit_event_v3(
+        guild_id,
+        "policy_accept_corp_rules_web",
+        target_discord_user_id=discord_user_id,
+        actor_discord_user_id=discord_user_id,
+        metadata_json=json.dumps({
+            "document_version": str(CORP_RULES_VERSION),
+            "source": "web",
+        }),
+    )
+
+    guild_config = get_guild_config(guild_id)
+    log_v3_event_to_discord(
+        guild_config,
+        (
+            "📕 **Règlement Corporation accepté**\n"
+            f"Utilisateur : <@{discord_user_id}>\n"
+            f"Version : `{CORP_RULES_VERSION}`\n"
+            "Source : page Web sécurisée Freeborn"
+        ),
+    )
+
+    accepted_row = has_policy_acceptance_v3(
+        guild_id,
+        discord_user_id,
+        "corp_rules",
+        CORP_RULES_VERSION,
+    )
+
+    return freeborn_corp_rules_web_page(
+        token,
+        discord_user_id,
+        accepted_row=accepted_row,
+        just_accepted=True,
+    )
 
 
 # ============================================================
@@ -31346,6 +31817,89 @@ def interactions():
         })
 
     # ========================================================
+    # /reglement-corp — RECRUITMENT POLICY WEB PAGE
+    # ========================================================
+
+    if command_name == "reglement-corp":
+
+        if str(data.get("channel_id", "")) != str(
+            DISCORD_RECRUITMENT_CHANNEL_ID
+        ):
+            return dedicated_channel_error(
+                DISCORD_RECRUITMENT_CHANNEL_ID,
+                "recrutement",
+            )
+
+        actor_roles = interaction_member_role_ids(data)
+
+        if (
+            not DISCORD_RECRUIT_ROLE_ID
+            or str(DISCORD_RECRUIT_ROLE_ID) not in actor_roles
+        ):
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content": (
+                        "⛔ **Accès recrutement requis**\n\n"
+                        "Le rôle **Recrutement** est nécessaire pour ouvrir "
+                        "le Règlement Corporation."
+                    ),
+                    "flags": 64,
+                },
+            })
+
+        accepted_row = has_policy_acceptance_v3(
+            guild_id,
+            discord_user_id,
+            "corp_rules",
+            CORP_RULES_VERSION,
+        )
+
+        policy_url = build_policy_web_url(
+            guild_id,
+            discord_user_id,
+            "corp_rules",
+        )
+
+        if accepted_row:
+            status_line = (
+                "✅ **Déjà accepté** — tu peux rouvrir le document, "
+                "mais aucune nouvelle signature ne sera créée."
+            )
+        else:
+            status_line = (
+                "📕 Lis le document dans son intégralité puis valide-le "
+                "depuis la page Web Freeborn."
+            )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    "**RÈGLEMENT CORPORATION — FREEBORN LEGACY**\n\n"
+                    f"{status_line}\n"
+                    f"Version en vigueur : **{CORP_RULES_VERSION}**\n\n"
+                    "Le lien est personnel et expire automatiquement."
+                ),
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 2,
+                                "style": 5,
+                                "label": "Ouvrir le Règlement Corporation",
+                                "emoji": {"name": "📕"},
+                                "url": policy_url,
+                            }
+                        ],
+                    }
+                ],
+                "flags": 64,
+            },
+        })
+
+    # ========================================================
     # FREEBORN SRP
     # ========================================================
 
@@ -36291,6 +36845,17 @@ def register_commands():
 
         {
             "name":
+                "reglement-corp",
+
+            "description":
+                "Ouvrir et valider le Règlement Corporation Freeborn",
+
+            "type":
+                1,
+        },
+
+        {
+            "name":
                 "srp",
 
             "description":
@@ -37027,7 +37592,7 @@ def register_commands():
 
             print(
                 "Commandes Discord enregistrées : "
-                "/freeborn, /fit-creer, /fit-liste, /fit-afficher, /fit-modifier, /fit-approuver, /fit-refuser, /fit-supprimer, "
+                "/freeborn, /reglement-corp, /fit-creer, /fit-liste, /fit-afficher, /fit-modifier, /fit-approuver, /fit-refuser, /fit-supprimer, "
                 "/reunion-officier, /reunion-direction, /reunion-haut-conseil, "
                 "/guide-membre, /guide-staff, /verification, "
                 "/alt-ajouter, /alt-supprimer, /main-changer, "
