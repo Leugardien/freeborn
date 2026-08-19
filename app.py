@@ -473,7 +473,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-ACCUEIL-ASSETS-HOVER-P1"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-REGLEMENT-ASSETS-P1"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -3180,7 +3180,7 @@ def freeborn_corp_rules_web_page(
     if accepted_text:
         acceptance_panel = f"""
         <section class="acceptance accepted">
-            <img src="/assets/reglement_20_bouclier_freeborn.png" alt="" class="acceptance-icon">
+            <img src="/assets/reglement/reglement_20_bouclier_freeborn.png" alt="" class="acceptance-icon">
             <div>
                 <div class="eyebrow">VALIDATION DOCUMENTAIRE</div>
                 <h2>Règlement déjà accepté</h2>
@@ -3197,7 +3197,7 @@ def freeborn_corp_rules_web_page(
         )
         acceptance_panel = f"""
         <section class="acceptance" id="validation">
-            <img src="/assets/reglement_20_bouclier_freeborn.png" alt="" class="acceptance-icon">
+            <img src="/assets/reglement/reglement_20_bouclier_freeborn.png" alt="" class="acceptance-icon">
             <div class="acceptance-copy">
                 <div class="eyebrow">VALIDATION DOCUMENTAIRE</div>
                 <h2>Accepter le Règlement Corporation</h2>
@@ -3328,63 +3328,63 @@ li::marker{{color:var(--blue)}}
 {accepted_banner}
 <div class="grid">
 <section class="card">
- <div class="card-head"><img class="icon" src="/assets/reglement_01_respect_poignee_main.png" alt=""><h2><span class="num">01</span> Respect & comportement</h2></div>
+ <div class="card-head"><img class="icon" src="/assets/reglement/reglement_01_partenaire.png" alt=""><h2><span class="num">01</span> Respect & comportement</h2></div>
  <p>Chaque membre doit adopter un comportement respectueux et mature.</p>
  <p><strong>Sont notamment interdits :</strong></p>
  <div class="dual"><ul><li>insultes et harcèlement ;</li><li>attaques personnelles ;</li><li>discriminations ;</li></ul><ul><li>provocations répétées ;</li><li>comportements volontairement toxiques ;</li><li>conflits personnels entretenus publiquement.</li></ul></div>
  <div class="quote">Un désaccord peut arriver. Il doit être réglé calmement et intelligemment. En cas de problème, contactez un membre du Commandement plutôt que d'alimenter le conflit.</div>
 </section>
 <section class="card">
- <div class="card-head"><img class="icon" src="/assets/reglement_02_discussions_messages.png" alt=""><h2><span class="num">02</span> Discussions & contenus</h2></div>
+ <div class="card-head"><img class="icon" src="/assets/reglement/reglement_02_communication.png" alt=""><h2><span class="num">02</span> Discussions & contenus</h2></div>
  <p>Utilisez les salons selon leur fonction et évitez le spam.</p>
  <p>Les contenus illégaux, malveillants, pornographiques ou volontairement choquants sont interdits.</p>
  <p>Les débats sont autorisés tant qu'ils restent respectueux et maîtrisés.</p>
  <div class="quote">Derrière chaque capsuleer se trouve une personne.</div>
 </section>
 <section class="card">
- <div class="card-head"><img class="icon" src="/assets/reglement_03_salons_vocaux_microphone.png" alt=""><h2><span class="num">03</span> Salons vocaux</h2></div>
+ <div class="card-head"><img class="icon" src="/assets/reglement/reglement_03_salons_vocaux_microphone.png" alt=""><h2><span class="num">03</span> Salons vocaux</h2></div>
  <p>Les mêmes règles de respect s'appliquent en vocal.</p>
  <p>Évitez les interruptions volontaires, cris, sons parasites ou comportements empêchant les autres de communiquer normalement.</p>
  <p>Pendant une opération ou une flotte, les consignes du <strong>Fleet Commander</strong> doivent être respectées.</p>
 </section>
 <section class="card">
- <div class="card-head"><img class="icon" src="/assets/reglement_04_identite_eve_sso.png" alt=""><h2><span class="num">04</span> Identité Discord & EVE</h2></div>
+ <div class="card-head"><img class="icon" src="/assets/reglement/reglement_04_identite_eve_sso.png" alt=""><h2><span class="num">04</span> Identité Discord & EVE</h2></div>
  <p>Les membres de Freeborn Legacy doivent utiliser le système officiel de vérification <strong>EVE SSO</strong> du serveur.</p>
  <ul><li>Chaque personnage déclaré doit appartenir à son véritable propriétaire.</li><li>Les personnages secondaires doivent être déclarés conformément au système Main / Alts de la corporation.</li><li>Toute tentative de contourner ou falsifier la vérification pourra entraîner une exclusion immédiate.</li></ul>
 </section>
 <section class="card wide">
- <div class="card-head"><img class="icon" src="/assets/reglement_05_confidentialite_securite.png" alt=""><h2><span class="num">05</span> Confidentialité & sécurité</h2></div>
+ <div class="card-head"><img class="icon" src="/assets/reglement/reglement_05_confidentialite_securite.png" alt=""><h2><span class="num">05</span> Confidentialité & sécurité</h2></div>
  <p>Les informations internes restent <strong>internes</strong>. Cela concerne notamment :</p>
  <div class="dual"><ul><li>routes et connexions wormhole ;</li><li>positions et mouvements de flotte ;</li><li>structures et infrastructures ;</li></ul><ul><li>ressources et stocks ;</li><li>opérations planifiées ;</li><li>informations réservées au Commandement.</li></ul></div>
  <p>Captures d'écran, messages ou documents internes ne doivent pas être transmis à l'extérieur sans autorisation.</p>
  <div class="quote">CE QUI APPARTIENT AUX FREE RESTE CHEZ LES FREE.</div>
 </section>
 <section class="card">
- <div class="card-head"><img class="icon" src="/assets/reglement_07_comportement_eve_flotte.png" alt=""><h2><span class="num">06</span> Comportement dans EVE</h2></div>
+ <div class="card-head"><img class="icon" src="/assets/reglement/reglement_07_comportement.png" alt=""><h2><span class="num">06</span> Comportement dans EVE</h2></div>
  <p>Lorsque vous agissez sous la bannière Freeborn Legacy, vous représentez la corporation.</p>
  <p>Respectez nos alliés, partenaires et accords diplomatiques.</p>
  <p>Le PvP fait partie d'EVE Online. Combattre, perdre un vaisseau ou affronter un adversaire n'autorise jamais les insultes ou le harcèlement.</p>
  <div class="quote">GAGNER AVEC HUMILITÉ · PERDRE AVEC DIGNITÉ · APPRENDRE TOUJOURS.</div>
 </section>
 <section class="card">
- <div class="card-head"><img class="icon" src="/assets/reglement_09_biens_collectifs.png" alt=""><h2><span class="num">07</span> Biens collectifs</h2></div>
+ <div class="card-head"><img class="icon" src="/assets/reglement/reglement_09_ressources.png" alt=""><h2><span class="num">07</span> Biens collectifs</h2></div>
  <p>Les ressources, structures, hangars et équipements appartenant à la corporation sont destinés à servir l'intérêt collectif.</p>
  <p>Vol, détournement, sabotage ou utilisation volontairement abusive des ressources communes constituent une rupture grave de confiance.</p>
  <p>Les droits accordés représentent une responsabilité, pas un privilège.</p>
 </section>
 <section class="card wide">
- <div class="card-head"><img class="icon" src="/assets/reglement_10_moderation_justice.png" alt=""><h2><span class="num">08</span> Modération & sanctions</h2></div>
+ <div class="card-head"><img class="icon" src="/assets/reglement/reglement_10_respect.png" alt=""><h2><span class="num">08</span> Modération & sanctions</h2></div>
  <p>Le Commandement peut intervenir lorsqu'un comportement met en danger un membre, la communauté ou la corporation. Selon la gravité :</p>
  <div class="sanctions">
-   <div class="sanction"><img src="/assets/reglement_02_discussions_messages.png" alt="">Rappel</div>
-   <div class="sanction"><img src="/assets/reglement_11_avertissement.png" alt="">Avertissement</div>
-   <div class="sanction"><img src="/assets/reglement_12_restriction.png" alt="">Restriction</div>
-   <div class="sanction"><img src="/assets/reglement_13_exclusion.png" alt="">Exclusion</div>
+   <div class="sanction"><img src="/assets/reglement/reglement_02_communication.png" alt="">Rappel</div>
+   <div class="sanction"><img src="/assets/reglement/reglement_11_avertissement.png" alt="">Avertissement</div>
+   <div class="sanction"><img src="/assets/reglement/reglement_12_restriction.png" alt="">Restriction</div>
+   <div class="sanction"><img src="/assets/reglement/reglement_13_exclusion.png" alt="">Exclusion</div>
  </div>
  <p>Les comportements graves — vol, sabotage, espionnage, divulgation volontaire d'informations sensibles ou tentative de compromission du serveur — peuvent entraîner une exclusion immédiate.</p>
 </section>
 <section class="card wide">
- <div class="card-head"><img class="icon" src="/assets/reglement_15_communaute.png" alt=""><h2>Être FREE</h2></div>
+ <div class="card-head"><img class="icon" src="/assets/reglement/reglement_15_communaute.png" alt=""><h2>Être FREE</h2></div>
  <p>La liberté que nous défendons repose sur la <strong>confiance</strong>, la <strong>responsabilité</strong> et le <strong>respect</strong>.</p>
  <p>En restant parmi nous, chaque membre accepte de respecter ce règlement et de contribuer à préserver l'esprit de Freeborn Legacy.</p>
  <div class="quote">LIBRES PAR CHOIX · UNIS PAR VOLONTÉ · HÉRITIERS DE NOTRE PROPRE AVENIR.</div>
