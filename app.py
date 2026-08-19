@@ -140,6 +140,27 @@ DISCORD_GUEST_ROLE_ID = os.environ.get(
     "DISCORD_GUEST_ROLE_ID"
 )
 
+
+# Landing-page Discord onboarding / recruitment.
+# These values are optional at process startup so an incomplete Render
+# configuration does not prevent the rest of Freeborn from booting.
+DISCORD_CLIENT_SECRET = os.environ.get(
+    "DISCORD_CLIENT_SECRET"
+)
+
+DISCORD_BLABLATOIRE_CHANNEL_ID = os.environ.get(
+    "DISCORD_BLABLATOIRE_CHANNEL_ID"
+)
+
+DISCORD_CANDIDATURE_CHANNEL_ID = os.environ.get(
+    "DISCORD_CANDIDATURE_CHANNEL_ID"
+)
+
+DISCORD_JOIN_CALLBACK_URL = os.environ.get(
+    "DISCORD_JOIN_CALLBACK_URL",
+    f"{PUBLIC_BASE_URL}/discord/join/callback",
+)
+
 # Legacy role kept temporarily during the recruitment migration.
 DISCORD_CANDIDATE_ROLE_ID = os.environ.get(
     "DISCORD_CANDIDATE_ROLE_ID"
@@ -472,8 +493,15 @@ FREEBORN_EVE_SCOPES = (
 
 DISCORD_API = "https://discord.com/api/v10"
 
+DISCORD_OAUTH_AUTHORIZE_URL = (
+    "https://discord.com/oauth2/authorize"
+)
+DISCORD_OAUTH_TOKEN_URL = (
+    "https://discord.com/api/v10/oauth2/token"
+)
+
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-REGLEMENT-ASSETS-P1"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P1"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -540,6 +568,14 @@ policy_web_serializer = URLSafeTimedSerializer(
 )
 
 POLICY_WEB_TOKEN_MAX_AGE = 1800
+
+
+discord_join_serializer = URLSafeTimedSerializer(
+    FLASK_SECRET_KEY,
+    salt="freeborn-discord-join",
+)
+
+DISCORD_JOIN_STATE_MAX_AGE = 900
 
 
 # ============================================================
@@ -784,6 +820,64 @@ def init_database():
                         FOREIGN KEY (guild_id)
                             REFERENCES discord_guilds (guild_id)
                             ON DELETE CASCADE
+                    );
+                    """
+                )
+
+
+                # ====================================================
+                # FREEBORN RECRUITMENT APPLICATIONS — LANDING V3
+                # ====================================================
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS recruitment_applications (
+                        application_id BIGSERIAL PRIMARY KEY,
+                        guild_id TEXT NOT NULL,
+                        discord_user_id TEXT NOT NULL,
+                        discord_username TEXT,
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (
+                                status IN (
+                                    'pending',
+                                    'accepted',
+                                    'refused'
+                                )
+                            ),
+                        source TEXT NOT NULL DEFAULT 'landing',
+                        requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        decided_by_discord_user_id TEXT,
+                        decided_at TIMESTAMPTZ,
+                        discord_channel_id TEXT,
+                        discord_message_id TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        FOREIGN KEY (guild_id)
+                            REFERENCES discord_guilds (guild_id)
+                            ON DELETE CASCADE
+                    );
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                    uq_recruitment_applications_one_pending
+                    ON recruitment_applications (
+                        guild_id,
+                        discord_user_id
+                    )
+                    WHERE status = 'pending';
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_recruitment_applications_status
+                    ON recruitment_applications (
+                        guild_id,
+                        status,
+                        requested_at DESC
                     );
                     """
                 )
@@ -12164,6 +12258,465 @@ def send_discord_channel_message(
     )
 
 
+
+def create_or_get_recruitment_application(
+    guild_id,
+    discord_user_id,
+    discord_username=None,
+):
+    """Create one pending application per Discord user, idempotently."""
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    application_id,
+                    status,
+                    requested_at,
+                    discord_channel_id,
+                    discord_message_id
+                FROM recruitment_applications
+                WHERE guild_id = %s
+                AND discord_user_id = %s
+                AND status = 'pending'
+                ORDER BY requested_at DESC
+                LIMIT 1;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+            if row:
+
+                return {
+                    "application_id": int(row[0]),
+                    "status": str(row[1]),
+                    "requested_at": row[2],
+                    "discord_channel_id": row[3],
+                    "discord_message_id": row[4],
+                    "created": False,
+                }
+
+            cur.execute(
+                """
+                INSERT INTO recruitment_applications (
+                    guild_id,
+                    discord_user_id,
+                    discord_username,
+                    status,
+                    source,
+                    requested_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, 'pending', 'landing', NOW(), NOW())
+                RETURNING application_id, requested_at;
+                """,
+                (
+                    str(guild_id),
+                    str(discord_user_id),
+                    (
+                        str(discord_username)
+                        if discord_username
+                        else None
+                    ),
+                ),
+            )
+
+            created = cur.fetchone()
+
+        conn.commit()
+
+    return {
+        "application_id": int(created[0]),
+        "status": "pending",
+        "requested_at": created[1],
+        "discord_channel_id": None,
+        "discord_message_id": None,
+        "created": True,
+    }
+
+
+def get_recruitment_application(application_id):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    application_id,
+                    guild_id,
+                    discord_user_id,
+                    discord_username,
+                    status,
+                    requested_at,
+                    decided_by_discord_user_id,
+                    decided_at,
+                    discord_channel_id,
+                    discord_message_id
+                FROM recruitment_applications
+                WHERE application_id = %s
+                LIMIT 1;
+                """,
+                (
+                    int(application_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+
+        return None
+
+    return {
+        "application_id": int(row[0]),
+        "guild_id": str(row[1]),
+        "discord_user_id": str(row[2]),
+        "discord_username": row[3],
+        "status": str(row[4]),
+        "requested_at": row[5],
+        "decided_by_discord_user_id": row[6],
+        "decided_at": row[7],
+        "discord_channel_id": row[8],
+        "discord_message_id": row[9],
+    }
+
+
+def set_recruitment_application_message(
+    application_id,
+    channel_id,
+    message_id,
+):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                UPDATE recruitment_applications
+                SET
+                    discord_channel_id = %s,
+                    discord_message_id = %s,
+                    updated_at = NOW()
+                WHERE application_id = %s;
+                """,
+                (
+                    str(channel_id),
+                    str(message_id),
+                    int(application_id),
+                ),
+            )
+
+        conn.commit()
+
+
+def decide_recruitment_application(
+    application_id,
+    new_status,
+    actor_user_id,
+):
+    """Atomically decide only a still-pending recruitment application."""
+
+    if new_status not in {
+        "accepted",
+        "refused",
+    }:
+
+        raise ValueError(
+            "Invalid recruitment application status"
+        )
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                UPDATE recruitment_applications
+                SET
+                    status = %s,
+                    decided_by_discord_user_id = %s,
+                    decided_at = NOW(),
+                    updated_at = NOW()
+                WHERE application_id = %s
+                AND status = 'pending'
+                RETURNING
+                    application_id,
+                    guild_id,
+                    discord_user_id,
+                    status,
+                    decided_at;
+                """,
+                (
+                    str(new_status),
+                    str(actor_user_id),
+                    int(application_id),
+                ),
+            )
+
+            row = cur.fetchone()
+
+        conn.commit()
+
+    return row
+
+
+def recruitment_reference(application_id):
+
+    return (
+        "CAND-"
+        + str(int(application_id)).zfill(4)
+    )
+
+
+def get_discord_member_fresh(
+    guild_id,
+    user_id,
+):
+    """Read one guild member without the display-name cache."""
+
+    response = requests.get(
+        (
+            f"{DISCORD_API}/guilds/"
+            f"{guild_id}/members/{user_id}"
+        ),
+        headers={
+            "Authorization":
+                f"Bot {DISCORD_BOT_TOKEN}",
+        },
+        timeout=15,
+    )
+
+    if response.status_code != 200:
+
+        return None
+
+    return response.json()
+
+
+def send_discord_channel_payload(
+    channel_id,
+    payload,
+):
+
+    if not channel_id:
+
+        return None
+
+    return requests.post(
+        f"{DISCORD_API}/channels/{channel_id}/messages",
+        headers={
+            "Authorization":
+                f"Bot {DISCORD_BOT_TOKEN}",
+            "Content-Type":
+                "application/json",
+        },
+        json=payload,
+        timeout=15,
+    )
+
+
+def edit_discord_channel_message_components(
+    channel_id,
+    message_id,
+    components,
+):
+
+    if not channel_id or not message_id:
+
+        return None
+
+    return requests.patch(
+        (
+            f"{DISCORD_API}/channels/"
+            f"{channel_id}/messages/{message_id}"
+        ),
+        headers={
+            "Authorization":
+                f"Bot {DISCORD_BOT_TOKEN}",
+            "Content-Type":
+                "application/json",
+        },
+        json={
+            "components":
+                components,
+        },
+        timeout=15,
+    )
+
+
+def publish_recruitment_application(
+    application_id,
+    discord_user_id,
+    discord_username=None,
+):
+
+    if not DISCORD_CANDIDATURE_CHANNEL_ID:
+
+        return None
+
+    reference = recruitment_reference(
+        application_id
+    )
+
+    display = (
+        str(discord_username)
+        if discord_username
+        else str(discord_user_id)
+    )
+
+    payload = {
+        "content":
+            f"📨 **NOUVELLE CANDIDATURE — {reference}**",
+        "embeds": [
+            {
+                "title":
+                    "Demande de recrutement Freeborn Legacy",
+                "description":
+                    (
+                        f"<@{discord_user_id}> souhaite intégrer "
+                        "**Freeborn Legacy**."
+                    ),
+                "color":
+                    0x2F81F7,
+                "fields": [
+                    {
+                        "name":
+                            "Utilisateur",
+                        "value":
+                            (
+                                f"**{display}**\n"
+                                f"Discord ID : `{discord_user_id}`"
+                            ),
+                        "inline":
+                            False,
+                    },
+                    {
+                        "name":
+                            "Statut",
+                        "value":
+                            "🟡 **EN ATTENTE**",
+                        "inline":
+                            True,
+                    },
+                    {
+                        "name":
+                            "Source",
+                        "value":
+                            "Landing page — **Rejoindre Freeborn**",
+                        "inline":
+                            True,
+                    },
+                ],
+                "footer": {
+                    "text":
+                        (
+                            "Freeborn Legacy • Candidature • "
+                            + reference
+                        )
+                },
+            },
+        ],
+        "components": [
+            {
+                "type":
+                    1,
+                "components": [
+                    {
+                        "type":
+                            2,
+                        "style":
+                            3,
+                        "label":
+                            "Valider",
+                        "custom_id":
+                            (
+                                "recruit_app_accept:"
+                                + str(application_id)
+                            ),
+                    },
+                    {
+                        "type":
+                            2,
+                        "style":
+                            4,
+                        "label":
+                            "Refuser",
+                        "custom_id":
+                            (
+                                "recruit_app_refuse:"
+                                + str(application_id)
+                            ),
+                    },
+                ],
+            },
+        ],
+    }
+
+    response = send_discord_channel_payload(
+        DISCORD_CANDIDATURE_CHANNEL_ID,
+        payload,
+    )
+
+    if (
+        response is not None
+        and response.status_code
+        in (200, 201)
+    ):
+
+        message = response.json()
+
+        set_recruitment_application_message(
+            application_id,
+            DISCORD_CANDIDATURE_CHANNEL_ID,
+            message.get("id"),
+        )
+
+    return response
+
+
+def send_landing_welcome_messages(
+    discord_user_id,
+    entry_intent,
+):
+
+    if not DISCORD_BLABLATOIRE_CHANNEL_ID:
+
+        return
+
+    send_discord_channel_message(
+        DISCORD_BLABLATOIRE_CHANNEL_ID,
+        (
+            f"👋 Bienvenue <@{discord_user_id}> "
+            "sur le serveur **Freeborn Legacy** ! "
+            "Installe-toi tranquillement et n'hésite pas "
+            "à venir discuter avec nous."
+        ),
+    )
+
+    if entry_intent == "candidate":
+
+        send_discord_channel_message(
+            DISCORD_BLABLATOIRE_CHANNEL_ID,
+            (
+                f"📨 <@{discord_user_id}>, ta **demande de candidature** "
+                "a bien été prise en compte. "
+                "Merci de patienter pendant qu'un recruteur "
+                "l'examine."
+            ),
+        )
+
+
 def log_v3_event_to_discord(
     guild_config,
     content,
@@ -16928,6 +17481,332 @@ def handle_message_component(
             "",
         )
     )
+
+    # ========================================================
+    # FREEBORN RECRUITMENT — APPLICATION DECISION
+    # ========================================================
+
+    recruit_action_match = re.fullmatch(
+        r"recruit_app_(accept|refuse):(\d+)",
+        str(custom_id),
+    )
+
+    if recruit_action_match:
+
+        if not interaction_is_recruitment_reviewer(
+            data
+        ):
+
+            return recruitment_access_denied()
+
+        action = str(
+            recruit_action_match.group(1)
+        )
+        application_id = int(
+            recruit_action_match.group(2)
+        )
+
+        application = get_recruitment_application(
+            application_id
+        )
+
+        if not application:
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        "ℹ️ Cette candidature n'existe plus.",
+                    "flags": 64,
+                },
+            })
+
+        if application["status"] != "pending":
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        (
+                            "ℹ️ Cette candidature a déjà été traitée "
+                            f"(`{application['status']}`)."
+                        ),
+                    "flags": 64,
+                },
+            })
+
+        actor_user_id = str(
+            data["member"]["user"]["id"]
+        )
+        applicant_user_id = str(
+            application["discord_user_id"]
+        )
+
+        if action == "accept":
+
+            member = get_discord_member_fresh(
+                application["guild_id"],
+                applicant_user_id,
+            )
+
+            if not member:
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            (
+                                "⏳ **Candidature pas encore validable**\n\n"
+                                "L'utilisateur n'est pas encore présent "
+                                "sur le serveur Discord."
+                            ),
+                        "flags": 64,
+                    },
+                })
+
+            if bool(member.get("pending", False)):
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            (
+                                "⏳ **Règlement Discord en attente**\n\n"
+                                f"<@{applicant_user_id}> doit d'abord "
+                                "terminer l'acceptation du règlement "
+                                "Discord natif avant que le recrutement "
+                                "puisse être ouvert."
+                            ),
+                        "flags": 64,
+                    },
+                })
+
+            guest_role_id = (
+                str(DISCORD_GUEST_ROLE_ID)
+                if DISCORD_GUEST_ROLE_ID
+                else None
+            )
+
+            member_roles = {
+                str(role_id)
+                for role_id
+                in (member.get("roles") or [])
+            }
+
+            if (
+                guest_role_id
+                and guest_role_id not in member_roles
+            ):
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            (
+                                "⏳ **Rôle Invité manquant**\n\n"
+                                f"<@{applicant_user_id}> est bien sur "
+                                "le serveur, mais le rôle **Invité** "
+                                "n'est pas encore présent. "
+                                "Aucune modification effectuée."
+                            ),
+                        "flags": 64,
+                    },
+                })
+
+            if not DISCORD_RECRUIT_ROLE_ID:
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            (
+                                "⚠️ Le rôle **Recrutement** "
+                                "n'est pas configuré dans Render."
+                            ),
+                        "flags": 64,
+                    },
+                })
+
+            role_response = add_discord_role(
+                application["guild_id"],
+                applicant_user_id,
+                DISCORD_RECRUIT_ROLE_ID,
+            )
+
+            if role_response.status_code not in (
+                200,
+                204,
+            ):
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            (
+                                "⚠️ Impossible d'attribuer le rôle "
+                                "**Recrutement**. "
+                                f"Discord HTTP {role_response.status_code}."
+                            ),
+                        "flags": 64,
+                    },
+                })
+
+            decided = decide_recruitment_application(
+                application_id,
+                "accepted",
+                actor_user_id,
+            )
+
+            if not decided:
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            "ℹ️ Cette candidature vient d'être traitée.",
+                        "flags": 64,
+                    },
+                })
+
+            set_member_status_v3(
+                application["guild_id"],
+                applicant_user_id,
+                "candidate",
+                changed_by_discord_user_id=
+                    actor_user_id,
+            )
+
+            add_audit_event_v3(
+                application["guild_id"],
+                "recruitment_application_accepted",
+                target_discord_user_id=
+                    applicant_user_id,
+                actor_discord_user_id=
+                    actor_user_id,
+                metadata_json=json.dumps({
+                    "application_id":
+                        application_id,
+                    "role_id":
+                        str(DISCORD_RECRUIT_ROLE_ID),
+                    "source":
+                        "landing",
+                }),
+            )
+
+            if DISCORD_BLABLATOIRE_CHANNEL_ID:
+
+                send_discord_channel_message(
+                    DISCORD_BLABLATOIRE_CHANNEL_ID,
+                    (
+                        f"✅ <@{applicant_user_id}>, ta candidature "
+                        "a été **validée**. "
+                        "L'accès **Recrutement** est maintenant ouvert. "
+                        "Tu peux poursuivre avec l'équipe Freeborn."
+                    ),
+                )
+
+            response_text = (
+                f"✅ **{recruitment_reference(application_id)} validée**\n"
+                f"Candidat : <@{applicant_user_id}>\n"
+                f"Validée par : <@{actor_user_id}>\n"
+                "Rôle **Recrutement** attribué."
+            )
+            decision_status = "✅ ACCEPTÉE"
+
+        else:
+
+            decided = decide_recruitment_application(
+                application_id,
+                "refused",
+                actor_user_id,
+            )
+
+            if not decided:
+
+                return jsonify({
+                    "type": 4,
+                    "data": {
+                        "content":
+                            "ℹ️ Cette candidature vient d'être traitée.",
+                        "flags": 64,
+                    },
+                })
+
+            add_audit_event_v3(
+                application["guild_id"],
+                "recruitment_application_refused",
+                target_discord_user_id=
+                    applicant_user_id,
+                actor_discord_user_id=
+                    actor_user_id,
+                metadata_json=json.dumps({
+                    "application_id":
+                        application_id,
+                    "source":
+                        "landing",
+                }),
+            )
+
+            if DISCORD_BLABLATOIRE_CHANNEL_ID:
+
+                send_discord_channel_message(
+                    DISCORD_BLABLATOIRE_CHANNEL_ID,
+                    (
+                        f"ℹ️ <@{applicant_user_id}>, ta demande "
+                        "d'accès au recrutement n'a pas été retenue. "
+                        "Ton accès **Invité** reste inchangé."
+                    ),
+                )
+
+            response_text = (
+                f"❌ **{recruitment_reference(application_id)} refusée**\n"
+                f"Utilisateur : <@{applicant_user_id}>\n"
+                f"Refusée par : <@{actor_user_id}>."
+            )
+            decision_status = "❌ REFUSÉE"
+
+        disabled_components = [
+            {
+                "type": 1,
+                "components": [
+                    {
+                        "type": 2,
+                        "style": 2,
+                        "label": decision_status,
+                        "custom_id":
+                            (
+                                "recruit_app_done:"
+                                + str(application_id)
+                            ),
+                        "disabled": True,
+                    },
+                ],
+            },
+        ]
+
+        edit_discord_channel_message_components(
+            application.get("discord_channel_id")
+                or DISCORD_CANDIDATURE_CHANNEL_ID,
+            application.get("discord_message_id"),
+            disabled_components,
+        )
+
+        if DISCORD_CANDIDATURE_CHANNEL_ID:
+
+            send_discord_channel_message(
+                DISCORD_CANDIDATURE_CHANNEL_ID,
+                response_text,
+            )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    response_text,
+                "flags":
+                    64,
+            },
+        })
 
     # ========================================================
     # FREEBORN REUNIONS — PARTICIPATION / CLOSURE
@@ -30988,10 +31867,10 @@ FREEBORN_DISCORD_INVITE_URL = os.environ.get(
 def freeborn_landing_page():
     """Public Freeborn Legacy entry portal.
 
-    This landing page deliberately does not perform authentication or assign
-    Discord roles. Both entry choices lead to the same permanent Discord
-    invitation; the recruitment transition remains a human decision inside
-    Discord.
+    Both entry choices now pass through a short Discord OAuth2 join flow.
+    The visitor path records only a welcome; the candidate path additionally
+    creates a staff-reviewed recruitment application. No Recruitment role is
+    granted until a human reviewer approves the request.
     """
 
     invite_url = escape(
@@ -31523,7 +32402,7 @@ body::after {{
             <div class="access-title">Accès</div>
 
             <div class="access-grid">
-                <a class="access-card" href="{invite_url}" target="_blank" rel="noopener noreferrer">
+                <a class="access-card" href="/discord/join/guest">
                     <span class="access-icon" aria-hidden="true"><img src="/assets/accueil/accueil_icon_visiteur.png" alt=""></span>
                     <span class="access-copy">
                         <strong>Visiter Freeborn</strong>
@@ -31532,7 +32411,7 @@ body::after {{
                     <span class="access-arrow" aria-hidden="true">›</span>
                 </a>
 
-                <a class="access-card" href="{invite_url}" target="_blank" rel="noopener noreferrer">
+                <a class="access-card" href="/discord/join/candidate">
                     <span class="access-icon" aria-hidden="true"><img src="/assets/accueil/accueil_icon_recrutement.png" alt=""></span>
                     <span class="access-copy">
                         <strong>Rejoindre Freeborn</strong>
@@ -31557,6 +32436,357 @@ body::after {{
 def home():
 
     return freeborn_landing_page()
+
+
+@app.route("/discord/join/<entry_intent>")
+def discord_join_start(
+    entry_intent
+):
+    """Identify the landing-page visitor with Discord, then join the guild."""
+
+    entry_intent = str(
+        entry_intent or ""
+    ).strip().lower()
+
+    if entry_intent not in {
+        "guest",
+        "candidate",
+    }:
+
+        return (
+            "Invalid Freeborn entry intent",
+            400,
+        )
+
+    if not DISCORD_CLIENT_SECRET:
+
+        return freeborn_web_page(
+            "Configuration Discord incomplète",
+            (
+                "Le portail Freeborn n'est pas encore configuré "
+                "pour l'identification Discord."
+            ),
+            status="warning",
+        ), 503
+
+    state = discord_join_serializer.dumps({
+        "entry_intent":
+            entry_intent,
+    })
+
+    params = {
+        "client_id":
+            str(DISCORD_APPLICATION_ID),
+        "response_type":
+            "code",
+        "redirect_uri":
+            str(DISCORD_JOIN_CALLBACK_URL),
+        "scope":
+            "identify guilds.join",
+        "state":
+            state,
+        "prompt":
+            "consent",
+    }
+
+    return redirect(
+        f"{DISCORD_OAUTH_AUTHORIZE_URL}?"
+        + urlencode(params)
+    )
+
+
+@app.route("/discord/join/callback")
+def discord_join_callback():
+    """Finish Discord OAuth, add the user, welcome them and queue candidacy."""
+
+    code = str(
+        request.args.get("code")
+        or ""
+    ).strip()
+    state = str(
+        request.args.get("state")
+        or ""
+    ).strip()
+
+    if not code or not state:
+
+        return freeborn_web_page(
+            "Connexion Discord annulée",
+            "Aucune autorisation Discord n'a été enregistrée.",
+            status="warning",
+        ), 400
+
+    try:
+
+        state_payload = (
+            discord_join_serializer.loads(
+                state,
+                max_age=
+                    DISCORD_JOIN_STATE_MAX_AGE,
+            )
+        )
+
+        entry_intent = str(
+            state_payload[
+                "entry_intent"
+            ]
+        )
+
+        if entry_intent not in {
+            "guest",
+            "candidate",
+        }:
+
+            raise ValueError(
+                "Invalid landing intent"
+            )
+
+    except (
+        SignatureExpired,
+        BadSignature,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+
+        return freeborn_web_page(
+            "Lien Discord expiré",
+            (
+                "Relance simplement ton accès depuis "
+                "la page d'accueil Freeborn Legacy."
+            ),
+            status="warning",
+        ), 410
+
+    token_response = requests.post(
+        DISCORD_OAUTH_TOKEN_URL,
+        data={
+            "client_id":
+                str(DISCORD_APPLICATION_ID),
+            "client_secret":
+                str(DISCORD_CLIENT_SECRET),
+            "grant_type":
+                "authorization_code",
+            "code":
+                code,
+            "redirect_uri":
+                str(DISCORD_JOIN_CALLBACK_URL),
+        },
+        headers={
+            "Content-Type":
+                "application/x-www-form-urlencoded",
+        },
+        timeout=20,
+    )
+
+    if token_response.status_code != 200:
+
+        print(
+            "Discord OAuth token exchange failed:",
+            token_response.status_code,
+            token_response.text,
+        )
+
+        return freeborn_web_page(
+            "Connexion Discord impossible",
+            (
+                "Discord n'a pas pu finaliser l'autorisation. "
+                "Relance l'accès depuis la page d'accueil."
+            ),
+            status="error",
+        ), 502
+
+    oauth_payload = token_response.json()
+    access_token = str(
+        oauth_payload.get(
+            "access_token"
+        )
+        or ""
+    )
+
+    user_response = requests.get(
+        f"{DISCORD_API}/users/@me",
+        headers={
+            "Authorization":
+                f"Bearer {access_token}",
+        },
+        timeout=15,
+    )
+
+    if user_response.status_code != 200:
+
+        return freeborn_web_page(
+            "Profil Discord indisponible",
+            (
+                "Freeborn n'a pas pu lire ton identité Discord. "
+                "Relance l'accès depuis la page d'accueil."
+            ),
+            status="error",
+        ), 502
+
+    discord_user = user_response.json()
+    discord_user_id = str(
+        discord_user.get("id")
+        or ""
+    )
+
+    if not discord_user_id:
+
+        return freeborn_web_page(
+            "Identité Discord invalide",
+            "Aucun identifiant Discord exploitable n'a été reçu.",
+            status="error",
+        ), 502
+
+    discord_username = (
+        discord_user.get("global_name")
+        or
+        discord_user.get("username")
+        or
+        discord_user_id
+    )
+
+    join_response = requests.put(
+        (
+            f"{DISCORD_API}/guilds/"
+            f"{DISCORD_GUILD_ID}/members/"
+            f"{discord_user_id}"
+        ),
+        headers={
+            "Authorization":
+                f"Bot {DISCORD_BOT_TOKEN}",
+            "Content-Type":
+                "application/json",
+        },
+        json={
+            "access_token":
+                access_token,
+        },
+        timeout=20,
+    )
+
+    if join_response.status_code not in (
+        201,
+        204,
+    ):
+
+        print(
+            "Discord guild join failed:",
+            join_response.status_code,
+            join_response.text,
+        )
+
+        return freeborn_web_page(
+            "Entrée Discord impossible",
+            (
+                "Freeborn n'a pas pu t'ajouter au serveur Discord. "
+                "Tu peux relancer l'opération depuis la page d'accueil."
+            ),
+            status="error",
+        ), 502
+
+    try:
+
+        set_member_status_v3(
+            DISCORD_GUILD_ID,
+            discord_user_id,
+            "guest",
+            changed_by_discord_user_id=
+                discord_user_id,
+        )
+
+    except Exception as error:
+
+        print(
+            "Landing guest status write failed:",
+            repr(error),
+        )
+
+    try:
+
+        send_landing_welcome_messages(
+            discord_user_id,
+            entry_intent,
+        )
+
+    except Exception as error:
+
+        print(
+            "Landing welcome failed:",
+            repr(error),
+        )
+
+    add_audit_event_v3(
+        DISCORD_GUILD_ID,
+        (
+            "landing_join_candidate"
+            if entry_intent == "candidate"
+            else "landing_join_guest"
+        ),
+        target_discord_user_id=
+            discord_user_id,
+        actor_discord_user_id=
+            discord_user_id,
+        metadata_json=json.dumps({
+            "source":
+                "landing",
+            "entry_intent":
+                entry_intent,
+        }),
+    )
+
+    if entry_intent == "candidate":
+
+        application = (
+            create_or_get_recruitment_application(
+                DISCORD_GUILD_ID,
+                discord_user_id,
+                discord_username,
+            )
+        )
+
+        if application["created"]:
+
+            try:
+
+                publish_recruitment_application(
+                    application[
+                        "application_id"
+                    ],
+                    discord_user_id,
+                    discord_username,
+                )
+
+            except Exception as error:
+
+                print(
+                    "Recruitment application publication failed:",
+                    repr(error),
+                )
+
+            add_audit_event_v3(
+                DISCORD_GUILD_ID,
+                "recruitment_application_requested",
+                target_discord_user_id=
+                    discord_user_id,
+                actor_discord_user_id=
+                    discord_user_id,
+                metadata_json=json.dumps({
+                    "application_id":
+                        application[
+                            "application_id"
+                        ],
+                    "source":
+                        "landing",
+                }),
+            )
+
+    # Open the permanent Freeborn invite after the identity/intention has
+    # been recorded. If the user is already a member, Discord simply opens
+    # the server.
+    return redirect(
+        FREEBORN_DISCORD_INVITE_URL
+    )
 
 
 # ============================================================
