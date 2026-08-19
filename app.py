@@ -473,7 +473,7 @@ FREEBORN_EVE_SCOPES = (
 DISCORD_API = "https://discord.com/api/v10"
 
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-REGLEMENT-WEB-P1"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-ACCUEIL-ASSETS-HOVER-P1"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -31051,7 +31051,7 @@ body::before {{
     background:
         linear-gradient(180deg, rgba(1, 7, 18, .48), rgba(1, 6, 16, .76)),
         radial-gradient(circle at 50% 42%, rgba(14, 118, 192, .12), transparent 45%),
-        url("/assets/freeborn-landing-bg.jpg") center top / cover no-repeat;
+        url("/assets/accueil/freeborn-landing-bg.jpg") center top / cover no-repeat;
     transform: scale(1.015);
 }}
 
@@ -31249,7 +31249,7 @@ body::after {{
 .access-card {{
     position: relative;
     display: grid;
-    grid-template-columns: 52px 1fr 24px;
+    grid-template-columns: 66px 1fr 24px;
     align-items: center;
     gap: 14px;
     min-height: 88px;
@@ -31287,42 +31287,40 @@ body::after {{
 .access-card:hover,
 .access-card:focus-visible {{
     transform: translateY(-2px);
-    border-color: rgba(121, 235, 255, .98);
+    border-color: #8dffc8;
     background:
-        linear-gradient(90deg, rgba(9, 49, 87, .87), rgba(4, 20, 41, .90)),
-        rgba(4, 16, 34, .92);
+        linear-gradient(90deg, rgba(42, 143, 105, .94), rgba(29, 99, 84, .97));
     box-shadow:
-        inset 0 0 28px rgba(0, 122, 210, .18),
-        0 0 22px rgba(0, 178, 255, .20);
+        0 0 24px rgba(101, 230, 172, .34),
+        inset 0 0 18px rgba(152, 255, 211, .08);
     outline: none;
 }}
 
 .access-icon {{
-    width: 46px;
-    height: 46px;
+    width: 62px;
+    height: 62px;
     display: grid;
     place-items: center;
-    border: 1px solid rgba(78, 221, 255, .72);
-    transform: rotate(45deg);
-    color: var(--fb-cyan-hot);
-    background: rgba(3, 18, 36, .86);
-    box-shadow: 0 0 14px rgba(0, 168, 255, .16);
+    align-self: center;
 }}
 
-.access-icon-inner {{
-    width: 38px;
-    height: 38px;
-    display: grid;
-    place-items: center;
-    transform: rotate(-45deg);
-}}
-
-.access-icon-inner img {{
+.access-icon img {{
     display: block;
-    width: 100%;
-    height: 100%;
+    width: 62px;
+    height: 62px;
     object-fit: contain;
-    filter: drop-shadow(0 0 7px rgba(45, 199, 255, .26));
+    filter: drop-shadow(0 0 8px rgba(45, 199, 255, .34));
+    transition:
+        transform .18s ease,
+        filter .18s ease;
+}}
+
+.access-card:hover .access-icon img,
+.access-card:focus-visible .access-icon img {{
+    transform: scale(1.045);
+    filter:
+        drop-shadow(0 0 10px rgba(141, 255, 200, .40))
+        drop-shadow(0 0 18px rgba(101, 230, 172, .18));
 }}
 
 .access-copy strong {{
@@ -31435,15 +31433,20 @@ body::after {{
     }}
 
     .access-card {{
-        grid-template-columns: 46px 1fr 18px;
+        grid-template-columns: 56px 1fr 18px;
         min-height: 92px;
         padding: 14px;
         gap: 12px;
     }}
 
     .access-icon {{
-        width: 40px;
-        height: 40px;
+        width: 52px;
+        height: 52px;
+    }}
+
+    .access-icon img {{
+        width: 52px;
+        height: 52px;
     }}
 
     .access-copy strong {{
@@ -31521,7 +31524,7 @@ body::after {{
 
             <div class="access-grid">
                 <a class="access-card" href="{invite_url}" target="_blank" rel="noopener noreferrer">
-                    <span class="access-icon" aria-hidden="true"><span class="access-icon-inner"><img src="/assets/icon-visiteur.png" alt=""></span></span>
+                    <span class="access-icon" aria-hidden="true"><img src="/assets/accueil/accueil_icon_visiteur.png" alt=""></span>
                     <span class="access-copy">
                         <strong>Visiter Freeborn</strong>
                         <small>Je souhaite rejoindre la communauté comme invité.</small>
@@ -31530,7 +31533,7 @@ body::after {{
                 </a>
 
                 <a class="access-card" href="{invite_url}" target="_blank" rel="noopener noreferrer">
-                    <span class="access-icon" aria-hidden="true"><span class="access-icon-inner"><img src="/assets/icon-recrutement.png" alt=""></span></span>
+                    <span class="access-icon" aria-hidden="true"><img src="/assets/accueil/accueil_icon_recrutement.png" alt=""></span>
                     <span class="access-copy">
                         <strong>Rejoindre Freeborn</strong>
                         <small>Je souhaite candidater pour intégrer la corporation.</small>
