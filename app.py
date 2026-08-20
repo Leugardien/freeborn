@@ -501,7 +501,7 @@ DISCORD_OAUTH_TOKEN_URL = (
 )
 
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P2"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P3"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -39147,67 +39147,117 @@ def register_commands():
         },
     ]
 
+    # Gunicorn/Render may import app.py in several worker processes at nearly
+    # the same time. Only ONE worker is allowed to register the guild slash
+    # commands. PostgreSQL advisory locking works across processes and Render
+    # workers sharing the same Neon database.
+    registration_lock_key = 735431906  # stable Freeborn-specific advisory key
+
     try:
 
-        response = requests.put(
-            url,
+        with psycopg.connect(DATABASE_URL) as lock_conn:
 
-            headers={
-                "Authorization":
-                    f"Bot {DISCORD_BOT_TOKEN}",
+            with lock_conn.cursor() as lock_cur:
 
-                "Content-Type":
-                    "application/json",
-            },
+                lock_cur.execute(
+                    "SELECT pg_try_advisory_lock(%s);",
+                    (registration_lock_key,),
+                )
 
-            json=
-                commands,
+                lock_acquired = bool(
+                    lock_cur.fetchone()[0]
+                )
 
-            timeout=
-                15,
-        )
+            if not lock_acquired:
 
-        if (
-            response.status_code
-            ==
-            200
-        ):
+                print(
+                    "Discord command registration skipped: "
+                    "another Freeborn worker owns the startup lock."
+                )
 
-            print(
-                "Commandes Discord enregistrées : "
-                "/freeborn, /reglement-corp, /fit-creer, /fit-liste, /fit-afficher, /fit-modifier, /fit-approuver, /fit-refuser, /fit-supprimer, "
-                "/reunion-officier, /reunion-direction, /reunion-haut-conseil, "
-                "/guide-membre, /guide-staff, /verification, "
-                "/alt-ajouter, /alt-supprimer, /main-changer, "
-                "/membre-info, /membre-liste, "
-                "/membre-promouvoir, /membre-supprimer, "
-                "/test-reset-legardien82, "
-                "/candidat-accepter, "
-                "/reglement-discord-panneau, "
-                "/bienvenue-panneau, "
-                "/orientation-panneau, "
-                "/reglement-corp-panneau, /charte-panneau, "
-                "/base-statut, /synchro-statut, "
-                "/synchro-verifier, /synchro-appliquer."
-            )
+                return
 
-        else:
+            try:
 
-            print(
-                "Discord command "
-                "registration failed:",
+                print(
+                    "Discord command registration started by this worker."
+                )
 
-                response.status_code,
+                response = requests.put(
+                    url,
 
-                response.text,
-            )
+                    headers={
+                        "Authorization":
+                            f"Bot {DISCORD_BOT_TOKEN}",
+
+                        "Content-Type":
+                            "application/json",
+                    },
+
+                    json=
+                        commands,
+
+                    timeout=
+                        20,
+                )
+
+                if response.status_code == 200:
+
+                    print(
+                        "Commandes Discord enregistrées : "
+                        "/freeborn, /reglement-corp, /fit-creer, /fit-liste, /fit-afficher, /fit-modifier, /fit-approuver, /fit-refuser, /fit-supprimer, "
+                        "/reunion-officier, /reunion-direction, /reunion-haut-conseil, "
+                        "/guide-membre, /guide-staff, /verification, "
+                        "/alt-ajouter, /alt-supprimer, /main-changer, "
+                        "/membre-info, /membre-liste, "
+                        "/membre-promouvoir, /membre-supprimer, "
+                        "/test-reset-legardien82, "
+                        "/candidat-accepter, "
+                        "/reglement-discord-panneau, "
+                        "/bienvenue-panneau, "
+                        "/orientation-panneau, "
+                        "/reglement-corp-panneau, /charte-panneau, "
+                        "/base-statut, /synchro-statut, "
+                        "/synchro-verifier, /synchro-appliquer."
+                    )
+
+                else:
+
+                    # Never dump an entire Cloudflare/HTML error page into Render.
+                    response_preview = (
+                        response.text
+                        or ""
+                    ).replace("\n", " ").replace("\r", " ")[:1000]
+
+                    print(
+                        "Discord command registration failed:",
+                        "HTTP",
+                        response.status_code,
+                        response_preview,
+                    )
+
+            finally:
+
+                try:
+
+                    with lock_conn.cursor() as lock_cur:
+
+                        lock_cur.execute(
+                            "SELECT pg_advisory_unlock(%s);",
+                            (registration_lock_key,),
+                        )
+
+                except Exception as unlock_error:
+
+                    print(
+                        "Discord command registration unlock warning:",
+                        repr(unlock_error),
+                    )
 
     except Exception as error:
 
         print(
-            "Discord command "
-            "registration error:",
-
+            "Discord command registration error:",
             repr(error),
         )
 
