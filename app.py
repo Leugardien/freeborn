@@ -501,7 +501,7 @@ DISCORD_OAUTH_TOKEN_URL = (
 )
 
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P2"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P4"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -39218,7 +39218,10 @@ def register_commands():
 
 init_database()
 
-register_commands()
+# Discord slash commands are intentionally NOT registered automatically
+# during Render/Gunicorn startup. Repeated bulk registration can trigger
+# Discord/Cloudflare HTTP 429 / Error 1015 rate limiting.
+# register_commands() remains available for a controlled maintenance action.
 
 
 # ============================================================
