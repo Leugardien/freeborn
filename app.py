@@ -501,7 +501,7 @@ DISCORD_OAUTH_TOKEN_URL = (
 )
 
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P1.1"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P1.2"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -12563,7 +12563,9 @@ def publish_recruitment_application(
 
     if not DISCORD_CANDIDATURE_CHANNEL_ID:
 
-        return None
+        raise RuntimeError(
+            "DISCORD_CANDIDATURE_CHANNEL_ID is not configured"
+        )
 
     reference = recruitment_reference(
         application_id
@@ -12668,19 +12670,54 @@ def publish_recruitment_application(
         payload,
     )
 
-    if (
-        response is not None
-        and response.status_code
-        in (200, 201)
-    ):
+    if response is None:
 
-        message = response.json()
-
-        set_recruitment_application_message(
-            application_id,
-            DISCORD_CANDIDATURE_CHANNEL_ID,
-            message.get("id"),
+        raise RuntimeError(
+            "Recruitment Discord publication returned no response"
         )
+
+    print(
+        "Recruitment application Discord publication:",
+        reference,
+        "channel=",
+        DISCORD_CANDIDATURE_CHANNEL_ID,
+        "HTTP",
+        response.status_code,
+        (response.text or "").replace("\n", " ")[:500],
+    )
+
+    if response.status_code not in (200, 201):
+
+        raise RuntimeError(
+            "Recruitment Discord publication failed "
+            f"HTTP {response.status_code}: "
+            f"{(response.text or '').replace(chr(10), ' ')[:500]}"
+        )
+
+    message = response.json()
+    message_id = str(
+        message.get("id")
+        or ""
+    ).strip()
+
+    if not message_id:
+
+        raise RuntimeError(
+            "Discord recruitment publication succeeded without message id"
+        )
+
+    set_recruitment_application_message(
+        application_id,
+        DISCORD_CANDIDATURE_CHANNEL_ID,
+        message_id,
+    )
+
+    print(
+        "Recruitment application linked in Neon:",
+        reference,
+        "message_id=",
+        message_id,
+    )
 
     return response
 
@@ -32685,21 +32722,71 @@ def discord_join_callback():
             status="error",
         ), 502
 
-    try:
+    guest_role_assigned = False
 
-        set_member_status_v3(
-            DISCORD_GUILD_ID,
-            discord_user_id,
-            "guest",
-            changed_by_discord_user_id=
-                discord_user_id,
-        )
-
-    except Exception as error:
+    if not DISCORD_GUEST_ROLE_ID:
 
         print(
-            "Landing guest status write failed:",
-            repr(error),
+            "Landing guest role assignment failed: "
+            "DISCORD_GUEST_ROLE_ID is not configured"
+        )
+
+    else:
+
+        try:
+
+            guest_role_response = add_discord_role(
+                DISCORD_GUILD_ID,
+                discord_user_id,
+                DISCORD_GUEST_ROLE_ID,
+            )
+
+            print(
+                "Landing guest role assignment:",
+                discord_user_id,
+                "role=",
+                DISCORD_GUEST_ROLE_ID,
+                "HTTP",
+                guest_role_response.status_code,
+                (guest_role_response.text or "").replace("\n", " ")[:500],
+            )
+
+            guest_role_assigned = (
+                guest_role_response.status_code
+                in (200, 204)
+            )
+
+        except Exception as error:
+
+            print(
+                "Landing guest role assignment exception:",
+                repr(error),
+            )
+
+    if guest_role_assigned:
+
+        try:
+
+            set_member_status_v3(
+                DISCORD_GUILD_ID,
+                discord_user_id,
+                "guest",
+                changed_by_discord_user_id=
+                    discord_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "Landing guest status write failed:",
+                repr(error),
+            )
+
+    else:
+
+        print(
+            "Landing guest status not written because the Discord Invité "
+            "role was not confirmed."
         )
 
     try:
@@ -32745,7 +32832,12 @@ def discord_join_callback():
             )
         )
 
-        if application["created"]:
+        needs_publication = (
+            application["created"]
+            or not application.get("discord_message_id")
+        )
+
+        if needs_publication:
 
             try:
 
@@ -32761,8 +32853,14 @@ def discord_join_callback():
 
                 print(
                     "Recruitment application publication failed:",
+                    "application_id=",
+                    application["application_id"],
+                    "user_id=",
+                    discord_user_id,
                     repr(error),
                 )
+
+        if application["created"]:
 
             add_audit_event_v3(
                 DISCORD_GUILD_ID,
