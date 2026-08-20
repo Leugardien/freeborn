@@ -501,7 +501,7 @@ DISCORD_OAUTH_TOKEN_URL = (
 )
 
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P1"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P1.1"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -38890,7 +38890,10 @@ def register_commands():
 
 init_database()
 
-register_commands()
+# P1.1 — keep the proven P1 interaction/recruitment code unchanged.
+# Discord slash commands are NOT bulk-registered automatically at startup.
+# This avoids triggering the current Discord/Cloudflare 429 / Error 1015.
+# register_commands() remains available for a later explicit maintenance run.
 
 
 # ============================================================
