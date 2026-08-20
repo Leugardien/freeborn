@@ -501,7 +501,7 @@ DISCORD_OAUTH_TOKEN_URL = (
 )
 
 # Production build identifier.
-FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P1"
+FREEBORN_BUILD_VERSION = "FREEBORN-V3-RECRUTEMENT-INTENT-P2"
 print(
     "FREEBORN BUILD:",
     FREEBORN_BUILD_VERSION,
@@ -576,6 +576,24 @@ discord_join_serializer = URLSafeTimedSerializer(
 )
 
 DISCORD_JOIN_STATE_MAX_AGE = 900
+
+
+# ============================================================
+# FREEBORN RECRUITMENT TEST ACCOUNT
+# ============================================================
+
+# Dedicated Discord account used only for repeated end-to-end recruitment tests.
+# The reset slash-command below is deliberately locked to this exact account so
+# it can never become a generic production data-deletion command by mistake.
+FREEBORN_RECRUITMENT_TEST_USER_ID = os.environ.get(
+    "FREEBORN_RECRUITMENT_TEST_USER_ID",
+    "1535665351440863354",
+)
+
+FREEBORN_RECRUITMENT_TEST_USERNAME = os.environ.get(
+    "FREEBORN_RECRUITMENT_TEST_USERNAME",
+    "LeGardien82",
+)
 
 
 # ============================================================
@@ -12391,6 +12409,115 @@ def get_recruitment_application(application_id):
     }
 
 
+def reset_recruitment_test_account(
+    guild_id,
+):
+    """
+    Remove only the dedicated recruitment test account from Freeborn Neon data.
+
+    This is intentionally NOT a generic member deletion helper. It is locked to
+    FREEBORN_RECRUITMENT_TEST_USER_ID and exists only to replay the complete
+    landing -> Discord -> recruitment workflow from a clean state.
+    """
+
+    test_user_id = str(
+        FREEBORN_RECRUITMENT_TEST_USER_ID
+        or ""
+    ).strip()
+
+    if not test_user_id:
+
+        raise RuntimeError(
+            "FREEBORN_RECRUITMENT_TEST_USER_ID is not configured"
+        )
+
+    deleted = {}
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            # Policy acceptances must be cleared too; otherwise later tests of
+            # /reglement-corp and /charte-corp would incorrectly appear already
+            # completed for the same test account.
+            cur.execute(
+                """
+                DELETE FROM policy_acceptances
+                WHERE guild_id = %s
+                AND discord_user_id = %s;
+                """,
+                (str(guild_id), test_user_id),
+            )
+            deleted["policy_acceptances"] = cur.rowcount
+
+            # Guild-scoped EVE test identity, if a later end-to-end test reached
+            # EVE SSO. This does not touch any other Discord account.
+            cur.execute(
+                """
+                DELETE FROM guild_eve_characters
+                WHERE guild_id = %s
+                AND discord_user_id = %s;
+                """,
+                (str(guild_id), test_user_id),
+            )
+            deleted["guild_eve_characters"] = cur.rowcount
+
+            # Legacy/global EVE profile rows are also tied directly to the same
+            # dedicated test Discord ID.
+            cur.execute(
+                """
+                DELETE FROM eve_characters
+                WHERE discord_user_id = %s;
+                """,
+                (test_user_id,),
+            )
+            deleted["eve_characters"] = cur.rowcount
+
+            cur.execute(
+                """
+                DELETE FROM recruitment_applications
+                WHERE guild_id = %s
+                AND discord_user_id = %s;
+                """,
+                (str(guild_id), test_user_id),
+            )
+            deleted["recruitment_applications"] = cur.rowcount
+
+            cur.execute(
+                """
+                DELETE FROM member_statuses
+                WHERE guild_id = %s
+                AND discord_user_id = %s;
+                """,
+                (str(guild_id), test_user_id),
+            )
+            deleted["member_statuses"] = cur.rowcount
+
+            # Test audit rows are removed last. Production users' audit history
+            # remains untouched.
+            cur.execute(
+                """
+                DELETE FROM audit_log
+                WHERE guild_id = %s
+                AND (
+                    target_discord_user_id = %s
+                    OR actor_discord_user_id = %s
+                );
+                """,
+                (str(guild_id), test_user_id, test_user_id),
+            )
+            deleted["audit_log"] = cur.rowcount
+
+        conn.commit()
+
+    return {
+        "discord_user_id": test_user_id,
+        "discord_username": FREEBORN_RECRUITMENT_TEST_USERNAME,
+        "deleted": deleted,
+        "deleted_total": sum(deleted.values()),
+    }
+
+
 def set_recruitment_application_message(
     application_id,
     channel_id,
@@ -12563,7 +12690,9 @@ def publish_recruitment_application(
 
     if not DISCORD_CANDIDATURE_CHANNEL_ID:
 
-        return None
+        raise RuntimeError(
+            "DISCORD_CANDIDATURE_CHANNEL_ID is not configured"
+        )
 
     reference = recruitment_reference(
         application_id
@@ -12668,19 +12797,50 @@ def publish_recruitment_application(
         payload,
     )
 
-    if (
-        response is not None
-        and response.status_code
-        in (200, 201)
-    ):
+    if response is None:
 
-        message = response.json()
-
-        set_recruitment_application_message(
-            application_id,
-            DISCORD_CANDIDATURE_CHANNEL_ID,
-            message.get("id"),
+        raise RuntimeError(
+            "Recruitment Discord publication returned no response"
         )
+
+    print(
+        "Recruitment application Discord publication:",
+        reference,
+        "channel=",
+        DISCORD_CANDIDATURE_CHANNEL_ID,
+        "HTTP",
+        response.status_code,
+        response.text[:1000],
+    )
+
+    if response.status_code not in (200, 201):
+
+        raise RuntimeError(
+            "Recruitment Discord publication failed "
+            f"HTTP {response.status_code}: {response.text[:1000]}"
+        )
+
+    message = response.json()
+    message_id = str(message.get("id") or "").strip()
+
+    if not message_id:
+
+        raise RuntimeError(
+            "Discord recruitment publication succeeded without message id"
+        )
+
+    set_recruitment_application_message(
+        application_id,
+        DISCORD_CANDIDATURE_CHANNEL_ID,
+        message_id,
+    )
+
+    print(
+        "Recruitment application linked in Neon:",
+        reference,
+        "message_id=",
+        message_id,
+    )
 
     return response
 
@@ -32685,21 +32845,71 @@ def discord_join_callback():
             status="error",
         ), 502
 
-    try:
+    guest_role_assigned = False
 
-        set_member_status_v3(
-            DISCORD_GUILD_ID,
-            discord_user_id,
-            "guest",
-            changed_by_discord_user_id=
-                discord_user_id,
-        )
-
-    except Exception as error:
+    if not DISCORD_GUEST_ROLE_ID:
 
         print(
-            "Landing guest status write failed:",
-            repr(error),
+            "Landing guest role assignment failed: "
+            "DISCORD_GUEST_ROLE_ID is not configured"
+        )
+
+    else:
+
+        try:
+
+            guest_role_response = add_discord_role(
+                DISCORD_GUILD_ID,
+                discord_user_id,
+                DISCORD_GUEST_ROLE_ID,
+            )
+
+            print(
+                "Landing guest role assignment:",
+                discord_user_id,
+                "role=",
+                DISCORD_GUEST_ROLE_ID,
+                "HTTP",
+                guest_role_response.status_code,
+                guest_role_response.text[:1000],
+            )
+
+            guest_role_assigned = (
+                guest_role_response.status_code
+                in (200, 204)
+            )
+
+        except Exception as error:
+
+            print(
+                "Landing guest role assignment exception:",
+                repr(error),
+            )
+
+    if guest_role_assigned:
+
+        try:
+
+            set_member_status_v3(
+                DISCORD_GUILD_ID,
+                discord_user_id,
+                "guest",
+                changed_by_discord_user_id=
+                    discord_user_id,
+            )
+
+        except Exception as error:
+
+            print(
+                "Landing guest status write failed:",
+                repr(error),
+            )
+
+    else:
+
+        print(
+            "Landing guest status not written because the Discord Invité "
+            "role was not confirmed."
         )
 
     try:
@@ -32745,7 +32955,12 @@ def discord_join_callback():
             )
         )
 
-        if application["created"]:
+        needs_publication = (
+            application["created"]
+            or not application.get("discord_message_id")
+        )
+
+        if needs_publication:
 
             try:
 
@@ -32761,8 +32976,14 @@ def discord_join_callback():
 
                 print(
                     "Recruitment application publication failed:",
+                    "application_id=",
+                    application["application_id"],
+                    "user_id=",
+                    discord_user_id,
                     repr(error),
                 )
+
+        if application["created"]:
 
             add_audit_event_v3(
                 DISCORD_GUILD_ID,
@@ -34394,6 +34615,10 @@ def interactions():
         "synchro-appliquer",
     }
 
+    CEO_ONLY_COMMANDS = {
+        "test-reset-legardien82",
+    }
+
     AUDIT_VIEWER_COMMANDS = {
         "membre-liste",
         "base-statut",
@@ -34404,6 +34629,7 @@ def interactions():
     TECHNICAL_CHANNEL_COMMANDS = {
         "membre-supprimer",
         "membre-liste",
+        "test-reset-legardien82",
         "base-statut",
         "synchro-statut",
         "synchro-verifier",
@@ -34433,6 +34659,30 @@ def interactions():
         return (
             staff_access_denied(data)
         )
+
+
+    if (
+        command_name
+        in CEO_ONLY_COMMANDS
+
+        and
+
+        not interaction_has_any_role(
+            data,
+            configured_role_ids(DISCORD_CEO_ROLE_ID),
+        )
+    ):
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content":
+                    "⛔ **Accès refusé**\n\n"
+                    "Cette commande de test est exclusivement réservée "
+                    "au **CEO**.",
+                "flags": 64,
+            },
+        })
 
 
     if (
@@ -35125,6 +35375,67 @@ def interactions():
                 ],
             },
         })
+
+    # ========================================================
+    # /test-reset-legardien82
+    # CEO-ONLY — TARGETED NEON RESET FOR RECRUITMENT TESTS
+    # ========================================================
+
+    if command_name == "test-reset-legardien82":
+
+        try:
+
+            reset_result = reset_recruitment_test_account(
+                guild_id
+            )
+
+        except Exception as error:
+
+            print(
+                "Recruitment test reset failed:",
+                repr(error),
+            )
+
+            return jsonify({
+                "type": 4,
+                "data": {
+                    "content":
+                        "❌ **RAZ test Neon impossible**\n\n"
+                        f"Erreur : `{escape(str(error))}`",
+                    "flags": 64,
+                },
+            })
+
+        deleted = reset_result["deleted"]
+
+        print(
+            "Recruitment test account reset completed:",
+            reset_result,
+        )
+
+        return jsonify({
+            "type": 4,
+            "data": {
+                "content": (
+                    "🧪 **RAZ TEST RECRUTEMENT TERMINÉE**\n\n"
+                    f"Compte : **{FREEBORN_RECRUITMENT_TEST_USERNAME}** "
+                    f"(`{FREEBORN_RECRUITMENT_TEST_USER_ID}`)\n\n"
+                    "Données Neon supprimées :\n"
+                    f"• recruitment_applications : `{deleted['recruitment_applications']}`\n"
+                    f"• member_statuses : `{deleted['member_statuses']}`\n"
+                    f"• policy_acceptances : `{deleted['policy_acceptances']}`\n"
+                    f"• guild_eve_characters : `{deleted['guild_eve_characters']}`\n"
+                    f"• eve_characters : `{deleted['eve_characters']}`\n"
+                    f"• audit_log : `{deleted['audit_log']}`\n\n"
+                    f"Total : **{reset_result['deleted_total']}** ligne(s).\n\n"
+                    "Le compte de test peut maintenant recommencer le "
+                    "parcours depuis la landing. S'il est encore présent "
+                    "sur Discord, fais-le quitter le serveur avant le test."
+                ),
+                "flags": 64,
+            },
+        })
+
 
     # ========================================================
     # /candidat-accepter
@@ -38755,6 +39066,22 @@ def register_commands():
 
         {
             "name":
+                "test-reset-legardien82",
+
+            "description":
+                "RAZ Neon du compte LeGardien82 pour les tests recrutement",
+
+            "type":
+                1,
+
+            # Test/maintenance command: hidden by default and additionally
+            # restricted to the CEO in the interaction handler.
+            "default_member_permissions":
+                "0",
+        },
+
+        {
+            "name":
                 "base-statut",
 
             "description":
@@ -38854,6 +39181,7 @@ def register_commands():
                 "/alt-ajouter, /alt-supprimer, /main-changer, "
                 "/membre-info, /membre-liste, "
                 "/membre-promouvoir, /membre-supprimer, "
+                "/test-reset-legardien82, "
                 "/candidat-accepter, "
                 "/reglement-discord-panneau, "
                 "/bienvenue-panneau, "
